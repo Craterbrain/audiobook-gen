@@ -99,7 +99,94 @@ def cancel(job_id: str) -> None:
 
 
 def remove(job_id: str) -> None:
-    _locked(lambda: _write([j for j in load() if j["id"] != job_id or j["status"] == "running"]))
+    remove_many([job_id])
+
+
+def remove_many(ids: list[str]) -> int:
+    """Take jobs off the list (not one that is being made: pause or cancel it first). Returns how many were removed."""
+    gone = []
+
+    def go():
+        jobs = load()
+        keep = []
+        for j in jobs:
+            if j["id"] in ids and j["status"] != "running":
+                gone.append(j["id"])
+            else:
+                keep.append(j)
+        _write(keep)
+    _locked(go)
+    return len(gone)
+
+
+def hold(ids: list[str]) -> int:
+    """Save for later / pause: a waiting job will not start, and one being made is stopped (its clips are kept)."""
+    n = []
+
+    def go():
+        jobs = load()
+        for j in jobs:
+            if j["id"] in ids and j["status"] in ("queued", "paused", "running"):
+                j["note"] = "paused by you" if j["status"] == "running" else "saved for later"
+                j["status"] = "held"; n.append(1)
+        _write(jobs)
+    _locked(go)
+    return len(n)
+
+
+def resume(ids: list[str]) -> int:
+    n = []
+
+    def go():
+        jobs = load()
+        for j in jobs:
+            if j["id"] in ids and j["status"] == "held":
+                j["status"], j["note"] = "queued", ""; n.append(1)
+        _write(jobs)
+    _locked(go)
+    return len(n)
+
+
+def move(ids: list[str], where: str) -> None:
+    """Reorder: the runner takes the first job that is ready, so earlier = sooner. where: top | up | down | bottom.
+    The selected jobs keep their order among themselves. (A job already being made is not interrupted.)"""
+    def go():
+        jobs = load()
+        sel = [j for j in jobs if j["id"] in ids]
+        rest = [j for j in jobs if j["id"] not in ids]
+        if where == "top":
+            jobs = sel + rest
+        elif where == "bottom":
+            jobs = rest + sel
+        else:
+            order = list(jobs)
+            seq = range(len(order)) if where == "up" else reversed(range(len(order)))
+            for i in seq:
+                if order[i]["id"] in ids:
+                    k = i - 1 if where == "up" else i + 1
+                    if 0 <= k < len(order) and order[k]["id"] not in ids:
+                        order[i], order[k] = order[k], order[i]
+            jobs = order
+        _write(jobs)
+    _locked(go)
+
+
+def set_schedule(ids: list[str], not_before: str = "", window: str = "") -> int:
+    """Give the jobs a new start time and daily window ("" and "" = as soon as possible, any time)."""
+    if not_before:
+        datetime.strptime(not_before, FMT)
+    if window:
+        _parse_window(window)
+    n = []
+
+    def go():
+        jobs = load()
+        for j in jobs:
+            if j["id"] in ids and j["status"] not in ("done", "failed"):
+                j["not_before"], j["window"] = not_before, window; n.append(1)
+        _write(jobs)
+    _locked(go)
+    return len(n)
 
 
 # ---------- scheduling ----------
@@ -244,10 +331,10 @@ class Runner:
             self._beat()
             code = proc.poll()
             cur = next((j for j in load() if j["id"] == job["id"]), None)
-            if cur is None or cur["status"] == "cancelled":
+            if cur is None or cur["status"] in ("cancelled", "held"):
                 if code is None:
                     _kill_group(proc)
-                return "cancelled"
+                return "cancelled" if cur is None or cur["status"] == "cancelled" else "held"
             if code is not None:
                 return "ok" if code == 0 else "failed"
             if stage == "synth":
@@ -266,11 +353,14 @@ class Runner:
                     return "stalled"
 
     def run_job(self, job: dict) -> None:
+        fresh = next((j for j in load() if j["id"] == job["id"]), None)
+        if fresh is None or fresh["status"] not in ACTIVE:              # held or cancelled in the instant before it started
+            return
         update(job["id"], status="running", started=job.get("started") or time.strftime(FMT), note="")
         for stage, cmd in (("synth", self.synth_cmd(job)), ("assemble", self.assemble_cmd(job))):
             while True:
                 cur = next((j for j in load() if j["id"] == job["id"]), job)
-                if cur["status"] == "cancelled":
+                if cur["status"] in ("cancelled", "held"):
                     return
                 if stage == "synth" and not in_window(job.get("window", ""), self.now()):
                     update(job["id"], status="paused", note="waiting for its daily window")
@@ -280,7 +370,7 @@ class Runner:
                 result = self._watch(job, proc, stage)
                 if result == "ok":
                     break
-                if result == "cancelled":
+                if result in ("cancelled", "held"):
                     return
                 if result == "window":
                     update(job["id"], status="paused", note="paused: outside its daily window (finished clips are kept)")
@@ -292,6 +382,9 @@ class Runner:
                            note=f"gave up after {self.max_restarts} restarts; see work/queue/{job['id']}.log")
                     return
                 time.sleep(self.retry_wait)
+        cur = next((j for j in load() if j["id"] == job["id"]), job)
+        if cur["status"] in ("cancelled", "held"):
+            return
         done = Path(job["out"]).exists() and Path(job["out"]).stat().st_size > 0
         update(job["id"], status="done" if done else "failed", finished=time.strftime(FMT),
                note="" if done else "the audiobook file was not created", progress="finished" if done else "")
@@ -458,6 +551,8 @@ def table(now: datetime | None = None) -> list[list]:
         when = ""
         if j["status"] in ("queued", "paused"):
             when = next_start(j, now)
+        elif j["status"] == "held":
+            when = "when you resume it"
         rows.append([j["title"][:40], j["status"], j.get("progress", ""), when, j.get("window") or "any time",
                      j.get("note", ""), j["id"]])
     return rows

@@ -982,7 +982,7 @@ def gen_panel(project, shown):
 
 
 # ---------- Queue ----------
-QUEUE_HEADERS = ["Book", "Status", "Progress", "Starts", "Window", "Note", "id"]
+QUEUE_HEADERS = ["#", "Book", "Status", "Progress", "Starts", "Window", "Note", "id"]
 
 
 def queue_status() -> str:
@@ -994,13 +994,14 @@ def queue_status() -> str:
              ("🔴 **The queue runner is stopped** (you stopped it) — press “Start the queue runner”. Nothing is made until you do."
               if jobqueue.STOPPED.exists() else
               "🔴 **The queue runner is not running** — press “Start the queue runner”. Jobs wait until it is."))
-            + f"  {waiting} waiting · {sum(j['status'] == 'running' for j in jobs)} running · {sum(j['status'] == 'done' for j in jobs)} done")
+            + f"  {waiting} waiting · {sum(j['status'] == 'running' for j in jobs)} running · "
+              f"{sum(j['status'] == 'held' for j in jobs)} saved for later · {sum(j['status'] == 'done' for j in jobs)} done")
 
 
 def queue_table():
     from . import jobqueue
     import pandas as _pd
-    return _pd.DataFrame(jobqueue.table(), columns=QUEUE_HEADERS)
+    return _pd.DataFrame([[i + 1, *r] for i, r in enumerate(jobqueue.table())], columns=QUEUE_HEADERS)
 
 
 def queue_now() -> str:
@@ -1031,8 +1032,56 @@ def runner_button():
             else gr.update(value="Start the queue runner", variant="primary"))
 
 
-def queue_refresh():
-    return queue_status(), queue_table(), queue_now(), runner_button()
+def queue_pick_update(picked=None):
+    """The tick list of books (in queue order). Ticks you made are kept while the list refreshes."""
+    from . import jobqueue
+    jobs = jobqueue.load()
+    choices = [(f"{i + 1}. {j['title'][:44]} — {j['status']}", j["id"]) for i, j in enumerate(jobs)]
+    return gr.update(choices=choices, value=[x for x in (picked or []) if x in {j["id"] for j in jobs}])
+
+
+def queue_refresh(picked=None):
+    return queue_status(), queue_table(), queue_now(), runner_button(), queue_pick_update(picked)
+
+
+def _need(picked):
+    if not picked:
+        raise gr.Error("Tick one or more books in the list first.")
+    return list(picked)
+
+
+def queue_move(picked, where):
+    from . import jobqueue
+    jobqueue.move(_need(picked), where)
+    return {"top": "Moved to the top.", "up": "Moved up.", "down": "Moved down.", "bottom": "Moved to the bottom."}[where] + \
+           " (A book that is already being made is not interrupted; pause it to start another first.)", *queue_refresh(picked)
+
+
+def queue_hold(picked):
+    from . import jobqueue
+    n = jobqueue.hold(_need(picked))
+    return (f"Paused / saved for later: {n} book(s). Clips already made are kept; press Resume to put them back in line." if n else
+            "Nothing to pause (finished books can’t be paused)."), *queue_refresh(picked)
+
+
+def queue_resume(picked):
+    from . import jobqueue
+    n = jobqueue.resume(_need(picked))
+    return (f"Resumed {n} book(s)." if n else "None of those were paused or saved for later."), *queue_refresh(picked)
+
+
+def queue_reschedule(picked, when, window_on, w_start, w_stop):
+    from . import jobqueue
+    not_before, window = _parse_schedule(when, window_on, w_start, w_stop)
+    n = jobqueue.set_schedule(_need(picked), not_before, window)
+    return (f"New schedule for {n} book(s): " + (f"from {not_before}" if not_before else "as soon as possible") +
+            (f", only between {window}." if window else ", any time of day.")), *queue_refresh(picked)
+
+
+def queue_asap(picked):
+    from . import jobqueue
+    n = jobqueue.set_schedule(_need(picked), "", "")
+    return f"{n} book(s) will start as soon as the GPU is free, at any time of day.", *queue_refresh(picked)
 
 
 def queue_toggle_runner():
@@ -1047,11 +1096,9 @@ def queue_toggle_runner():
     return msg, *queue_refresh()
 
 
-def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop):
+def _parse_schedule(when, window_on, w_start, w_stop) -> tuple[str, str]:
+    """(start time "YYYY-MM-DD HH:MM" or "", window "23:00-06:30" or "") from the schedule controls."""
     from . import jobqueue
-    work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-                                          emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
     not_before = ""
     if when:
         try:
@@ -1064,6 +1111,15 @@ def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para,
         if not (re.fullmatch(r"\d{1,2}:\d{2}", (w_start or "").strip()) and re.fullmatch(r"\d{1,2}:\d{2}", (w_stop or "").strip())):
             raise gr.Error("Write the window as times like 23:00 and 06:30.")
         window = f"{w_start.strip()}-{w_stop.strip()}"
+    return not_before, window
+
+
+def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop):
+    from . import jobqueue
+    work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+                                          emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
+    not_before, window = _parse_schedule(when, window_on, w_start, w_stop)
     all_chapters = {int(r["#"]) for _, r in chap_df.iterrows()}
     chapters = sorted(only) if only and only != all_chapters else None
     jq_job = jobqueue.add(str(work), title or work.name, author or "", cover or "", "", "", chapters, not_before, window)
@@ -1073,11 +1129,11 @@ def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para,
             ". It is watched: if it stalls or crashes it is restarted."), *queue_refresh()
 
 
-def queue_open(job_id):
+def queue_open(picked):
     from . import jobqueue
-    j = next((x for x in jobqueue.load() if x["id"] == job_id), None)
+    j = next((x for x in jobqueue.load() if x["id"] in _need(picked)), None)
     if not j:
-        raise gr.Error("Click a job in the table first.")
+        raise gr.Error("Tick a book in the list first.")
     return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 
 
@@ -1091,27 +1147,21 @@ def reconnect_on_load(project):
     return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 
 
-def queue_pick(df, evt: gr.SelectData):
-    try:
-        return str(df.iloc[evt.index[0]]["id"])
-    except Exception:
-        return ""
-
-
-def queue_cancel(job_id):
+def queue_cancel(picked):
     from . import jobqueue
-    if not job_id:
-        raise gr.Error("Click a job in the table first.")
-    jobqueue.cancel(job_id)
-    return "Cancelled. Clips already made are kept.", *queue_refresh()
+    n = 0
+    for j in jobqueue.load():
+        if j["id"] in _need(picked) and j["status"] not in ("done", "failed", "cancelled"):
+            jobqueue.cancel(j["id"]); n += 1
+    return (f"Cancelled {n} book(s). Clips already made are kept." if n else "Nothing to cancel."), *queue_refresh(picked)
 
 
-def queue_remove(job_id):
+def queue_remove(picked):
     from . import jobqueue
-    if not job_id:
-        raise gr.Error("Click a job in the table first.")
-    jobqueue.remove(job_id)
-    return "Removed from the list.", *queue_refresh()
+    ids = _need(picked)
+    n = jobqueue.remove_many(ids)
+    left = len(ids) - n
+    return (f"Removed {n} book(s) from the list." + (f" {left} is being made right now: pause or cancel it first." if left else "")), *queue_refresh([])
 
 
 # ---------- Assistant ----------
@@ -1394,11 +1444,24 @@ def build_ui() -> gr.Blocks:
                     q_runner = gr.Button(**runner_button_args())
                 q_msg = gr.Markdown()
                 q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=False, wrap=True,
-                                     label="Queue (click a row, then cancel or remove it)")
-                q_sel = gr.State("")
+                                     label="Queue — the book at the top is made first")
+                q_pick = gr.CheckboxGroup(choices=[], value=[], label="Select books (tick one or more, then use the buttons below)")
                 with gr.Row():
-                    q_cancel = gr.Button("Cancel the selected job"); q_remove = gr.Button("Remove it from the list")
-                q_open = gr.Button("Open the selected book in the other tabs")
+                    q_top = gr.Button("⏫ To the top"); q_up = gr.Button("🔼 Up"); q_down = gr.Button("🔽 Down"); q_bottom = gr.Button("⏬ To the bottom")
+                with gr.Row():
+                    q_hold = gr.Button("⏸ Pause / save for later"); q_resume = gr.Button("▶️ Resume")
+                    q_cancel = gr.Button("Cancel"); q_remove = gr.Button("Remove from list")
+                    q_open = gr.Button("Open in the other tabs")
+                with gr.Accordion("Change the schedule of the ticked books", open=False):
+                    gr.Markdown("Switch one book or a whole batch to a new start time or overnight hours.")
+                    with gr.Row():
+                        qs_when = gr.DateTime(label="Start at", include_time=True, type="string", scale=2)
+                        qs_win = gr.Checkbox(label="Only run overnight", value=False, scale=1)
+                        qs_w1 = gr.Textbox("23:00", label="from", scale=1)
+                        qs_w2 = gr.Textbox("06:30", label="until", scale=1)
+                    with gr.Row():
+                        qs_apply = gr.Button("Apply this schedule", variant="primary")
+                        qs_asap = gr.Button("Start as soon as possible, any time")
                 q_timer = gr.Timer(10)
 
             with gr.Tab("✨ Assistant"):
@@ -1570,23 +1633,30 @@ def build_ui() -> gr.Blocks:
         lookup_btn.click(lex_lookup, [project, lex_df, lang_tb, wiki_tb, bible_cb, offline_cb], [lex_df, status3])
         save_lex_btn.click(save_lexicon, [project, lex_df], status3)
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
+        QOUT = [q_state, q_tbl, q_now, q_runner, q_pick]
+        QMSG = [q_msg] + QOUT
         go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2],
-                 status4).then(queue_refresh, None, [q_state, q_tbl, q_now, q_runner])
+                 status4).then(queue_refresh, q_pick, QOUT)
         stop.click(gen_stop, project, status4)
         gen_shown = gr.State("")
         q_timer.tick(gen_panel, [project, gen_shown], [status4, m4b, ch1, gen_shown])
         q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
-        q_runner.click(queue_toggle_runner, None, [q_msg, q_state, q_tbl, q_now, q_runner])
-        q_tbl.select(queue_pick, q_tbl, q_sel)
-        q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl, q_now, q_runner])
-        q_remove.click(queue_remove, q_sel, [q_msg, q_state, q_tbl, q_now, q_runner])
+        q_runner.click(queue_toggle_runner, None, QMSG)
+        for btn, where in ((q_top, "top"), (q_up, "up"), (q_down, "down"), (q_bottom, "bottom")):
+            btn.click(lambda picked, w=where: queue_move(picked, w), q_pick, QMSG)
+        q_hold.click(queue_hold, q_pick, QMSG)
+        q_resume.click(queue_resume, q_pick, QMSG)
+        q_cancel.click(queue_cancel, q_pick, QMSG)
+        q_remove.click(queue_remove, q_pick, QMSG)
+        qs_apply.click(queue_reschedule, [q_pick, qs_when, qs_win, qs_w1, qs_w2], QMSG)
+        qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
                         mode, single_dd, single_speed, single_group, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
-        q_open.click(queue_open, q_sel, open_outputs)
-        ui.load(queue_refresh, None, [q_state, q_tbl, q_now, q_runner])          # reconnect: show the queue as it is right now
+        q_open.click(queue_open, q_pick, open_outputs)
+        ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs)              # and open the book that is being made
-        q_timer.tick(queue_refresh, None, [q_state, q_tbl, q_now, q_runner])
+        q_timer.tick(queue_refresh, q_pick, QOUT)
         a_go.click(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],

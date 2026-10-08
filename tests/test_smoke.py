@@ -609,3 +609,69 @@ def test_stop_and_start_the_queue_runner(tmp_path, monkeypatch):
     assert "stopped" in gui.queue_status()
     jq.start_runner()
     assert not jq.STOPPED.exists() and started                              # now it may start again
+
+
+def test_queue_reorder_hold_resume_remove_and_reschedule(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    ids = [jq.add(str(work), t)["id"] for t in "ABCDE"]
+    names = lambda: "".join(j["title"] for j in jq.load())
+    jq.move([ids[3]], "top");               assert names() == "DABCE"
+    jq.move([ids[0], ids[2]], "down");      assert names() == "DBAEC"
+    jq.move([ids[4]], "up");                assert names() == "DBEAC"
+    jq.move([ids[3]], "bottom");            assert names() == "BEACD"
+    jq.move([ids[1]], "up");                assert names() == "BEACD"            # already first: stays put
+    assert jq.hold([ids[1], ids[2]]) == 2
+    st = {j["title"]: j["status"] for j in jq.load()}
+    assert st["B"] == st["C"] == "held" and st["A"] == "queued"
+    from datetime import datetime
+    assert not jq.due([j for j in jq.load() if j["title"] == "B"][0], datetime.now())     # a held job never starts
+    assert jq.resume([ids[1]]) == 1 and [j for j in jq.load() if j["title"] == "B"][0]["status"] == "queued"
+    assert jq.set_schedule([ids[0], ids[4]], "2026-10-12 23:00", "22:00-05:00") == 2
+    a = [j for j in jq.load() if j["title"] == "A"][0]
+    assert a["not_before"] == "2026-10-12 23:00" and a["window"] == "22:00-05:00"
+    jq.set_schedule([ids[0]], "", "");  assert [j for j in jq.load() if j["title"] == "A"][0]["window"] == ""
+    import pytest
+    with pytest.raises(ValueError):
+        jq.set_schedule([ids[0]], "tomorrow-ish", "")
+    jq.update(ids[2], status="running")
+    assert jq.remove_many([ids[2], ids[3]]) == 1 and "C" in names() and "D" not in names()      # a running book is never removed
+
+
+def test_queue_pausing_a_running_book_stops_it_and_keeps_it_for_later(tmp_path, monkeypatch):
+    import sys, threading, time
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    job = jq.add(str(work), "Long book", out=str(tmp_path / "x.m4b"))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "import time; (open(%r,'w')).write('x'); time.sleep(60)" % str(work / "clips" / "a.wav")]
+    (work / "clips").mkdir()
+    threading.Timer(1.0, lambda: jq.hold([job["id"]])).start()
+    t0 = time.time()
+    R(poll=0.2, stall=30, grace=30, foreign=lambda: "").step()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert time.time() - t0 < 15 and j["status"] == "held" and j["note"] == "paused by you"      # stopped promptly, not failed
+    assert R(foreign=lambda: "").step() is False                                              # and it does not start again by itself
+    jq.resume([job["id"]])
+    assert [x for x in jq.load() if x["id"] == job["id"]][0]["status"] == "queued"
+
+
+def test_queue_tab_actions(tmp_path, monkeypatch):
+    from audiobook_gen import gui
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "runner_alive", lambda: True)
+    ids = [jq.add(str(work), t)["id"] for t in ("One", "Two", "Three")]
+    titles = lambda: [j["title"] for j in jq.load()]
+    import pytest
+    with pytest.raises(Exception):
+        gui.queue_move([], "top")                                                   # nothing ticked: a clear message
+    msg, state, table, now, btn, pick = gui.queue_move([ids[2]], "top")
+    assert titles() == ["Three", "One", "Two"] and list(table["#"]) == [1, 2, 3] and list(table["Book"]) == titles()
+    assert pick["value"] == [ids[2]]                                                  # the ticks survive a refresh
+    assert [c[0].split(". ")[1].split(" —")[0] for c in pick["choices"]] == titles()
+    assert "Paused" in gui.queue_hold([ids[0], ids[1]])[0] and "2 saved for later" in gui.queue_status()
+    assert gui.queue_table().set_index("id").loc[ids[0], "Starts"] == "when you resume it"
+    assert "Resumed 1" in gui.queue_resume([ids[0]])[0]
+    r = gui.queue_reschedule([ids[0], ids[1]], "2026-10-12 23:00:00", True, "22:00", "05:00")
+    assert "2 book(s)" in r[0] and all(j["window"] == "22:00-05:00" for j in jq.load() if j["id"] in ids[:2])
+    assert "as soon as the GPU is free" in gui.queue_asap([ids[0]])[0] and [j for j in jq.load() if j["id"] == ids[0]][0]["window"] == ""
+    assert "Cancelled 1" in gui.queue_cancel([ids[1]])[0]
+    assert "Removed 2" in gui.queue_remove([ids[1], ids[2]])[0] and titles() == ["One"]
