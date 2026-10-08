@@ -23,6 +23,10 @@ TAGS = {"cried": (.15, -.05), "shouted": (.2, -.08), "exclaimed": (.15, -.05), "
         "gently": (-.12, .08), "softly": (-.15, .1), "quietly": (-.15, .1), "timid": (-.12, .08), "timidly": (-.12, .08),
         "angrily": (.2, -.1), "furiously": (.25, -.1), "eagerly": (.1, -.05), "joyfully": (.12, -.05), "sadly": (-.1, .1),
         "bitterly": (.1, .0), "coldly": (-.05, .1), "trembling": (-.05, .05), "pale": (-.05, .05)}
+SHORT_WORDS = 6          # chunks shorter than this are pulled toward calm in proportion to their length
+SHORT_MAX_EXAG, SHORT_MIN_CFG = 0.55, 0.40
+EXCLAIM_EXAG = 0.70      # one- or two-word exclamations
+MAX_EXAG = 0.9
 WORD = re.compile(r"[a-z]+")
 
 _pipe = None
@@ -66,6 +70,7 @@ def delivery(segs: list[dict], chunks: list[list[str]], base: float = 0.0) -> li
         ex = sum(p.get(k, 0) * TABLE[k][0] for k in TABLE)
         cfg = sum(p.get(k, 0) * TABLE[k][1] for k in TABLE)
         dialogue = seg.get("kind") == "dialogue"
+        words = len(chunks[i][j].split())
         if not dialogue:   # narration stays close to calm
             ex = TABLE["neutral"][0] + 0.35 * (ex - TABLE["neutral"][0])
             cfg = TABLE["neutral"][1] + 0.35 * (cfg - TABLE["neutral"][1])
@@ -76,7 +81,20 @@ def delivery(segs: list[dict], chunks: list[list[str]], base: float = 0.0) -> li
                     tag += " " + segs[k]["text"]
             dex, dcfg = tag_shift(tag)
             ex, cfg = ex + dex, cfg + dcfg
-            if chunks[i][j].rstrip().endswith("!"):
+            if chunks[i][j].rstrip().endswith("!") and words >= 4:
                 ex += 0.06
-        out[i][j] = {"exaggeration": round(max(0.25, min(1.0, ex + base)), 2), "cfg_weight": round(max(0.15, min(0.7, cfg)), 2)}
+        if words < SHORT_WORDS:     # a word or two says little about the feeling, and extremes on so little audio screech
+            if chunks[i][j].rstrip().endswith("!"):     # a short exclamation is loud on purpose: about 0.7, never more
+                ex = EXCLAIM_EXAG if words <= 2 else max(0.55, min(ex, EXCLAIM_EXAG))
+                cfg = max(min(cfg, 0.40), 0.35)
+            else:
+                f = words / SHORT_WORDS
+                ex = TABLE["neutral"][0] + f * (ex - TABLE["neutral"][0])
+                cfg = TABLE["neutral"][1] + f * (cfg - TABLE["neutral"][1])
+                ex, cfg = min(ex, SHORT_MAX_EXAG), max(cfg, SHORT_MIN_CFG)
+            ex = min(ex + base, EXCLAIM_EXAG) if chunks[i][j].rstrip().endswith("!") else ex + base
+            out[i][j] = {"exaggeration": round(max(0.25, ex), 2), "cfg_weight": round(max(0.15, min(0.7, cfg)), 2)}
+            continue
+        ex = min(ex + base, MAX_EXAG)
+        out[i][j] = {"exaggeration": round(max(0.25, ex), 2), "cfg_weight": round(max(0.15, min(0.7, cfg)), 2)}
     return out
