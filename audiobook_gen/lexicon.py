@@ -537,7 +537,8 @@ class Preprocessor:
         self.map = {}
         if mode == "verified":
             lexicon = [{"term": k, "respell": v["respell"]} for k, v in verified_respellings().items()] + \
-                      [e for e in lexicon if e.get("source") == "user" and e.get("respell")]
+                      [e for e in lexicon if e.get("respell") and (e.get("respell_src") == "user" or
+                                                                   (not e.get("respell_src") and e.get("source") == "user"))]   # typed by you, not auto-made from IPA
         for e in ([] if mode == "plain" else lexicon):
             val = (e.get(field) or "").strip()
             if mode == "respell":

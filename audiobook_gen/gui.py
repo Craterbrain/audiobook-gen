@@ -921,7 +921,7 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
     cfg = _cfg(project)
     cfg.update(crossfade_ms=int(crossfade), workers={**(cfg.get("workers") or {}), "kokoro": int(kokoro_workers)},
                f5_precision="float16" if f5_half else "float32")
-    cfg["pacing_ms"] = {**cfg["pacing_ms"], "sentence": int(p_sent), "paragraph": int(p_para),
+    cfg["pacing_ms"] = {**(cfg.get("pacing_ms") or {}), "sentence": int(p_sent), "paragraph": int(p_para),
                         "speaker_change": int(p_speaker), "continuation": int(p_cont), "tag": int(p_tag)}
     cfg["emotion"], cfg["emotion_base"] = bool(emotion), float(emo_base)
     cfg["workers"] = {**cfg["workers"], "chatterbox": int(cb_workers)}
@@ -932,29 +932,45 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
     return work, cfg, _selected(chap_df)
 
 
-def generate(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers=4, f5_half=True,
-             emotion=False, emo_base=0.0, lex_label=None, p_cont=140, p_tag=120, cb_workers=1):
+def generate_queued(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+                    emotion, emo_base, lex_label, p_cont, p_tag, cb_workers):
+    """The Generate button: add the book to the queue to start as soon as the GPU is free. The queue runner makes it, watches it,
+    and keeps going if this app is closed."""
+    msg, *_ = queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+                        emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, "", False, "23:00", "06:30")
+    return msg + " Follow it on the **Queue** tab; the finished file appears here."
+
+
+def gen_stop(project):
     from . import jobqueue
-    running = [j["title"] for j in jobqueue.load() if j["status"] == "running"]
-    if running:
-        raise gr.Error(f"A queued job (“{running[0]}”) is using the GPU. Wait for it, or cancel it on the Queue tab.")
-    work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-                                          emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
-    vram = gpu_vram_gib()
-    if int(cb_workers) > 1 and vram and vram < 16:
-        yield (f"Heads up: Chatterbox with {int(cb_workers)} workers needs about 16 GB of GPU memory and this card has {vram:.0f} GB. "
-               "It may run out of memory; if it stalls, set it back to 1."), None, None
-    jobqueue.QUEUE.mkdir(parents=True, exist_ok=True)
-    jobqueue.GUI_LOCK.write_text(str(os.getpid()))              # the queue waits while this holds the GPU
-    try:
-        for done, total, msg in synthesize_iter(work, cfg, only):
-            yield f"Synthesizing {done}/{total} — {msg}", None, None
-        yield "Assembling chapters + M4B…", None, None
-        out = assemble(work, cfg, ROOT / "out" / f"{work.name}.m4b", cover, title, author, only)
-    finally:
-        jobqueue.GUI_LOCK.unlink(missing_ok=True)
-    first = sorted((work / "chapters").glob("*.wav"))
-    yield f"Done → `{out}`", str(out), (str(first[0]) if first else None)
+    work = str(_wd(project).resolve())
+    mine = [j for j in jobqueue.load() if j["work"] == work and j["status"] in ("queued", "paused", "running")]
+    for j in mine:
+        jobqueue.cancel(j["id"])
+    return f"Cancelled {len(mine)} job(s) for this book. Clips already made are kept." if mine else "Nothing of this book is queued."
+
+
+def gen_panel(project, shown):
+    """The Generate tab's status for this book's newest job: progress while it runs, the file when it is done."""
+    from . import jobqueue
+    if not project:
+        return gr.skip(), gr.skip(), gr.skip(), shown
+    work = str(Path(project).resolve())
+    jobs = [j for j in jobqueue.load() if j["work"] == work]
+    if not jobs:
+        return gr.skip(), gr.skip(), gr.skip(), shown
+    j = jobs[-1]
+    if j["status"] == "done":
+        out = Path(j["out"])
+        if shown == str(out):
+            return f"Done → `{out}`", gr.skip(), gr.skip(), shown
+        first = sorted((Path(project) / "chapters").glob("*.wav"))
+        return f"Done → `{out}`", str(out), (str(first[0]) if first else None), str(out)
+    if j["status"] == "running":
+        r = jobqueue.now_running() or {}
+        return (f"Making it — {r.get('pct', 0)}% ({r.get('done', 0):,} of {r.get('total', 0):,} clips)" if r.get("total") else
+                f"Making it — {r.get('note') or 'starting'}"), gr.skip(), gr.skip(), shown
+    return f"{j['status'].capitalize()}: {j.get('note') or 'waiting for its turn'} (starts {jobqueue.next_start(j, datetime.now())})", gr.skip(), gr.skip(), shown
 
 
 # ---------- Queue ----------
@@ -1299,7 +1315,7 @@ def build_ui() -> gr.Blocks:
                     lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[0], scale=3,
                                       label="How names and hard words are spoken by F5, Chatterbox and Qwen3")
                 with gr.Row():
-                    go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Stop")
+                    go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Cancel")
                 status4 = gr.Markdown()
                 with gr.Row():
                     m4b = gr.File(label="M4B"); ch1 = gr.Audio(label="First chapter (preview)")
@@ -1512,10 +1528,12 @@ def build_ui() -> gr.Blocks:
         lookup_btn.click(lex_lookup, [project, lex_df, lang_tb, wiki_tb, bible_cb, offline_cb], [lex_df, status3])
         save_lex_btn.click(save_lexicon, [project, lex_df], status3)
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
-        run = go.click(generate, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers],
-                       [status4, m4b, ch1])
-        run.then(speed_text, project, speed_md)
-        stop.click(None, cancels=[run])
+        go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers],
+                 status4).then(queue_refresh, None, [q_state, q_tbl, q_now])
+        stop.click(gen_stop, project, status4)
+        gen_shown = gr.State("")
+        q_timer.tick(gen_panel, [project, gen_shown], [status4, m4b, ch1, gen_shown])
+        q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
         q_add.click(queue_add, gen_inputs + [q_when, q_win, q_w1, q_w2], [q_msg, q_state, q_tbl, q_now])
         q_runner.click(queue_start_runner, None, [q_msg, q_state, q_tbl, q_now])

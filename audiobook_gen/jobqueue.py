@@ -25,7 +25,7 @@ QUEUE = ROOT / "work" / "queue"
 JOBS = QUEUE / "jobs.json"
 HEARTBEAT = QUEUE / "heartbeat"
 SUPERVISOR_PID = QUEUE / "supervisor.pid"
-GUI_LOCK = QUEUE / "gui_generate.lock"          # the GUI's own Generate button holds this while it uses the GPU
+GUI_LOCK = QUEUE / "gui_generate.lock"          # reserved: anything in the app that holds the GPU for long writes its pid here and the queue waits
 
 STALL = 600           # seconds without a new clip before the job is restarted
 START_GRACE = 900     # model loading and emotion analysis write no clips for a while

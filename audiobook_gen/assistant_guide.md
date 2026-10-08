@@ -38,6 +38,8 @@ workers: {kokoro: 4, f5: 1, qwen3: 1, chatterbox: 1}   # chatterbox 2 needs 16 G
 ## lexicon.json
 A list of entries: `{"term": "Weena", "ipa": "ˈwiːnə", "respell": "", "kind": "name", "source": "auto"}`.
 - `ipa` (standard IPA) is what Kokoro speaks; `respell` is a plain-English spelling for F5-style engines.
-- When you add or change an entry, set `"source": "user"` so the app never overwrites it. Keep every other field.
+- When you add or change an entry, set `"source": "user"` so the app never overwrites it, and if you write a `respell`, also set
+  `"respell_src": "user"`. Chatterbox voices use ONLY respellings marked `respell_src: user`; the `ipa` field is used by Kokoro
+  voices. Keep every other field.
 - Only change entries the person asks about or that are clearly wrong. Do not delete entries.
 - Keep the file valid JSON.

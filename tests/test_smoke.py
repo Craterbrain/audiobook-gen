@@ -503,3 +503,32 @@ def test_gui_opens_a_saved_project_without_reading_the_book_again(tmp_path):
     assert proj == str(p) and title == "T" and list(chap["#"]) == [1] and "Opened" in msg
     roles, seg_df, status, *_ = gui.load_parsed(proj)
     assert roles[0][0] == "Narrator" and len(seg_df) == 1
+
+
+def test_generate_button_queues_the_book_and_cancel_stops_it(tmp_path, monkeypatch):
+    import pandas as pd
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue"); monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    p = _assistant_project(tmp_path)
+    chap = pd.DataFrame([[True, 1, "One", 6]], columns=gui.CHAP_COLS)
+    msg = gui.generate_queued(str(p), chap, "My Book", "Me", "", 60, 350, 700, 250, 4, True, True, 0.0,
+                              list(gui.LEX_MODES)[0], 140, 120, 1)
+    jobs = jq.load()
+    assert len(jobs) == 1 and jobs[0]["status"] == "queued" and jobs[0]["not_before"] == "" and jobs[0]["window"] == ""
+    assert "Queue" in msg
+    status, *_ = gui.gen_panel(str(p), "")
+    assert status.startswith("Queued")
+    assert "Cancelled 1" in gui.gen_stop(str(p)) and jq.load()[0]["status"] == "cancelled"
+    jq.update(jobs[0]["id"], status="done", out=str(tmp_path / "x.m4b"))
+    (tmp_path / "x.m4b").write_bytes(b"x")
+    assert gui.gen_panel(str(p), "")[0].startswith("Done")
+
+
+def test_chatterbox_lexicon_uses_only_respellings_you_typed():
+    from audiobook_gen.lexicon import Preprocessor
+    lex = [{"term": "Weena", "respell": "Weenuh", "respell_src": "user", "source": "user"},
+           {"term": "Filby", "ipa": "ˈfɪlbi", "respell": "filbee", "respell_src": "auto", "source": "user"},   # made from IPA you typed
+           {"term": "Eloi", "respell": "eloy", "source": "auto"}]
+    out = Preprocessor(lex, "verified")("Weena met Filby and the Eloi.")
+    assert "Weenuh" in out and "Filby" in out and "filbee" not in out and "Eloi" in out
