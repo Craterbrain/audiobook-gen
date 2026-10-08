@@ -561,3 +561,16 @@ def test_generate_button_uses_the_schedule_on_the_generate_tab(tmp_path, monkeyp
                               list(gui.LEX_MODES)[0], 140, 120, 1, "2026-10-09 23:00:00", True, "23:00", "06:30")
     job = jq.load()[0]
     assert job["not_before"] == "2026-10-09 23:00" and job["window"] == "23:00-06:30" and "2026-10-09 23:00" in msg
+
+
+def test_chatterbox_workers_toggle(tmp_path, monkeypatch):
+    import pandas as pd, yaml
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue"); monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    p = _assistant_project(tmp_path)
+    chap = pd.DataFrame([[True, 1, "One", 6]], columns=gui.CHAP_COLS)
+    for toggle, want in ((True, 2), (False, 1)):
+        gui.generate_queued(str(p), chap, "B", "A", "", 60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, toggle)
+        assert yaml.safe_load((p / "config.yaml").read_text())["workers"]["chatterbox"] == want
+    assert gui.gen_settings(str(p))[-1] is False                       # the toggle shows what is saved

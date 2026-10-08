@@ -908,7 +908,12 @@ def gen_settings(project):
     pm = cfg.get("pacing_ms") or {}
     return (bool(cfg.get("emotion")), float(cfg.get("emotion_base", 0.0)), label,
             int(pm.get("continuation", 140)), int(pm.get("tag", 120)),
-            int((cfg.get("workers") or {}).get("chatterbox", 1)))
+            int((cfg.get("workers") or {}).get("chatterbox", 1)) >= 2)
+
+
+def chatterbox_workers(toggle) -> int:
+    """The Chatterbox toggle: off = 1 worker, on = 2. (A plain number is accepted too.)"""
+    return (2 if toggle else 1) if isinstance(toggle, bool) else max(1, min(2, int(toggle or 1)))
 
 
 def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
@@ -923,7 +928,7 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
     cfg["pacing_ms"] = {**(cfg.get("pacing_ms") or {}), "sentence": int(p_sent), "paragraph": int(p_para),
                         "speaker_change": int(p_speaker), "continuation": int(p_cont), "tag": int(p_tag)}
     cfg["emotion"], cfg["emotion_base"] = bool(emotion), float(emo_base)
-    cfg["workers"] = {**cfg["workers"], "chatterbox": int(cb_workers)}
+    cfg["workers"] = {**cfg["workers"], "chatterbox": chatterbox_workers(cb_workers)}
     if lex_label in LEX_MODES:
         cfg["text_lexicon"] = LEX_MODES[lex_label]
     _save_cfg(project, {**_cfg(project), **{k: cfg[k] for k in ("emotion", "emotion_base", "text_lexicon", "crossfade_ms", "pacing_ms") if k in cfg},
@@ -935,9 +940,12 @@ def generate_queued(project, chap_df, title, author, cover, crossfade, p_sent, p
                     emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when="", window_on=False, w_start="23:00", w_stop="06:30"):
     """The Generate button: add the book to the queue to start as soon as the GPU is free. The queue runner makes it, watches it,
     and keeps going if this app is closed."""
+    vram = gpu_vram_gib()
+    warn = (f" ⚠️ Two Chatterbox workers need about 16 GB of GPU memory and this card has {vram:.0f} GB; if it stalls, turn that off."
+            if chatterbox_workers(cb_workers) > 1 and vram and vram < 16 else "")
     msg, *_ = queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
                         emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop)
-    return msg + " Follow it on the **Queue** tab; the finished file appears here."
+    return msg + " Follow it on the **Queue** tab; the finished file appears here." + warn
 
 
 def gen_stop(project):
@@ -1342,8 +1350,9 @@ def build_ui() -> gr.Blocks:
                     gr.Markdown("### Chatterbox only")
                     emo_base = gr.Slider(-0.3, 0.3, 0.0, step=0.05, label="Emotion offset (− calmer, + more dramatic) — Chatterbox only",
                                          info="Works with “Emotion from the text” ticked. The other voices have no emotion control.")
-                    cb_workers = gr.Slider(1, 2, 1, step=1, label="Workers at once (2 is about 22% faster, ~4–8 GB of GPU memory each) — Chatterbox only",
-                                           info="Not recommended for GPUs with less than 16 GB of VRAM.")
+                    cb_workers = gr.Checkbox(value=False, label="Use two workers at once — Chatterbox only",
+                                             info="About 22% faster, but needs ~4–8 GB of GPU memory each. Not recommended for GPUs with less than 16 GB of VRAM. "
+                                                  "Off = one worker.")
                     with gr.Row():
                         with gr.Column():
                             gr.Markdown("### Kokoro only")
