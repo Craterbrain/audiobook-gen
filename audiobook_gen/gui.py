@@ -5,6 +5,7 @@ from datetime import datetime
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -990,7 +991,9 @@ def queue_status() -> str:
     alive = jobqueue.runner_alive()
     waiting = sum(j["status"] in ("queued", "paused") for j in jobs)
     return (("🟢 **Queue runner is running and watching every job.**" if alive else
-             "🔴 **The queue runner is not running** — press “Start the queue runner”. Jobs wait until it is.")
+             ("🔴 **The queue runner is stopped** (you stopped it) — press “Start the queue runner”. Nothing is made until you do."
+              if jobqueue.STOPPED.exists() else
+              "🔴 **The queue runner is not running** — press “Start the queue runner”. Jobs wait until it is."))
             + f"  {waiting} waiting · {sum(j['status'] == 'running' for j in jobs)} running · {sum(j['status'] == 'done' for j in jobs)} done")
 
 
@@ -1015,14 +1018,33 @@ def queue_now() -> str:
     return "Nothing is queued."
 
 
-def queue_refresh():
-    return queue_status(), queue_table(), queue_now()
-
-
-def queue_start_runner():
+def runner_button_args() -> dict:
     from . import jobqueue
-    started = jobqueue.ensure_supervisor()
-    return ("Started the queue runner." if started else "The queue runner was already running."), *queue_refresh()
+    return ({"value": "Stop the queue runner", "variant": "stop"} if jobqueue.runner_alive()
+            else {"value": "Start the queue runner", "variant": "primary"})
+
+
+def runner_button():
+    """The button shows the opposite of the runner's state: Stop while it runs, Start while it does not."""
+    from . import jobqueue
+    return (gr.update(value="Stop the queue runner", variant="stop") if jobqueue.runner_alive()
+            else gr.update(value="Start the queue runner", variant="primary"))
+
+
+def queue_refresh():
+    return queue_status(), queue_table(), queue_now(), runner_button()
+
+
+def queue_toggle_runner():
+    from . import jobqueue
+    running = jobqueue.runner_alive()
+    msg = jobqueue.stop_runner() if running else jobqueue.start_runner()
+    if not running:                                   # give it a moment to report in
+        for _ in range(20):
+            if jobqueue.runner_alive():
+                break
+            time.sleep(0.5)
+    return msg, *queue_refresh()
 
 
 def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
@@ -1369,7 +1391,7 @@ def build_ui() -> gr.Blocks:
                 q_state = gr.Markdown(queue_status())
                 q_now = gr.Markdown(queue_now())
                 with gr.Row():
-                    q_runner = gr.Button("Start the queue runner")
+                    q_runner = gr.Button(**runner_button_args())
                 q_msg = gr.Markdown()
                 q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=False, wrap=True,
                                      label="Queue (click a row, then cancel or remove it)")
@@ -1549,22 +1571,22 @@ def build_ui() -> gr.Blocks:
         save_lex_btn.click(save_lexicon, [project, lex_df], status3)
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
         go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2],
-                 status4).then(queue_refresh, None, [q_state, q_tbl, q_now])
+                 status4).then(queue_refresh, None, [q_state, q_tbl, q_now, q_runner])
         stop.click(gen_stop, project, status4)
         gen_shown = gr.State("")
         q_timer.tick(gen_panel, [project, gen_shown], [status4, m4b, ch1, gen_shown])
         q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
-        q_runner.click(queue_start_runner, None, [q_msg, q_state, q_tbl, q_now])
+        q_runner.click(queue_toggle_runner, None, [q_msg, q_state, q_tbl, q_now, q_runner])
         q_tbl.select(queue_pick, q_tbl, q_sel)
-        q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl, q_now])
-        q_remove.click(queue_remove, q_sel, [q_msg, q_state, q_tbl, q_now])
+        q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl, q_now, q_runner])
+        q_remove.click(queue_remove, q_sel, [q_msg, q_state, q_tbl, q_now, q_runner])
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
                         mode, single_dd, single_speed, single_group, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
         q_open.click(queue_open, q_sel, open_outputs)
-        ui.load(queue_refresh, None, [q_state, q_tbl, q_now])          # reconnect: show the queue as it is right now
+        ui.load(queue_refresh, None, [q_state, q_tbl, q_now, q_runner])          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs)              # and open the book that is being made
-        q_timer.tick(queue_refresh, None, [q_state, q_tbl, q_now])
+        q_timer.tick(queue_refresh, None, [q_state, q_tbl, q_now, q_runner])
         a_go.click(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],

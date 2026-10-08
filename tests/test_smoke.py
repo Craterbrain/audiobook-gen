@@ -370,6 +370,8 @@ def _queue_env(tmp_path, monkeypatch):
     monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue")
     monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
     monkeypatch.setattr(jq, "HEARTBEAT", tmp_path / "queue" / "heartbeat")
+    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED"):                      # never touch the real queue's files
+        monkeypatch.setattr(jq, name, tmp_path / "queue" / name.lower())
     work = tmp_path / "book"; work.mkdir()
     (work / "segments.json").write_text("[]")
     return jq, work
@@ -574,3 +576,36 @@ def test_chatterbox_workers_toggle(tmp_path, monkeypatch):
         gui.generate_queued(str(p), chap, "B", "A", "", 60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, toggle)
         assert yaml.safe_load((p / "config.yaml").read_text())["workers"]["chatterbox"] == want
     assert gui.gen_settings(str(p))[-1] is False                       # the toggle shows what is saved
+
+
+def test_stop_and_start_the_queue_runner(tmp_path, monkeypatch):
+    import subprocess, sys, time
+    from audiobook_gen import jobqueue as jq, gui
+    q = tmp_path / "queue"; q.mkdir()
+    for name, val in (("QUEUE", q), ("JOBS", q / "jobs.json"), ("HEARTBEAT", q / "heartbeat"), ("RUNNER_PID", q / "runner.pid"),
+                      ("JOB_PID", q / "job.pid"), ("SUPERVISOR_PID", q / "supervisor.pid"), ("STOPPED", q / "stopped")):
+        monkeypatch.setattr(jq, name, val)
+    monkeypatch.setattr(jq, "service_active", lambda: False)
+    monkeypatch.setattr(jq, "service_installed", lambda: False)
+    monkeypatch.setattr(jq, "supervisor_running", lambda: False)
+    # three stand-ins for the supervisor, the runner and a job in progress, each in its own process group
+    procs = {}
+    for name, tag, path in (("sup", "jobqueue", jq.SUPERVISOR_PID), ("run", "jobqueue", jq.RUNNER_PID), ("job", "audiobook_gen", jq.JOB_PID)):
+        pr = subprocess.Popen([sys.executable, "-c", f"import time  # {tag}\ntime.sleep(60)"], start_new_session=True)
+        path.write_text(str(pr.pid)); procs[name] = pr
+    work = tmp_path / "book"; work.mkdir(); (work / "segments.json").write_text("[]")
+    job = jq.add(str(work), "Book"); jq.update(job["id"], status="running")
+    jq.HEARTBEAT.write_text(str(time.time()))
+    started = []
+    real_popen = jq.subprocess.Popen
+    assert jq.runner_alive() and gui.runner_button()["value"] == "Stop the queue runner"
+    assert "Stopped" in jq.stop_runner()
+    monkeypatch.setattr(jq.subprocess, "Popen", lambda *a, **k: started.append(a) or None)     # from here on, record launches only
+    for pr in procs.values():
+        assert pr.wait(timeout=20) is not None                         # all three ended, including the job
+    assert not jq.runner_alive() and gui.runner_button()["value"] == "Start the queue runner"
+    assert [x for x in jq.load() if x["id"] == job["id"]][0]["status"] == "queued"      # the job resumes later
+    assert jq.STOPPED.exists() and jq.ensure_supervisor() is False and not started          # nothing restarts it behind your back
+    assert "stopped" in gui.queue_status()
+    jq.start_runner()
+    assert not jq.STOPPED.exists() and started                              # now it may start again

@@ -25,6 +25,10 @@ QUEUE = ROOT / "work" / "queue"
 JOBS = QUEUE / "jobs.json"
 HEARTBEAT = QUEUE / "heartbeat"
 SUPERVISOR_PID = QUEUE / "supervisor.pid"
+RUNNER_PID = QUEUE / "runner.pid"
+JOB_PID = QUEUE / "job.pid"                     # the job's process group, so Stop can end it too
+STOPPED = QUEUE / "stopped"                      # you stopped the runner on purpose: the app must not restart it behind your back
+SERVICE = "audiobook-queue.service"
 GUI_LOCK = QUEUE / "gui_generate.lock"          # reserved: anything in the app that holds the GPU for long writes its pid here and the queue waits
 
 STALL = 600           # seconds without a new clip before the job is restarted
@@ -208,7 +212,12 @@ class Runner:
         QUEUE.mkdir(parents=True, exist_ok=True)
         log = open(QUEUE / f"{job['id']}.log", "ab")
         env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1"}
-        return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT, env=env, start_new_session=True)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT, env=env, start_new_session=True)
+        try:
+            JOB_PID.write_text(str(proc.pid))
+        except OSError:
+            pass
+        return proc
 
     def _beat(self) -> None:
         try:
@@ -307,6 +316,7 @@ class Runner:
 
     def run_forever(self) -> None:
         QUEUE.mkdir(parents=True, exist_ok=True)
+        RUNNER_PID.write_text(str(os.getpid()))
         print(f"[queue] runner started {time.strftime(FMT)}", flush=True)
         while True:
             try:
@@ -322,6 +332,7 @@ def supervise(restart_after: float = 180) -> None:
     """Keep the runner alive: restart it if it exits or stops updating its heartbeat."""
     QUEUE.mkdir(parents=True, exist_ok=True)
     SUPERVISOR_PID.write_text(str(os.getpid()))
+    STOPPED.unlink(missing_ok=True)                  # a supervisor that is running means the runner should be too
     child = None
     while True:
         stale = (time.time() - float(HEARTBEAT.read_text())) > restart_after if HEARTBEAT.exists() else False
@@ -345,9 +356,69 @@ def supervisor_running() -> bool:
         return False
 
 
+def service_installed() -> bool:
+    return (Path.home() / ".config" / "systemd" / "user" / SERVICE).exists()
+
+
+def service_active() -> bool:
+    try:
+        return subprocess.run(["systemctl", "--user", "is-active", "--quiet", SERVICE], timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def _kill_pidfile(path: Path, must_contain: str) -> None:
+    """End the process (group) named in a pid file, if it is still ours."""
+    try:
+        pid = int(path.read_text())
+        if must_contain in Path(f"/proc/{pid}/cmdline").read_text():
+            pg = os.getpgid(pid)
+            if pg == os.getpgrp():                       # never signal our own group
+                os.kill(pid, signal.SIGTERM)
+                return
+            try:
+                os.killpg(pg, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            for _ in range(30):
+                if not _alive(pid):
+                    return
+                time.sleep(0.5)
+            os.killpg(pg, signal.SIGKILL)
+    except Exception:
+        pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def stop_runner() -> str:
+    """Stop the supervisor, the runner and the job being made. Finished clips are kept; the job resumes when the runner starts again."""
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    STOPPED.write_text(time.strftime(FMT))
+    if service_active():
+        subprocess.run(["systemctl", "--user", "stop", SERVICE], timeout=120)       # ends everything in the service
+    _kill_pidfile(SUPERVISOR_PID, "jobqueue")          # first, so nothing restarts the runner
+    _kill_pidfile(JOB_PID, "audiobook_gen")
+    _kill_pidfile(RUNNER_PID, "jobqueue")
+    HEARTBEAT.unlink(missing_ok=True)
+    for j in load():
+        if j["status"] == "running":
+            update(j["id"], status="queued", note="paused: the queue runner was stopped")
+    return "Stopped the queue runner. Nothing will be made until you start it again; clips already made are kept."
+
+
+def start_runner() -> str:
+    STOPPED.unlink(missing_ok=True)
+    if service_installed():
+        subprocess.run(["systemctl", "--user", "start", SERVICE], timeout=60)
+        return "Started the queue runner (system service)."
+    ensure_supervisor()
+    return "Started the queue runner."
+
+
 def ensure_supervisor() -> bool:
-    """Start the supervisor (and so the runner) if it is not running. Returns True if it was started."""
-    if supervisor_running():
+    """Start the supervisor (and so the runner) if it is not running and you have not stopped it. Returns True if it was started."""
+    if supervisor_running() or STOPPED.exists():
         return False
     QUEUE.mkdir(parents=True, exist_ok=True)
     log = open(QUEUE / "runner.log", "ab")
