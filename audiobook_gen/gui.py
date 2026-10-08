@@ -932,11 +932,11 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
 
 
 def generate_queued(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-                    emotion, emo_base, lex_label, p_cont, p_tag, cb_workers):
+                    emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when="", window_on=False, w_start="23:00", w_stop="06:30"):
     """The Generate button: add the book to the queue to start as soon as the GPU is free. The queue runner makes it, watches it,
     and keeps going if this app is closed."""
     msg, *_ = queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-                        emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, "", False, "23:00", "06:30")
+                        emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop)
     return msg + " Follow it on the **Queue** tab; the finished file appears here."
 
 
@@ -1258,6 +1258,9 @@ def build_ui() -> gr.Blocks:
                 gr.Markdown("How names and hard words are pronounced. **Build lexicon**, fill in the IPA (try **Look up**), review, then **Save**.\n\n"
                             "**Who uses what:** Kokoro voices use the **IPA** column. **Chatterbox and Qwen3 use only the respelling you type** in the "
                             "*respell* column — IPA and auto-made spellings never reach them. F5-TTS uses the respelling, made from the IPA where blank.")
+                with gr.Accordion("F5-TTS only — how its names are spelled", open=False):
+                    lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[0], label="How names and hard words are spoken by F5-TTS",
+                                      info="Does not affect Chatterbox, Qwen3 or Kokoro. Saved when you generate.")
                 with gr.Row():
                     lex_btn = gr.Button("Build lexicon", variant="primary", scale=1)
                     lookup_btn = gr.Button("Look up IPA online (Wiktionary / WikiPron / Bible dictionary)", scale=2)
@@ -1313,9 +1316,13 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
                                          info="Each sentence gets its own expressiveness, from its mood and tags like “cried” or “whispered”.")
-                    lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[0], scale=3,
-                                      label="How names and hard words are spoken by F5-TTS",
-                                      info="Chatterbox and Qwen3 always use only the respellings you typed in the lexicon; Kokoro uses the IPA.")
+                with gr.Row():
+                    g_when = gr.DateTime(label="Start at (leave empty to start as soon as the GPU is free)", include_time=True,
+                                         type="string", scale=2)
+                    g_win = gr.Checkbox(label="Only run overnight", value=False, scale=1,
+                                        info="Pauses outside these hours and carries on the next night.")
+                    g_w1 = gr.Textbox("23:00", label="from", scale=1)
+                    g_w2 = gr.Textbox("06:30", label="until", scale=1)
                 with gr.Row():
                     go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Cancel")
                 status4 = gr.Markdown()
@@ -1338,19 +1345,12 @@ def build_ui() -> gr.Blocks:
                                            info="Not recommended for GPUs with less than 16 GB of VRAM.")
 
             with gr.Tab("5 · Queue"):
-                gr.Markdown("Queue a book to be made **later** — at a set time, or only overnight — and leave the computer alone. "
-                            "Every queued book is watched: if it stalls (a GPU hang) or crashes it is restarted, and it waits while "
-                            "anything else is using the GPU. Uses the settings on the other tabs for the book that is open now.")
+                gr.Markdown("Every book you generate is added here and made by the queue runner, which watches it: if it stalls (a GPU hang) "
+                            "or crashes it is restarted, it waits while anything else is using the GPU, and it carries on if you close the app. "
+                            "Set a start time or overnight hours on the **Generate** tab.")
                 q_state = gr.Markdown(queue_status())
                 q_now = gr.Markdown(queue_now())
                 with gr.Row():
-                    q_when = gr.DateTime(label="Start at (clear it to start as soon as the GPU is free)", include_time=True,
-                                         type="string", scale=2)
-                    q_win = gr.Checkbox(label="Only run overnight", value=False, scale=1)
-                    q_w1 = gr.Textbox("23:00", label="from", scale=1)
-                    q_w2 = gr.Textbox("06:30", label="until", scale=1)
-                with gr.Row():
-                    q_add = gr.Button("Add this book to the queue", variant="primary")
                     q_runner = gr.Button("Start the queue runner")
                 q_msg = gr.Markdown()
                 q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=False, wrap=True,
@@ -1530,14 +1530,13 @@ def build_ui() -> gr.Blocks:
         lookup_btn.click(lex_lookup, [project, lex_df, lang_tb, wiki_tb, bible_cb, offline_cb], [lex_df, status3])
         save_lex_btn.click(save_lexicon, [project, lex_df], status3)
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
-        go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers],
+        go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2],
                  status4).then(queue_refresh, None, [q_state, q_tbl, q_now])
         stop.click(gen_stop, project, status4)
         gen_shown = gr.State("")
         q_timer.tick(gen_panel, [project, gen_shown], [status4, m4b, ch1, gen_shown])
         q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
-        q_add.click(queue_add, gen_inputs + [q_when, q_win, q_w1, q_w2], [q_msg, q_state, q_tbl, q_now])
         q_runner.click(queue_start_runner, None, [q_msg, q_state, q_tbl, q_now])
         q_tbl.select(queue_pick, q_tbl, q_sel)
         q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl, q_now])

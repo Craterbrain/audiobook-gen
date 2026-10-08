@@ -548,3 +548,16 @@ def test_chatterbox_and_qwen3_get_only_typed_respellings():
         out = Preprocessor(lex, mode)("Weena, Eloi and Morlock.")
         assert out == "Weenuh, Eloi and Morlock."                      # no IPA, no auto-made spellings
     assert "Shimmee-eye" in Preprocessor([], "verified")("Shimei came.") and "Shimei" in Preprocessor([], "typed")("Shimei came.")
+
+
+def test_generate_button_uses_the_schedule_on_the_generate_tab(tmp_path, monkeypatch):
+    import pandas as pd
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue"); monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    p = _assistant_project(tmp_path)
+    chap = pd.DataFrame([[True, 1, "One", 6]], columns=gui.CHAP_COLS)
+    msg = gui.generate_queued(str(p), chap, "Late book", "Me", "", 60, 350, 700, 250, 4, True, True, 0.0,
+                              list(gui.LEX_MODES)[0], 140, 120, 1, "2026-10-09 23:00:00", True, "23:00", "06:30")
+    job = jq.load()[0]
+    assert job["not_before"] == "2026-10-09 23:00" and job["window"] == "23:00-06:30" and "2026-10-09 23:00" in msg

@@ -95,7 +95,8 @@ Kokoro has no audio encoder, so a voice pack is *searched*: start from the stock
 The code is released under the [MIT License](LICENSE). The bundled Bible IPA dictionary contains Wiktionary-derived data and is CC BY-SA 4.0; see [NOTICE.md](NOTICE.md) for that and for model licenses. Your books, recordings and cloned voices stay on your machine (they are git-ignored); the NASB text is not included.
 
 ## Queue, schedule and assistant
-- **Queue tab** — queue a book to start at a set time or only inside a daily window (for example 23:00–06:30). One runner
+- **Generate tab** adds the book to the queue; set a start time, or tick *Only run overnight* (for example 23:00–06:30), before pressing it.
+  The **Queue tab** shows what is queued and running. One runner
   makes the queued books one at a time and watches each: a stalled or crashed job is restarted, it waits while anything
   else uses the GPU, and a supervisor restarts the runner itself. From the command line:
   `python -m audiobook_gen.jobqueue add --work work/<book> --not-before "2026-10-09 23:00" --window 23:00-06:30`, then `list` or `cancel <id>`.
