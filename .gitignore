@@ -1,0 +1,47 @@
+# --- environments and caches
+.venv/
+.venv-*/
+.uvboot/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- your books, recordings and everything generated from them (never committed)
+work/
+out/
+voices/
+samples_*/
+compare_*/
+*.epub
+*.m4b
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.pt
+*.safetensors
+*.ckpt
+
+# --- copyrighted Bible texts and scrapes of them (the NASB is under copyright; bring your own copy)
+nasb*.txt
+NEW*AMERICAN*.json
+
+# --- reference data that is downloaded again on demand
+data/pronunciation_cache.json
+data/wikipron/
+data/ipa-dict/
+data/ford_*.txt
+data/loc_*.txt
+data/bible_ipa_unresolved.txt
+data/*.previous.json
+samples/monte_cristo.txt
+samples/macbeth_raw.txt
+
+# --- experiment configs from working sessions (config.yaml and the named examples are kept)
+config.mc5_*.yaml
+config.nasb_*.yaml
+
+*.log
+nohup.out
+.DS_Store

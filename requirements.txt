@@ -1,0 +1,13 @@
+numpy
+scipy
+soundfile
+pyyaml
+ebooklib
+beautifulsoup4
+lxml
+spacy
+wordfreq
+Pillow
+kokoro>=0.9.4
+f5-tts
+pytest

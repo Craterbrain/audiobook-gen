@@ -1,0 +1,16 @@
+device: auto
+sample_rate: 24000
+default_voice:
+  engine: f5
+  library: Stefan Rudnicki
+voices:
+  Narrator:
+    engine: f5
+    library: Stefan Rudnicki
+pacing_ms:
+  sentence: 350
+  paragraph: 700
+  speaker_change: 250
+  chapter_start: 1200
+crossfade_ms: 60
+max_chunk_chars: 300

@@ -1,0 +1,56 @@
+device: auto
+sample_rate: 24000
+default_voice:
+  engine: kokoro
+  voice: af_heart
+voices:
+  Narrator:
+    engine: kokoro
+    voice: bm_george
+  Edmond:
+    engine: kokoro
+    voice: am_michael
+  Mercédès:
+    engine: kokoro
+    voice: af_bella
+  Old Dantès:
+    engine: kokoro
+    voice: bm_lewis
+    speed: 0.92
+  Danglars:
+    engine: kokoro
+    voice: bm_daniel
+  Caderousse:
+    engine: kokoro
+    voice: am_puck
+  Fernand:
+    engine: kokoro
+    voice: am_adam
+  Morrel:
+    engine: kokoro
+    voice: am_liam
+  Magistrate:
+    engine: kokoro
+    voice: am_onyx
+  Crowd:
+    engine: kokoro
+    voice: af_sarah
+  Guest:
+    engine: kokoro
+    voice: am_echo
+name_lang: fr
+pacing_ms:
+  sentence: 350
+  paragraph: 700
+  speaker_change: 250
+  chapter_start: 1200
+crossfade_ms: 60
+max_chunk_chars: 300
+aliases:
+  Dantès: Edmond
+  Edmond: Edmond
+phrase_roles:
+  old man|old father|elder Dantès|father of the bridegroom|old Dantès: Old Dantès
+  magistrate|officer of the law|commissary: Magistrate
+  one of the (party|guests|company)|a (voice|guest)|stationed in the balcony: Guest
+  multitude|general burst|voices|chorus: Crowd

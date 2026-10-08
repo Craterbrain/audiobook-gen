@@ -1,0 +1,23 @@
+# Per-role voice assignment. engine: kokoro | f5
+# kokoro roles use a preset voice; f5 roles clone ref_audio (needs ref_text, 5-15 s clip).
+# Roles missing here fall back to `default_voice`.
+device: auto            # auto | xpu | cpu
+sample_rate: 24000
+default_voice: {engine: kokoro, voice: af_heart}
+voices:
+  Narrator:         {engine: kokoro, voice: bm_george}
+  Jesus:            {engine: kokoro, voice: am_michael}
+  John the Baptist: {engine: kokoro, voice: bm_lewis}
+  Nicodemus:        {engine: kokoro, voice: am_adam}
+  Woman:            {engine: kokoro, voice: af_bella}
+  Disciples:        {engine: kokoro, voice: am_puck}
+  Jews:             {engine: kokoro, voice: bm_daniel}
+  # Zero-shot clone example (uncomment after adding files to voices/):
+  # Jesus: {engine: f5, ref_audio: voices/jesus.wav, ref_text: "transcript of the clip"}
+pacing_ms:
+  sentence: 350
+  paragraph: 700
+  speaker_change: 250
+  chapter_start: 1200
+crossfade_ms: 60
+max_chunk_chars: 300

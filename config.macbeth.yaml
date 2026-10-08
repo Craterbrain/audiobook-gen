@@ -1,0 +1,68 @@
+device: auto
+sample_rate: 24000
+default_voice:
+  engine: kokoro
+  voice: af_heart
+voices:
+  Narrator:
+    engine: kokoro
+    voice: bm_fable
+  First Witch:
+    engine: kokoro
+    voice: af_sky
+  Second Witch:
+    engine: kokoro
+    voice: bf_isabella
+  Third Witch:
+    engine: kokoro
+    voice: af_nicole
+  All:
+    engine: kokoro
+    voice: af_sarah
+  Hecate:
+    engine: kokoro
+    voice: bf_emma
+  Lady Macbeth:
+    engine: kokoro
+    voice: af_bella
+  Lady Macduff:
+    engine: kokoro
+    voice: af_heart
+  Macbeth:
+    engine: kokoro
+    voice: am_michael
+  Banquo:
+    engine: kokoro
+    voice: bm_lewis
+  Duncan:
+    engine: kokoro
+    voice: bm_george
+    speed: 0.92
+  Malcolm:
+    engine: kokoro
+    voice: am_liam
+  Donalbain:
+    engine: kokoro
+    voice: am_puck
+  Ross:
+    engine: kokoro
+    voice: am_adam
+  Lennox:
+    engine: kokoro
+    voice: bm_daniel
+  Angus:
+    engine: kokoro
+    voice: am_echo
+  Soldier:
+    engine: kokoro
+    voice: am_onyx
+  Macduff:
+    engine: kokoro
+    voice: am_eric
+pacing_ms:
+  sentence: 350
+  paragraph: 700
+  speaker_change: 250
+  chapter_start: 1200
+crossfade_ms: 60
+max_chunk_chars: 300
