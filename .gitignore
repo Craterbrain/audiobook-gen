@@ -45,3 +45,4 @@ config.nasb_*.yaml
 *.log
 nohup.out
 .DS_Store
+books/

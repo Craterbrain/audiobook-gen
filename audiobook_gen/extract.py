@@ -85,6 +85,38 @@ def extract_txt(path: Path) -> dict:
     return {"title": title, "author": "", "cover": None, "chapters": chapters}
 
 
+GUTENBERG_END = re.compile(r"THE FULL PROJECT GUTENBERG|\*\*\* ?END OF (?:THE |THIS )?PROJECT GUTENBERG", re.I)
+HEAD_LINE = re.compile(r"^(The Project Gutenberg eBook of|Title|Author|Editor|Translator|Illustrator|Release date|Language|Credits?|"
+                       r"Produced by|Other information|Character set|Original publication|Contributor|Most recently|www\.|https?:)", re.I)
+FRONT_TITLES = re.compile(r"^\s*(contents|table of contents|illustrations|list of illustrations|title page|"
+                          r"copyright|transcriber.s note|footnotes)\s*\.?\s*$", re.I)
+
+
+def strip_gutenberg(chapters: list[dict]) -> list[dict]:
+    """Remove Project Gutenberg's header and licence text, and contents/illustration pages, so none of it is read aloud."""
+    out = []
+    for ch in chapters:
+        text = ch["text"]
+        if re.match(r"\s*The Project Gutenberg eBook of", text, re.I):       # drop the title block line by line
+            lines = text.split("\n")
+            k = 0
+            while k < len(lines) and (not lines[k].strip() or HEAD_LINE.match(lines[k].strip())):
+                k += 1
+            text = "\n".join(lines[k:])
+        m = GUTENBERG_END.search(text)
+        if m:
+            text = text[:m.start()]
+        text = text.strip()
+        body = re.sub(r"^\s*" + re.escape(ch["title"]) + r"\s*", "", text, flags=re.I)
+        if len(text) < 200 or FRONT_TITLES.match(ch["title"]) or re.match(r"\s*(table of )?contents\s*\n", body, re.I):
+            continue
+        title = ch["title"]
+        if GUTENBERG_END.search(title):                      # the table of contents named this file after the licence
+            title = text.split("\n", 1)[0].strip(" .").title()[:40] or "Note"
+        out.append({**ch, "title": title, "text": text})
+    return [{**c, "index": i + 1} for i, c in enumerate(out)]
+
+
 def extract_epub(path: Path, out_dir: Path) -> dict:
     import ebooklib
     from bs4 import BeautifulSoup
@@ -126,6 +158,8 @@ def extract_epub(path: Path, out_dir: Path) -> dict:
             cover = out_dir / ("cover" + Path(item.get_name()).suffix)
             cover.write_bytes(item.get_content())
             break
+    if "gutenberg" in (chapters[0]["text"][:300] + chapters[-1]["text"][-3000:]).lower() if chapters else False:
+        chapters = strip_gutenberg(chapters)
     return {"title": meta("title") or path.stem, "author": meta("creator"),
             "cover": str(cover) if cover else None, "chapters": chapters}
 
