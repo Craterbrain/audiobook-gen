@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from audiobook_gen.assemble import make_cover       # noqa: E402
+from audiobook_gen.assemble import make_cover, make_cover_portrait       # noqa: E402
 
 # slug prefix -> (raw image, focus x/y, zoom, credit: work, artist, date, Commons file name, licence)
 COVERS = {
@@ -34,13 +34,17 @@ TITLES = {   # slug -> (title on the cover, title in the file's tags)
     "anabasis": ("Anabasis", "Anabasis"),
     "twenty_thousand_leagues_under_the_sea": ("Twenty Thousand Leagues Under the Sea", "Twenty Thousand Leagues Under the Sea"),
 }
+PORTRAITS = {"narrative_of_the_life_of_frederick_dougl"}
 out_dir = ROOT / "books" / "covers"
 credits = ["# Cover art credits", "", "Backgrounds are public-domain works from Wikimedia Commons (licence shown on each file page).", ""]
 for slug in open(ROOT / "books" / "queue.txt").read().split():
     img, focus, zoom, work, artist, date, fname = COVERS[slug]
     info = json.loads((ROOT / "work" / slug / "prepared.json").read_text())
     path = out_dir / f"{slug}.jpg"
-    make_cover(path, TITLES[slug][0], info["author"], str(out_dir / "raw" / f"{img}.jpg"), focus, zoom)
+    if slug in PORTRAITS:               # title on top, a smaller picture below, on black
+        make_cover_portrait(path, TITLES[slug][0], info["author"], str(out_dir / "raw" / f"{img}.jpg"))
+    else:
+        make_cover(path, TITLES[slug][0], info["author"], str(out_dir / "raw" / f"{img}.jpg"), focus, zoom)
     info["cover"], info["title"] = str(path), TITLES[slug][1]
     (ROOT / "work" / slug / "prepared.json").write_text(json.dumps(info, indent=1, ensure_ascii=False))
     credits.append(f"- **{TITLES[slug][0]}**: *{work}*, {artist}, {date}. "

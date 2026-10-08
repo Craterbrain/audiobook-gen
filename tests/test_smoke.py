@@ -351,3 +351,14 @@ def test_cover_with_a_picture_background(tmp_path):
     assert im.convert("L").resize((1, 1)).getpixel((0, 0)) < 110                  # toned down so the title can be read
     far = make_cover(tmp_path / "d.jpg", "Zoomed Out", "", str(tmp_path / "bg.jpg"), (0.5, 0.5), 0.8)
     assert Image.open(far).size == (1400, 1400)
+
+
+def test_portrait_cover_layout(tmp_path):
+    from PIL import Image
+    from audiobook_gen.assemble import make_cover_portrait
+    Image.new("RGB", (600, 800), (90, 90, 90)).save(tmp_path / "p.png")
+    out = make_cover_portrait(tmp_path / "c.jpg", "A Long Narrative of a Person's Life", "Some Author", str(tmp_path / "p.png"))
+    im = Image.open(out)
+    assert im.size == (1400, 1400)
+    assert im.getpixel((700, 700))[0] > 60            # the picture is in the middle...
+    assert im.getpixel((200, 700)) == (0, 0, 0)       # ...on a black page

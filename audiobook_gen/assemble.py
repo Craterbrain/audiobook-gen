@@ -144,6 +144,48 @@ def _photo_background(path: str, W: int, focus: tuple[float, float], zoom: float
     return Image.fromarray((np.clip(a, 0, 1) * 255).astype("uint8"))
 
 
+def make_cover_portrait(path: Path, title: str, author: str, picture: str) -> Path:
+    """Black cover: the title across the top, a smaller picture beneath it, the author under the picture (for portraits)."""
+    from PIL import Image, ImageDraw
+    S, N = 2, 1400
+    W = N * S
+    gold, cream, mute = (212, 175, 90), (244, 237, 218), (160, 140, 96)
+    img = Image.new("RGB", (W, W), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rectangle([60 * S, 60 * S, (N - 60) * S, (N - 60) * S], outline=gold, width=7 * S)
+    d.rectangle([84 * S, 84 * S, (N - 84) * S, (N - 84) * S], outline=mute, width=2 * S)
+    cx, box_w = W // 2, (N - 2 * 170) * S
+    _tracked(d, (cx, 160 * S), "AUDIOBOOK", _serif(30 * S), mute, 12 * S)
+    title = (title or "Untitled").strip()
+    for size in range(150, 70, -6):                       # as large as fits in at most 3 lines
+        f = _serif(size * S)
+        lines = _wrap(d, title, f, box_w)
+        if len(lines) <= 3 and max(d.textlength(l, font=f) for l in lines) <= box_w and len(lines) * size * 1.18 <= 380:
+            break
+    lh = int(size * S * 1.18)
+    y = 215 * S + int(size * S * 0.72)
+    for l in lines:
+        d.text((cx, y), l, font=f, fill=cream, anchor="ms")
+        y += lh
+    top = y - lh + 45 * S                                 # the picture sits between the title and the author
+    bottom = 1215 * S
+    pic = Image.open(picture)
+    if pic.mode in ("RGBA", "LA", "P"):
+        pic = pic.convert("RGBA"); flat = Image.new("RGB", pic.size, (0, 0, 0)); flat.paste(pic, mask=pic.split()[-1]); pic = flat
+    pic = pic.convert("RGB")
+    k = min((bottom - top) / pic.height, (N - 2 * 190) * S / pic.width)
+    pic = pic.resize((int(pic.width * k), int(pic.height * k)), Image.LANCZOS)
+    img.paste(pic, (cx - pic.width // 2, top + (bottom - top - pic.height) // 2))
+    if (author or "").strip():
+        y = 1240 * S
+        d.line([cx - 230 * S, y, cx - 22 * S, y], fill=gold, width=3 * S)
+        d.line([cx + 22 * S, y, cx + 230 * S, y], fill=gold, width=3 * S)
+        d.polygon([(cx, y - 12 * S), (cx + 12 * S, y), (cx, y + 12 * S), (cx - 12 * S, y)], fill=gold)
+        _tracked(d, (cx, y + 58 * S), (author or "").strip().upper(), _serif(48 * S), gold, 6 * S)
+    img.resize((N, N), Image.LANCZOS).save(path, "JPEG", quality=92)
+    return path
+
+
 def make_cover(path: Path, title: str, author: str, background: str | None = None,
                focus: tuple[float, float] = (0.5, 0.5), zoom: float = 1.0) -> Path:
     """A 1400x1400 cover: navy gradient (or a toned-down picture), double gold frame, auto-fitted serif title, divider, author."""
