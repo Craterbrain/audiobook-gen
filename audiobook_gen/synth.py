@@ -157,11 +157,12 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
             return ""
         return f" · about {clock(sum(n / avg[e]['cps'] for e, n in left.items()))} left"
 
-    if todo:
-        with ThreadPoolExecutor(max(q.qsize() for q in pools.values())) as ex:
+    for ename in dict.fromkeys(t[3] for t in todo):      # one engine at a time: two models computing on the GPU together can hang it
+        group = [t for t in todo if t[3] == ename]
+        with ThreadPoolExecutor(pools[ename].qsize()) as ex:
             futs = []
-            for t in todo:
-                f = ex.submit(make, t); f.en = t[3]; futs.append(f)
+            for t in group:
+                f = ex.submit(make, t); f.en = ename; futs.append(f)
             for fut in as_completed(futs):
                 speaker, chunk, dur, wall = fut.result()
                 done += 1
