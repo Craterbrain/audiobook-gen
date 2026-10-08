@@ -1,0 +1,212 @@
+{
+ "_meta": {
+  "what": "Respellings for Chatterbox: used only where plain spelling scored under 0.70 when spoken in two NASB phrases and transcribed to phonemes",
+  "method": "see audiobook_gen/respell_check.py",
+  "threshold": 0.7,
+  "names_tested": 395,
+  "built": "2026-10-08",
+  "license": "CC BY-SA 4.0 (derived from Wiktionary/WikiPron IPA)",
+  "rule": "an override is kept only when it beats plain spelling by at least 0.05",
+  "overrides": 33
+ },
+ "entries": {
+  "Jehu": {
+   "respell": "Jeehyoo",
+   "score": 0.78,
+   "plain_score": 0.67,
+   "source": "tuned"
+  },
+  "Rehoboam": {
+   "respell": "Reeuhboaum",
+   "score": 0.64,
+   "plain_score": 0.4,
+   "source": "hand"
+  },
+  "Shimei": {
+   "respell": "Shimmee-eye",
+   "score": 1.0,
+   "plain_score": 0.55,
+   "source": "tuned"
+  },
+  "Seir": {
+   "respell": "See-er",
+   "score": 0.84,
+   "plain_score": 0.58,
+   "source": "tuned"
+  },
+  "Benaiah": {
+   "respell": "Binayuh",
+   "score": 0.68,
+   "plain_score": 0.62,
+   "source": "hand"
+  },
+  "Sihon": {
+   "respell": "Sighhahn",
+   "score": 0.8,
+   "plain_score": 0.6,
+   "source": "tuned"
+  },
+  "Sheol": {
+   "respell": "Sheeole",
+   "score": 0.75,
+   "plain_score": 0.68,
+   "source": "hand"
+  },
+  "Ahasuerus": {
+   "respell": "Uhhazzyooairus",
+   "score": 0.68,
+   "plain_score": 0.56,
+   "source": "hand"
+  },
+  "Jephthah": {
+   "respell": "Jefthuh",
+   "score": 0.78,
+   "plain_score": 0.67,
+   "source": "hand"
+  },
+  "Zeruiah": {
+   "respell": "Zirooya",
+   "score": 0.73,
+   "plain_score": 0.45,
+   "source": "tuned"
+  },
+  "Abijah": {
+   "respell": "Abighja",
+   "score": 0.56,
+   "plain_score": 0.51,
+   "source": "tuned"
+  },
+  "Ahijah": {
+   "respell": "Ahighja",
+   "score": 0.88,
+   "plain_score": 0.56,
+   "source": "tuned"
+  },
+  "Machir": {
+   "respell": "Mayker",
+   "score": 1.0,
+   "plain_score": 0.56,
+   "source": "tuned"
+  },
+  "Ahikam": {
+   "respell": "Ahighkam",
+   "score": 0.91,
+   "plain_score": 0.64,
+   "source": "tuned"
+  },
+  "Micaiah": {
+   "respell": "Mighkay-a",
+   "score": 0.8,
+   "plain_score": 0.6,
+   "source": "tuned"
+  },
+  "Caesarea": {
+   "respell": "Kayser-ee-a",
+   "score": 0.64,
+   "plain_score": 0.45,
+   "source": "tuned"
+  },
+  "Michal": {
+   "respell": "Meechahl",
+   "score": 0.7,
+   "plain_score": 0.6,
+   "source": "tuned"
+  },
+  "Eliashib": {
+   "respell": "Iligh-ishib",
+   "score": 0.62,
+   "plain_score": 0.55,
+   "source": "tuned"
+  },
+  "Ahitub": {
+   "respell": "Uhhytub",
+   "score": 0.7,
+   "plain_score": 0.6,
+   "source": "hand"
+  },
+  "Bani": {
+   "respell": "Bayneye",
+   "score": 1.0,
+   "plain_score": 0.67,
+   "source": "tuned"
+  },
+  "Jehoash": {
+   "respell": "Jihoh-ash",
+   "score": 0.9,
+   "plain_score": 0.6,
+   "source": "tuned"
+  },
+  "Artaxerxes": {
+   "respell": "Ahtigzɜrkseez",
+   "score": 0.89,
+   "plain_score": 0.63,
+   "source": "tuned"
+  },
+  "Debir": {
+   "respell": "Deeber",
+   "score": 1.0,
+   "plain_score": 0.56,
+   "source": "tuned"
+  },
+  "Jehiel": {
+   "respell": "Jihigh-il",
+   "score": 0.65,
+   "plain_score": 0.55,
+   "source": "tuned"
+  },
+  "Gershon": {
+   "respell": "Gershahn",
+   "score": 0.85,
+   "plain_score": 0.65,
+   "source": "tuned"
+  },
+  "Hamor": {
+   "respell": "Haymer",
+   "score": 1.0,
+   "plain_score": 0.57,
+   "source": "hand"
+  },
+  "Mephibosheth": {
+   "respell": "Mifibisheth",
+   "score": 0.8,
+   "plain_score": 0.63,
+   "source": "tuned"
+  },
+  "Amoz": {
+   "respell": "Aymoz",
+   "score": 0.75,
+   "plain_score": 0.62,
+   "source": "hand"
+  },
+  "Hadad": {
+   "respell": "Haydad",
+   "score": 0.81,
+   "plain_score": 0.62,
+   "source": "hand"
+  },
+  "Mahanaim": {
+   "respell": "Mayhinay-im",
+   "score": 0.76,
+   "plain_score": 0.7,
+   "source": "tuned"
+  },
+  "Rechab": {
+   "respell": "Reeckab",
+   "score": 0.94,
+   "plain_score": 0.62,
+   "source": "hand"
+  },
+  "Gehazi": {
+   "respell": "Gihayzeye",
+   "score": 0.77,
+   "plain_score": 0.68,
+   "source": "tuned"
+  },
+  "Zichri": {
+   "respell": "Zickry",
+   "score": 0.78,
+   "plain_score": 0.62,
+   "source": "hand"
+  }
+ }
+}

@@ -511,6 +511,15 @@ def normalize(text: str) -> str:
     return ROMAN_RE.sub(roman, text)
 
 
+def verified_respellings() -> dict:
+    """{name: {"respell", "score", ...}} from data/bible_respell.json (tested against Chatterbox), or {}."""
+    p = Path(__file__).resolve().parent.parent / "data" / "bible_respell.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))["entries"]
+    except Exception:
+        return {}
+
+
 class Preprocessor:
     """normalize() expands abbreviations; substitute() applies the lexicon with one compiled regex
     (longest term first).
@@ -519,11 +528,16 @@ class Preprocessor:
     mode="ipa":     replace with Kokoro/misaki markup  [term](/IPA/).
     mode="rawipa":  replace the word with its bare IPA, for text models that may read it (Qwen3, Chatterbox).
     mode="plain":   no substitutions at all.
+    mode="verified": plain spelling, except names whose respelling in data/bible_respell.json was tested to sound
+                    better (Chatterbox); respellings you typed into the project lexicon win over those.
     Entries lacking the needed field are skipped. Possessives keep their suffix (Edmond's)."""
 
     def __init__(self, lexicon: list[dict], mode: str = "respell"):
         field = "ipa" if mode in ("ipa", "rawipa") else "respell"
         self.map = {}
+        if mode == "verified":
+            lexicon = [{"term": k, "respell": v["respell"]} for k, v in verified_respellings().items()] + \
+                      [e for e in lexicon if e.get("source") == "user" and e.get("respell")]
         for e in ([] if mode == "plain" else lexicon):
             val = (e.get(field) or "").strip()
             if mode == "respell":

@@ -10,6 +10,10 @@ This project ships code and a few small data files. Everything else is downloade
   corrections in `data/bible_ipa_user.txt`. Because it contains Wiktionary-derived data, treat the file as
   **CC BY-SA 4.0** and keep this attribution when you reuse it. Each entry names its source.
 - `data/bible_ipa_claude_*.txt` — the hand-written readings (unreviewed; check by ear).
+- `data/bible_respell.json`, `data/bible_respell_claude_*.txt`, `data/respell_options.json` — spellings for Chatterbox,
+  tested by speaking each name in two NASB phrases and checking the phonemes back against the IPA. They are derived from
+  the Wiktionary-based IPA above, so they are licensed **CC BY-SA 4.0** (https://creativecommons.org/licenses/by-sa/4.0/).
+  The code that makes them (`audiobook_gen/respell_rules.py`, `respell_check.py`, `tools/`) stays MIT.
 - `samples/` — public-domain texts (KJV John, Macbeth, excerpts of *The Count of Monte Cristo*).
 
 ## Not included (bring your own, or it downloads on first use)

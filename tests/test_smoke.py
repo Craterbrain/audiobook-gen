@@ -291,7 +291,7 @@ def test_interface_builds_with_every_engine_option():
     from audiobook_gen import gui
     assert gui.build_ui() is not None
     assert set(gui.ENGINE_LABELS.values()) == {"f5", "chatterbox", "qwen3"}
-    assert set(gui.LEX_MODES.values()) == {"rawipa", "respell", "plain"}
+    assert set(gui.LEX_MODES.values()) == {"verified", "rawipa", "respell", "plain"}
 
 
 def test_placeholder_cover_has_large_readable_title(tmp_path):
@@ -309,3 +309,20 @@ def test_voice_menu_keys_round_trip_through_the_config():
     from audiobook_gen import casting
     for key in ("kokoro:am_onyx", "kokoro:pack:wakers_ch16", "clone:Walter", "clone:Walter@chatterbox", "clone:Walter@qwen3"):
         assert casting.key_of(casting.voice_of(key, 1.0)) == key
+
+
+def test_verified_lexicon_mode_only_respells_tested_names():
+    from audiobook_gen.lexicon import Preprocessor, verified_respellings
+    v = verified_respellings()
+    assert v, "data/bible_respell.json should load"
+    name = next(iter(v))
+    pre = Preprocessor([], "verified")
+    assert pre(f"Then {name} spoke to Moses.").startswith("Then " + v[name]["respell"])
+    assert "Moses" in pre("Moses spoke.")                       # untested names stay as written
+    user = Preprocessor([{"term": name, "respell": "Custom", "source": "user"}], "verified")
+    assert "Custom" in user(f"{name} spoke.")                   # your own respelling wins
+
+
+def test_respell_rules_make_readable_spellings():
+    from audiobook_gen.respell_rules import respell
+    assert respell("ˈheɪɡɑɹ").lower().startswith("haygar")

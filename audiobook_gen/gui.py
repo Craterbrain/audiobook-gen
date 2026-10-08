@@ -30,7 +30,8 @@ MAX_ROLES = 30
 MODE_MULTI = "Different voice for each character"
 MODE_SINGLE = "One narrator reads everything"
 ENGINE_LABELS = {"F5-TTS": "f5", "Chatterbox": "chatterbox", "Qwen3-TTS": "qwen3"}
-LEX_MODES = {"Real IPA — for Chatterbox and Qwen3 (recommended)": "rawipa",
+LEX_MODES = {"Tested respellings — plain spelling, fixed where tested (Chatterbox, recommended)": "verified",
+             "Real IPA — for Qwen3": "rawipa",
              "Phonetic respelling — F5 style": "respell",
              "Plain spelling — no substitutions": "plain"}
 CHAP_COLS = ["Include", "#", "Title", "Characters"]
@@ -845,7 +846,7 @@ def gen_settings(project):
     """Generate-tab engine options as saved in the project's config."""
     cfg = _cfg(project)
     mode = cfg.get("text_lexicon", "respell")
-    label = next((k for k, v in LEX_MODES.items() if v == mode), list(LEX_MODES)[1])
+    label = next((k for k, v in LEX_MODES.items() if v == mode), list(LEX_MODES)[2])
     pm = cfg.get("pacing_ms") or {}
     return (bool(cfg.get("emotion")), float(cfg.get("emotion_base", 0.0)), label,
             int(pm.get("continuation", 140)), int(pm.get("tag", 120)),
@@ -1074,7 +1075,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
                                          info="Each sentence gets its own expressiveness, from its mood and tags like “cried” or “whispered”.")
-                    lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[1], scale=3,
+                    lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[0], scale=3,
                                       label="How names and hard words are spoken by F5, Chatterbox and Qwen3")
                 with gr.Row():
                     go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Stop")
