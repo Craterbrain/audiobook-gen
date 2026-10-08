@@ -1329,20 +1329,29 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     m4b = gr.File(label="M4B"); ch1 = gr.Audio(label="First chapter (preview)")
                 with gr.Accordion("Advanced — pauses, emotion offset, speed", open=False):
-                    emo_base = gr.Slider(-0.3, 0.3, 0.0, step=0.05, label="Emotion offset (− calmer, + more dramatic)")
+                    gr.Markdown("### Every voice\nPauses and crossfade are applied when the chapters are put together, so they work the same for "
+                                "Kokoro, F5-TTS, Chatterbox and Qwen3-TTS.")
                     with gr.Row():
-                        xf = gr.Slider(0, 200, 60, step=10, label="Crossfade (ms)")
-                        ps = gr.Slider(0, 1500, 350, step=50, label="Sentence pause (ms)")
-                        pp = gr.Slider(0, 2000, 700, step=50, label="Paragraph pause (ms)")
-                        pc = gr.Slider(0, 1500, 250, step=50, label="Speaker-change pause (ms)")
+                        xf = gr.Slider(0, 200, 60, step=10, label="Crossfade (ms) — all voices")
+                        ps = gr.Slider(0, 1500, 350, step=50, label="Sentence pause (ms) — all voices")
+                        pp = gr.Slider(0, 2000, 700, step=50, label="Paragraph pause (ms) — all voices")
+                        pc = gr.Slider(0, 1500, 250, step=50, label="Speaker-change pause (ms) — all voices")
                     with gr.Row():
-                        p_cont = gr.Slider(0, 600, 140, step=10, label="Pause when a sentence carries on after a quote (ms)")
-                        p_tag = gr.Slider(0, 600, 120, step=10, label="Pause before a speaker tag (“said Danglars”) (ms)")
-                    with gr.Row():
-                        k_workers = gr.Slider(1, 6, 4, step=1, label="Kokoro: voices made at once (more = faster, ~0.4 GB each)")
-                        f5_half = gr.Checkbox(value=True, label="F5: half precision (about 4.8× faster on Arc, same sound)")
-                    cb_workers = gr.Slider(1, 2, 1, step=1, label="Chatterbox: workers at once (2 is about 22% faster, ~4–8 GB of GPU memory each)",
+                        p_cont = gr.Slider(0, 600, 140, step=10, label="Pause when a sentence carries on after a quote (ms) — all voices")
+                        p_tag = gr.Slider(0, 600, 120, step=10, label="Pause before a speaker tag (“said Danglars”) (ms) — all voices")
+                    gr.Markdown("### Chatterbox only")
+                    emo_base = gr.Slider(-0.3, 0.3, 0.0, step=0.05, label="Emotion offset (− calmer, + more dramatic) — Chatterbox only",
+                                         info="Works with “Emotion from the text” ticked. The other voices have no emotion control.")
+                    cb_workers = gr.Slider(1, 2, 1, step=1, label="Workers at once (2 is about 22% faster, ~4–8 GB of GPU memory each) — Chatterbox only",
                                            info="Not recommended for GPUs with less than 16 GB of VRAM.")
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("### Kokoro only")
+                            k_workers = gr.Slider(1, 6, 4, step=1, label="Voices made at once (more = faster, ~0.4 GB each) — Kokoro only")
+                        with gr.Column():
+                            gr.Markdown("### F5-TTS only")
+                            f5_half = gr.Checkbox(value=True, label="Half precision (about 4.8× faster on Arc, same sound) — F5-TTS only")
+                    gr.Markdown("*Qwen3-TTS has no settings of its own here.*")
 
             with gr.Tab("5 · Queue"):
                 gr.Markdown("Every book you generate is added here and made by the queue runner, which watches it: if it stalls (a GPU hang) "
