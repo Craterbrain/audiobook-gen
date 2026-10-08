@@ -74,6 +74,17 @@ def load_book(file, max_chapters):
             data["cover"], f"Loaded **{data['title']}**: {len(rows)} chapters → `{work}`")
 
 
+def open_project(work, title="", author="", cover=""):
+    """Open an existing project folder in the tabs without reading the book again. Returns what load_book returns."""
+    p = Path(work)
+    meta = json.loads(((p / "chapters.full.json") if (p / "chapters.full.json").exists() else (p / "chapters.json")).read_text())
+    kept = {c["index"] for c in json.loads((p / "chapters.json").read_text())["chapters"]}
+    rows = [[c["index"] in kept, c["index"], c["title"], len(c["text"])] for c in meta["chapters"]]
+    cov = cover or meta.get("cover") or None
+    return (str(p), pd.DataFrame(rows, columns=CHAP_COLS), title or meta.get("title", p.name), author or meta.get("author") or "",
+            cov if cov and Path(cov).exists() else None, f"Opened **{title or meta.get('title', p.name)}** from `{p}` — {len(rows)} chapters.")
+
+
 def _selected(df) -> set[int]:
     return {int(r["#"]) for _, r in df.iterrows() if r["Include"]}
 
@@ -221,6 +232,25 @@ def run_parse(project, chap_df, endpoint, use_judge=False, progress=gr.Progress(
     return (roles, pd.DataFrame(segs)[SEG_COLS], f"{len(segs)} segments, {len(roles)} roles",
             gr.update(choices=["All"] + _roles(segs), value="All"), gr.update(choices=_roles(segs)),
             show_lines(project, "All"), hints_text(project))
+
+
+def load_parsed(project):
+    """The Cast tab's contents for an already-parsed project (what run_parse returns, without parsing again)."""
+    work = _wd(project)
+    if not (work / "segments.json").exists():
+        return [], pd.DataFrame(columns=SEG_COLS), "Not parsed yet.", gr.update(choices=["All"], value="All"), gr.update(choices=[]), \
+            pd.DataFrame(columns=LINE_COLS), hints_text(project)
+    segs = json.loads((work / "segments.json").read_text())
+    roles = _roles_list(segs)
+    return (roles, pd.DataFrame(segs)[SEG_COLS], f"{len(segs)} segments, {len(roles)} roles",
+            gr.update(choices=["All"] + _roles(segs), value="All"), gr.update(choices=_roles(segs)),
+            show_lines(project, "All"), hints_text(project))
+
+
+def open_everything(work, title="", author="", cover=""):
+    """Everything the tabs show for a project: book, cast, voices, generate settings (23 values)."""
+    book = open_project(work, title, author, cover)
+    return (*book, *load_parsed(book[0]), *voice_settings(book[0]), *gen_settings(book[0]))
 
 
 def save_segments(project, seg_df):
@@ -947,8 +977,23 @@ def queue_table():
     return _pd.DataFrame(jobqueue.table(), columns=QUEUE_HEADERS)
 
 
+def queue_now() -> str:
+    from . import jobqueue
+    r = jobqueue.now_running()
+    if r:
+        prog = f"{r['pct']}% ({r['done']:,} of {r['total']:,} clips)" if r["total"] else (r["note"] or "starting")
+        live = ("" if r["since_clip"] is None else
+                f" · last clip {int(r['since_clip'])} s ago" + (" ⚠️ stalled? the watchdog will restart it" if r["since_clip"] > 300 else ""))
+        return f"▶️ **Making “{r['title']}”** — {prog}{live} · started {r['started']}"
+    nxt = [j for j in jobqueue.load() if j["status"] in ("queued", "paused")]
+    if nxt:
+        j = min(nxt, key=lambda x: jobqueue.next_start(x, datetime.now()))
+        return f"⏳ Nothing is being made right now. Next: **{j['title']}** at {jobqueue.next_start(j, datetime.now())}."
+    return "Nothing is queued."
+
+
 def queue_refresh():
-    return queue_status(), queue_table()
+    return queue_status(), queue_table(), queue_now()
 
 
 def queue_start_runner():
@@ -981,6 +1026,24 @@ def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para,
     when_txt = f"from {not_before}" if not_before else "as soon as the GPU is free"
     return (f"Queued “{jq_job['title']}” — starts {when_txt}" + (f", only between {window}" if window else "") +
             ". It is watched: if it stalls or crashes it is restarted."), *queue_refresh()
+
+
+def queue_open(job_id):
+    from . import jobqueue
+    j = next((x for x in jobqueue.load() if x["id"] == job_id), None)
+    if not j:
+        raise gr.Error("Click a job in the table first.")
+    return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
+
+
+def reconnect_on_load(project):
+    """When the page opens: if a book is being made and nothing is open, open that book, so the tabs show what the queue is doing."""
+    from . import jobqueue
+    run = jobqueue.now_running()
+    if project or not run:
+        return (gr.skip(),) * 23
+    j = next(x for x in jobqueue.load() if x["id"] == run["id"])
+    return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 
 
 def queue_pick(df, evt: gr.SelectData):
@@ -1261,6 +1324,7 @@ def build_ui() -> gr.Blocks:
                             "Every queued book is watched: if it stalls (a GPU hang) or crashes it is restarted, and it waits while "
                             "anything else is using the GPU. Uses the settings on the other tabs for the book that is open now.")
                 q_state = gr.Markdown(queue_status())
+                q_now = gr.Markdown(queue_now())
                 with gr.Row():
                     q_when = gr.DateTime(label="Start at (clear it to start as soon as the GPU is free)", include_time=True,
                                          type="string", scale=2)
@@ -1276,6 +1340,7 @@ def build_ui() -> gr.Blocks:
                 q_sel = gr.State("")
                 with gr.Row():
                     q_cancel = gr.Button("Cancel the selected job"); q_remove = gr.Button("Remove it from the list")
+                q_open = gr.Button("Open the selected book in the other tabs")
                 q_timer = gr.Timer(10)
 
             with gr.Tab("✨ Assistant"):
@@ -1452,12 +1517,17 @@ def build_ui() -> gr.Blocks:
         run.then(speed_text, project, speed_md)
         stop.click(None, cancels=[run])
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
-        q_add.click(queue_add, gen_inputs + [q_when, q_win, q_w1, q_w2], [q_msg, q_state, q_tbl])
-        q_runner.click(queue_start_runner, None, [q_msg, q_state, q_tbl])
+        q_add.click(queue_add, gen_inputs + [q_when, q_win, q_w1, q_w2], [q_msg, q_state, q_tbl, q_now])
+        q_runner.click(queue_start_runner, None, [q_msg, q_state, q_tbl, q_now])
         q_tbl.select(queue_pick, q_tbl, q_sel)
-        q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl])
-        q_remove.click(queue_remove, q_sel, [q_msg, q_state, q_tbl])
-        q_timer.tick(queue_refresh, None, [q_state, q_tbl])
+        q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl, q_now])
+        q_remove.click(queue_remove, q_sel, [q_msg, q_state, q_tbl, q_now])
+        open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
+                        mode, single_dd, single_speed, single_group, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
+        q_open.click(queue_open, q_sel, open_outputs)
+        ui.load(queue_refresh, None, [q_state, q_tbl, q_now])          # reconnect: show the queue as it is right now
+        ui.load(reconnect_on_load, project, open_outputs)              # and open the book that is being made
+        q_timer.tick(queue_refresh, None, [q_state, q_tbl, q_now])
         a_go.click(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],

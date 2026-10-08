@@ -363,6 +363,22 @@ def runner_alive() -> bool:
         return False
 
 
+def now_running() -> dict | None:
+    """The job being made right now: title, clips done/total, percent, seconds since its last clip, when it started."""
+    for j in load():
+        if j["status"] == "running":
+            done = total = pct = 0
+            try:
+                done, total = (int(x) for x in j.get("progress", "").split("/"))
+                pct = round(100 * done / total) if total else 0
+            except ValueError:
+                pass
+            newest = newest_clip(Path(j["work"]))
+            return {"id": j["id"], "title": j["title"], "done": done, "total": total, "pct": pct, "note": j.get("note", ""),
+                    "since_clip": (time.time() - newest) if newest else None, "started": j.get("started", ""), "work": j["work"]}
+    return None
+
+
 def table(now: datetime | None = None) -> list[list]:
     """Rows for the Queue tab."""
     now = now or datetime.now()

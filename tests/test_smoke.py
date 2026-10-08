@@ -473,3 +473,33 @@ def test_assistant_runs_claude_in_the_scratch_folder_only(tmp_path, monkeypatch)
     args = (assistant.scratch_dir(p) / "args.txt").read_text()
     assert "--disallowedTools Bash" in args and "make it spooky" in args       # no shell access
     assert (assistant.scratch_dir(p) / "where.txt").read_text().strip().endswith("proj/assistant")
+
+
+def test_gui_reconnects_to_a_running_job(tmp_path, monkeypatch):
+    import json, time
+    from audiobook_gen import gui, jobqueue as jq
+    jq_dir = tmp_path / "queue"
+    monkeypatch.setattr(jq, "QUEUE", jq_dir); monkeypatch.setattr(jq, "JOBS", jq_dir / "jobs.json")
+    p = _assistant_project(tmp_path)
+    (p / "clips").mkdir(); (p / "clips" / "a.wav").write_bytes(b"x")
+    job = jq.add(str(p), "Running book", "An Author")
+    jq.update(job["id"], status="running", progress="30/120", started="2026-10-09 23:00")
+    r = jq.now_running()
+    assert r["title"] == "Running book" and r["pct"] == 25 and r["since_clip"] < 60
+    assert "Making “Running book”" in gui.queue_now() and "25%" in gui.queue_now()
+    out = gui.reconnect_on_load("")                          # nothing open: it opens the running book
+    assert len(out) == 23 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
+    assert out[1]["Include"].all()                           # every chapter ticked, as it was queued
+    assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(str(p)))     # a book is already open: leave it alone
+    jq.update(job["id"], status="done")
+    assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(""))         # nothing running: leave the tabs alone
+    assert "Nothing is queued" in gui.queue_now()
+
+
+def test_gui_opens_a_saved_project_without_reading_the_book_again(tmp_path):
+    from audiobook_gen import gui
+    p = _assistant_project(tmp_path)
+    proj, chap, title, author, cover, msg = gui.open_project(str(p))
+    assert proj == str(p) and title == "T" and list(chap["#"]) == [1] and "Opened" in msg
+    roles, seg_df, status, *_ = gui.load_parsed(proj)
+    assert roles[0][0] == "Narrator" and len(seg_df) == 1
