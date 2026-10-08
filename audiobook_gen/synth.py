@@ -183,6 +183,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
 
 def synthesize(work: Path, cfg: dict, only_chapters: set[int] | None = None) -> None:
     msg = ""
-    for _, _, msg in synthesize_iter(work, cfg, only_chapters):
-        pass
+    for done, total, msg in synthesize_iter(work, cfg, only_chapters):
+        if done % 25 == 0:
+            print(f"[progress] {done}/{total}", flush=True)         # the job queue reads these
     print("[synth]", msg)

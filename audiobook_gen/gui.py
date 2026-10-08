@@ -1,5 +1,7 @@
 """Gradio GUI: Book -> Cast -> Lexicon -> Generate. Run: python -m audiobook_gen.gui"""
 import json
+import os
+from datetime import datetime
 import re
 import shutil
 import tempfile
@@ -880,8 +882,9 @@ def gen_settings(project):
             int((cfg.get("workers") or {}).get("chatterbox", 1)))
 
 
-def generate(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers=4, f5_half=True,
-             emotion=False, emo_base=0.0, lex_label=None, p_cont=140, p_tag=120, cb_workers=1):
+def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+                        emotion, emo_base, lex_label, p_cont, p_tag, cb_workers):
+    """Save the Generate-tab settings into the project's config. Returns (work dir, config, chapters to make)."""
     work = _wd(project)
     if not (work / "segments.json").exists():
         raise gr.Error("Parse the book on the Cast tab first.")
@@ -894,19 +897,146 @@ def generate(project, chap_df, title, author, cover, crossfade, p_sent, p_para, 
     cfg["workers"] = {**cfg["workers"], "chatterbox": int(cb_workers)}
     if lex_label in LEX_MODES:
         cfg["text_lexicon"] = LEX_MODES[lex_label]
-    _save_cfg(project, {**_cfg(project), **{k: cfg[k] for k in ("emotion", "emotion_base", "text_lexicon") if k in cfg},
-                        "workers": {**(_cfg(project).get("workers") or {}), "chatterbox": int(cb_workers)}})
+    _save_cfg(project, {**_cfg(project), **{k: cfg[k] for k in ("emotion", "emotion_base", "text_lexicon", "crossfade_ms", "pacing_ms") if k in cfg},
+                        "workers": cfg["workers"], "f5_precision": cfg["f5_precision"]})
+    return work, cfg, _selected(chap_df)
+
+
+def generate(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers=4, f5_half=True,
+             emotion=False, emo_base=0.0, lex_label=None, p_cont=140, p_tag=120, cb_workers=1):
+    from . import jobqueue
+    running = [j["title"] for j in jobqueue.load() if j["status"] == "running"]
+    if running:
+        raise gr.Error(f"A queued job (“{running[0]}”) is using the GPU. Wait for it, or cancel it on the Queue tab.")
+    work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+                                          emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
     vram = gpu_vram_gib()
     if int(cb_workers) > 1 and vram and vram < 16:
         yield (f"Heads up: Chatterbox with {int(cb_workers)} workers needs about 16 GB of GPU memory and this card has {vram:.0f} GB. "
                "It may run out of memory; if it stalls, set it back to 1."), None, None
-    only = _selected(chap_df)
-    for done, total, msg in synthesize_iter(work, cfg, only):
-        yield f"Synthesizing {done}/{total} — {msg}", None, None
-    yield "Assembling chapters + M4B…", None, None
-    out = assemble(work, cfg, ROOT / "out" / f"{work.name}.m4b", cover, title, author, only)
+    jobqueue.QUEUE.mkdir(parents=True, exist_ok=True)
+    jobqueue.GUI_LOCK.write_text(str(os.getpid()))              # the queue waits while this holds the GPU
+    try:
+        for done, total, msg in synthesize_iter(work, cfg, only):
+            yield f"Synthesizing {done}/{total} — {msg}", None, None
+        yield "Assembling chapters + M4B…", None, None
+        out = assemble(work, cfg, ROOT / "out" / f"{work.name}.m4b", cover, title, author, only)
+    finally:
+        jobqueue.GUI_LOCK.unlink(missing_ok=True)
     first = sorted((work / "chapters").glob("*.wav"))
     yield f"Done → `{out}`", str(out), (str(first[0]) if first else None)
+
+
+# ---------- Queue ----------
+QUEUE_HEADERS = ["Book", "Status", "Progress", "Starts", "Window", "Note", "id"]
+
+
+def queue_status() -> str:
+    from . import jobqueue
+    jobs = jobqueue.load()
+    alive = jobqueue.runner_alive()
+    waiting = sum(j["status"] in ("queued", "paused") for j in jobs)
+    return (("🟢 **Queue runner is running and watching every job.**" if alive else
+             "🔴 **The queue runner is not running** — press “Start the queue runner”. Jobs wait until it is.")
+            + f"  {waiting} waiting · {sum(j['status'] == 'running' for j in jobs)} running · {sum(j['status'] == 'done' for j in jobs)} done")
+
+
+def queue_table():
+    from . import jobqueue
+    import pandas as _pd
+    return _pd.DataFrame(jobqueue.table(), columns=QUEUE_HEADERS)
+
+
+def queue_refresh():
+    return queue_status(), queue_table()
+
+
+def queue_start_runner():
+    from . import jobqueue
+    started = jobqueue.ensure_supervisor()
+    return ("Started the queue runner." if started else "The queue runner was already running."), *queue_refresh()
+
+
+def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop):
+    from . import jobqueue
+    work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
+                                          emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
+    not_before = ""
+    if when:
+        try:
+            not_before = datetime.fromtimestamp(float(when)).strftime(jobqueue.FMT) if not isinstance(when, str) else \
+                datetime.strptime(str(when)[:16], jobqueue.FMT).strftime(jobqueue.FMT)
+        except Exception:
+            raise gr.Error("Start time not understood. Pick a date and time, or clear the box to start as soon as the GPU is free.")
+    window = ""
+    if window_on:
+        if not (re.fullmatch(r"\d{1,2}:\d{2}", (w_start or "").strip()) and re.fullmatch(r"\d{1,2}:\d{2}", (w_stop or "").strip())):
+            raise gr.Error("Write the window as times like 23:00 and 06:30.")
+        window = f"{w_start.strip()}-{w_stop.strip()}"
+    all_chapters = {int(r["#"]) for _, r in chap_df.iterrows()}
+    chapters = sorted(only) if only and only != all_chapters else None
+    jq_job = jobqueue.add(str(work), title or work.name, author or "", cover or "", "", "", chapters, not_before, window)
+    jobqueue.ensure_supervisor()
+    when_txt = f"from {not_before}" if not_before else "as soon as the GPU is free"
+    return (f"Queued “{jq_job['title']}” — starts {when_txt}" + (f", only between {window}" if window else "") +
+            ". It is watched: if it stalls or crashes it is restarted."), *queue_refresh()
+
+
+def queue_pick(df, evt: gr.SelectData):
+    try:
+        return str(df.iloc[evt.index[0]]["id"])
+    except Exception:
+        return ""
+
+
+def queue_cancel(job_id):
+    from . import jobqueue
+    if not job_id:
+        raise gr.Error("Click a job in the table first.")
+    jobqueue.cancel(job_id)
+    return "Cancelled. Clips already made are kept.", *queue_refresh()
+
+
+def queue_remove(job_id):
+    from . import jobqueue
+    if not job_id:
+        raise gr.Error("Click a job in the table first.")
+    jobqueue.remove(job_id)
+    return "Removed from the list.", *queue_refresh()
+
+
+# ---------- Assistant ----------
+def assistant_ask(project, message, history, session, spent):
+    from . import assistant
+    if not (message or "").strip():
+        raise gr.Error("Type what you would like set up.")
+    work = _wd(project)
+    r = assistant.ask(work, message.strip(), session or None)
+    history = (history or []) + [{"role": "user", "content": message.strip()}]
+    if r["error"]:
+        history.append({"role": "assistant", "content": f"⚠️ {r['error']}"})
+    else:
+        history.append({"role": "assistant", "content": r["reply"] or "(no reply)"})
+    spent = float(spent or 0) + r["cost"]
+    diffs = assistant.diff(work)
+    shown = "\n\n".join(f"**{n}**\n```diff\n{d[:6000]}{'…' if len(d) > 6000 else ''}\n```" for n, d in diffs.items())
+    problems = assistant.validate(work) if diffs else []
+    note = (f"⚠️ These changes can’t be applied yet: {'; '.join(problems)}" if problems else
+            "Review the changes below, then **Apply** them or **Discard** them." if diffs else "No changes proposed.")
+    return (history, r["session"] or "", spent, f"Claude usage this session: about ${spent:.2f}", note, shown or "_Nothing to show._",
+            gr.update(interactive=bool(diffs) and not problems), gr.update(interactive=bool(diffs)), "")
+
+
+def assistant_apply(project):
+    from . import assistant
+    msg = assistant.apply(_wd(project))
+    return msg, "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False)
+
+
+def assistant_discard(project):
+    from . import assistant
+    return assistant.discard(_wd(project)), "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False)
 
 
 # The Clone tab is a workshop rather than a step in the book flow, so its button is set apart from the numbered tabs.
@@ -1126,6 +1256,47 @@ def build_ui() -> gr.Blocks:
                     cb_workers = gr.Slider(1, 2, 1, step=1, label="Chatterbox: workers at once (2 is about 22% faster, ~4–8 GB of GPU memory each)",
                                            info="Not recommended for GPUs with less than 16 GB of VRAM.")
 
+            with gr.Tab("5 · Queue"):
+                gr.Markdown("Queue a book to be made **later** — at a set time, or only overnight — and leave the computer alone. "
+                            "Every queued book is watched: if it stalls (a GPU hang) or crashes it is restarted, and it waits while "
+                            "anything else is using the GPU. Uses the settings on the other tabs for the book that is open now.")
+                q_state = gr.Markdown(queue_status())
+                with gr.Row():
+                    q_when = gr.DateTime(label="Start at (clear it to start as soon as the GPU is free)", include_time=True,
+                                         type="string", scale=2)
+                    q_win = gr.Checkbox(label="Only run overnight", value=False, scale=1)
+                    q_w1 = gr.Textbox("23:00", label="from", scale=1)
+                    q_w2 = gr.Textbox("06:30", label="until", scale=1)
+                with gr.Row():
+                    q_add = gr.Button("Add this book to the queue", variant="primary")
+                    q_runner = gr.Button("Start the queue runner")
+                q_msg = gr.Markdown()
+                q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=False, wrap=True,
+                                     label="Queue (click a row, then cancel or remove it)")
+                q_sel = gr.State("")
+                with gr.Row():
+                    q_cancel = gr.Button("Cancel the selected job"); q_remove = gr.Button("Remove it from the list")
+                q_timer = gr.Timer(10)
+
+            with gr.Tab("✨ Assistant"):
+                gr.Markdown("Ask Claude to set up this book — “give the women different voices”, “make the narration calmer”, "
+                            "“fix how Morlock is said”. Claude works on a **copy** of the settings; you see exactly what would change "
+                            "and nothing is touched until you press Apply. It cannot start a generation, run commands or hear audio. "
+                            "Each question uses your Claude Code login (usually a few cents of usage); the cast, a few sample lines "
+                            "and the lexicon are sent to Anthropic.")
+                a_chat = gr.Chatbot(height=320, label="Conversation")
+                with gr.Row():
+                    a_in = gr.Textbox(label="What would you like set up?", scale=4, lines=2,
+                                      placeholder="e.g. Give each female character a different female voice, and make the narrator a little slower")
+                    a_go = gr.Button("Ask Claude", variant="primary", scale=1)
+                a_cost = gr.Markdown()
+                a_note = gr.Markdown()
+                a_diff = gr.Markdown("_Nothing to show._")
+                with gr.Row():
+                    a_apply = gr.Button("Apply these changes", variant="primary", interactive=False)
+                    a_discard = gr.Button("Discard", interactive=False)
+                a_session, a_spent = gr.State(""), gr.State(0.0)
+
             with gr.Tab("🎙 Clone", elem_id="clone-tab"):
                 gr.Markdown("Clone a voice from a short clean clip (5–12 s, one speaker, no music), compare the takes, then save it. "
                             "A saved voice can be spoken by F5-TTS, Chatterbox or Qwen3-TTS.")
@@ -1280,6 +1451,21 @@ def build_ui() -> gr.Blocks:
                        [status4, m4b, ch1])
         run.then(speed_text, project, speed_md)
         stop.click(None, cancels=[run])
+        gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
+        q_add.click(queue_add, gen_inputs + [q_when, q_win, q_w1, q_w2], [q_msg, q_state, q_tbl])
+        q_runner.click(queue_start_runner, None, [q_msg, q_state, q_tbl])
+        q_tbl.select(queue_pick, q_tbl, q_sel)
+        q_cancel.click(queue_cancel, q_sel, [q_msg, q_state, q_tbl])
+        q_remove.click(queue_remove, q_sel, [q_msg, q_state, q_tbl])
+        q_timer.tick(queue_refresh, None, [q_state, q_tbl])
+        a_go.click(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
+                   [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
+        a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
+                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
+        a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard]).then(
+            gen_settings, project, [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]).then(
+            voice_settings, project, [mode, single_dd, single_speed, single_group])
+        a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
                           [ab_clips, ab_dd, ab_status])
@@ -1306,6 +1492,8 @@ def build_ui() -> gr.Blocks:
 
 
 def main():
+    from . import jobqueue
+    jobqueue.ensure_supervisor()                 # queued books are always watched, even when the app was closed
     build_ui().queue().launch(server_name="127.0.0.1", server_port=7860, css=CSS)
 
 

@@ -362,3 +362,114 @@ def test_portrait_cover_layout(tmp_path):
     assert im.size == (1400, 1400)
     assert im.getpixel((700, 700))[0] > 60            # the picture is in the middle...
     assert im.getpixel((200, 700)) == (0, 0, 0)       # ...on a black page
+
+
+# ---------- job queue ----------
+def _queue_env(tmp_path, monkeypatch):
+    from audiobook_gen import jobqueue as jq
+    monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue")
+    monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
+    monkeypatch.setattr(jq, "HEARTBEAT", tmp_path / "queue" / "heartbeat")
+    work = tmp_path / "book"; work.mkdir()
+    (work / "segments.json").write_text("[]")
+    return jq, work
+
+
+def test_queue_windows_and_start_times():
+    from datetime import datetime
+    from audiobook_gen import jobqueue as jq
+    t = lambda s: datetime.strptime(s, jq.FMT)
+    assert jq.in_window("23:00-06:30", t("2026-10-09 23:30")) and jq.in_window("23:00-06:30", t("2026-10-10 06:00"))
+    assert not jq.in_window("23:00-06:30", t("2026-10-09 12:00")) and not jq.in_window("23:00-06:30", t("2026-10-10 06:30"))
+    job = {"status": "queued", "not_before": "2026-10-09 23:00", "window": ""}
+    assert not jq.due(job, t("2026-10-09 22:59")) and jq.due(job, t("2026-10-09 23:00"))
+    assert not jq.due({**job, "status": "done"}, t("2026-10-10 01:00"))
+    assert jq.next_start({"not_before": "", "window": "23:00-06:30"}, t("2026-10-09 12:00")) == "2026-10-09 23:00"
+
+
+def test_queue_runs_a_job_to_completion(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    out = tmp_path / "book.m4b"
+    job = jq.add(str(work), "Book", out=str(out))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "print('[progress] 5/10')"]
+        assemble_cmd = lambda self, j: [sys.executable, "-c", f"open({str(out)!r}, 'w').write('x')"]
+    import sys
+    assert R(poll=0.1, foreign=lambda: "").step() is True
+    done = [j for j in jq.load() if j["id"] == job["id"]][0]
+    assert done["status"] == "done" and out.exists()
+
+
+def test_queue_watchdog_restarts_a_stalled_job_then_gives_up(tmp_path, monkeypatch):
+    import sys
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    job = jq.add(str(work), "Hung book", out=str(tmp_path / "x.m4b"))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "import time; time.sleep(60)"]      # never writes a clip
+    r = R(poll=0.1, stall=0.3, grace=0.3, max_restarts=2, retry_wait=0, foreign=lambda: "")
+    r.step()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["status"] == "failed" and j["restarts"] == 3 and "gave up" in j["note"]
+
+
+def test_queue_waits_while_another_synthesis_holds_the_gpu(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    job = jq.add(str(work), "Waiting book")
+    assert jq.Runner(poll=0.1, foreign=lambda: "another synthesis").step() is False
+    assert "holds the GPU" in [x for x in jq.load() if x["id"] == job["id"]][0]["note"]
+
+
+# ---------- assistant ----------
+def _assistant_project(tmp_path):
+    import json, yaml
+    p = tmp_path / "proj"; p.mkdir()
+    (p / "config.yaml").write_text(yaml.safe_dump({"voices": {"Narrator": {"engine": "kokoro", "voice": "bm_george"}}, "genders": {}}))
+    (p / "lexicon.json").write_text(json.dumps([{"term": "Weena", "ipa": "", "source": "auto"}]))
+    (p / "segments.json").write_text(json.dumps([{"speaker": "Narrator", "kind": "narration", "text": "Hello.", "id": 1, "chapter": 1}]))
+    (p / "chapters.json").write_text(json.dumps({"title": "T", "author": "A", "chapters": [{"index": 1, "title": "One", "text": "Hello."}]}))
+    return p
+
+
+def test_assistant_proposes_validates_and_applies_changes(tmp_path):
+    import json, yaml
+    from audiobook_gen import assistant
+    p = _assistant_project(tmp_path)
+    scratch = assistant.prepare(p)
+    assert (scratch / "CLAUDE.md").exists() and (scratch / "reference" / "voices.md").exists()
+    assert assistant.diff(p) == {}
+    cfg = yaml.safe_load((scratch / "config.yaml").read_text()); cfg["voices"]["Narrator"]["voice"] = "am_adam"
+    (scratch / "config.yaml").write_text(yaml.safe_dump(cfg))
+    assert "am_adam" in assistant.diff(p)["config.yaml"] and assistant.validate(p) == []
+    assert "Applied" in assistant.apply(p)
+    assert yaml.safe_load((p / "config.yaml").read_text())["voices"]["Narrator"]["voice"] == "am_adam"
+    assert list((scratch).glob("backup-*"))                                  # the old file is kept
+
+
+def test_assistant_refuses_bad_proposals(tmp_path):
+    import yaml
+    from audiobook_gen import assistant
+    p = _assistant_project(tmp_path)
+    scratch = assistant.prepare(p)
+    cfg = yaml.safe_load((scratch / "config.yaml").read_text())
+    cfg["voices"]["Narrator"] = {"engine": "chatterbox", "library": "NoSuchVoice"}; cfg["workers"] = {"chatterbox": 99}
+    (scratch / "config.yaml").write_text(yaml.safe_dump(cfg))
+    problems = assistant.validate(p)
+    assert any("NoSuchVoice" in x for x in problems) and any("workers" in x for x in problems)
+    assert assistant.apply(p).startswith("Not applied")
+    assert "bm_george" in (p / "config.yaml").read_text()                    # untouched
+    assert "discarded" in assistant.discard(p) and assistant.diff(p) == {}
+
+
+def test_assistant_runs_claude_in_the_scratch_folder_only(tmp_path, monkeypatch):
+    import stat
+    from audiobook_gen import assistant
+    p = _assistant_project(tmp_path)
+    fake = tmp_path / "fakeclaude"
+    fake.write_text('#!/bin/bash\necho "$@" > args.txt\npwd > where.txt\necho \'{"result":"done","session_id":"s1","total_cost_usd":0.05,"is_error":false}\'\n')
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("AUDIOBOOK_CLAUDE", str(fake))
+    r = assistant.ask(p, "make it spooky")
+    assert r["reply"] == "done" and r["session"] == "s1" and r["cost"] == 0.05
+    args = (assistant.scratch_dir(p) / "args.txt").read_text()
+    assert "--disallowedTools Bash" in args and "make it spooky" in args       # no shell access
+    assert (assistant.scratch_dir(p) / "where.txt").read_text().strip().endswith("proj/assistant")
