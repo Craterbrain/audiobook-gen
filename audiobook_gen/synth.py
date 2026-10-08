@@ -9,6 +9,7 @@ import numpy as np
 import soundfile as sf
 
 from .lexicon import load_preprocessor, normalize
+from .runstats import averages, clock, record
 
 SENT_RE = re.compile(r"(?<=[.!?;:])\s+")
 POOL = ["af_sarah", "am_echo", "bf_emma", "am_liam", "af_nicole", "bm_fable", "af_sky", "am_onyx"]
@@ -137,14 +138,43 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
 
     t_audio = t_wall = 0.0
     start = time.time()
+    run_id, spent, made = f"{work.name}-{int(start)}", {}, {}    # per engine: clip seconds, characters made
+
+    def note(final: bool = False):
+        """Share the run's wall time between engines by the time their clips took, then record chars/second."""
+        busy = sum(spent.values()) or 1.0
+        for en, sec in spent.items():
+            record(run_id, en, int(workers.get(en, 1)), made[en], (time.time() - start) * sec / busy)
+
+    left = {}                                  # characters still to make, per engine
+    for t in todo:
+        left[t[3]] = left.get(t[3], 0) + len(t[1])
+    avg = averages()
+
+    def eta() -> str:
+        """Time left from each engine's running average speed (nothing until that speed is known)."""
+        if not left or not all(e in avg for e in left):
+            return ""
+        return f" · about {clock(sum(n / avg[e]['cps'] for e, n in left.items()))} left"
+
     if todo:
         with ThreadPoolExecutor(max(q.qsize() for q in pools.values())) as ex:
-            for fut in as_completed([ex.submit(make, t) for t in todo]):
+            futs = []
+            for t in todo:
+                f = ex.submit(make, t); f.en = t[3]; futs.append(f)
+            for fut in as_completed(futs):
                 speaker, chunk, dur, wall = fut.result()
                 done += 1
                 t_audio += dur
-                yield done, total, f"{speaker}: {chunk[:60]}"
+                en = fut.en
+                spent[en] = spent.get(en, 0.0) + wall
+                made[en] = made.get(en, 0) + len(chunk)
+                left[en] = max(0, left.get(en, 0) - len(chunk))
+                if done % 20 == 0:
+                    note()
+                yield done, total, f"{speaker}: {chunk[:60]}{eta()}"
     t_wall = time.time() - start
+    note(True)
     (work / "clips.json").write_text(json.dumps({seg["id"]: files for seg, files in plan}, indent=1))
     if t_audio:
         yield total, total, f"synth done: {t_audio:.0f}s audio in {t_wall:.0f}s (RTF {t_wall / t_audio:.2f})"

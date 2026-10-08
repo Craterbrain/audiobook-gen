@@ -326,3 +326,16 @@ def test_verified_lexicon_mode_only_respells_tested_names():
 def test_respell_rules_make_readable_spellings():
     from audiobook_gen.respell_rules import respell
     assert respell("ˈheɪɡɑɹ").lower().startswith("haygar")
+
+
+def test_run_stats_average_and_estimate(tmp_path, monkeypatch):
+    from audiobook_gen import runstats
+    monkeypatch.setattr(runstats, "PATH", tmp_path / "run_stats.json")
+    runstats.record("a", "chatterbox", 1, 3000, 300)      # 10 chars/s
+    runstats.record("b", "chatterbox", 1, 1000, 50)       # 20 chars/s
+    runstats.record("b", "chatterbox", 1, 2000, 100)      # same run again: updated, not added
+    runstats.record("c", "kokoro", 4, 100, 5)             # too short to count
+    avg = runstats.averages()
+    assert avg["chatterbox"]["runs"] == 2 and abs(avg["chatterbox"]["cps"] - 5000 / 400) < 1e-6
+    assert "kokoro" not in avg
+    assert runstats.clock(90 * 60) == "1 h 30 min"

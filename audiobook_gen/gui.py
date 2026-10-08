@@ -842,6 +842,33 @@ def engine_status() -> str:
             + (f" · GPU memory: {v:.0f} GB" if v else " · no Intel GPU found (CPU only)"))
 
 
+ENGINE_NAMES = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "qwen3": "Qwen3-TTS"}
+
+
+def speed_text(project=None) -> str:
+    """Running average speed of every engine from past runs, plus an estimate for the open book."""
+    from .runstats import averages, clock
+    avg = averages()
+    if not avg:
+        return "**Speed** — no runs recorded yet. After a few runs this shows the average speed of each engine and how long this book should take."
+    parts = [f"{ENGINE_NAMES.get(e, e)} {a['cps']:.1f} characters/s ({a['runs']} run{'s' if a['runs'] != 1 else ''})"
+             for e, a in sorted(avg.items())]
+    text = "**Speed, running average** — " + " · ".join(parts)
+    try:
+        cfg = _cfg(project)
+        segs = json.loads((_wd(project) / "segments.json").read_text())
+        per: dict[str, int] = {}
+        for sg in segs:
+            e = resolve_voice(sg["speaker"], cfg)["engine"]
+            per[e] = per.get(e, 0) + len(sg["text"])
+        if per and all(e in avg for e in per):
+            secs = sum(n / avg[e]["cps"] for e, n in per.items())
+            text += f"\n\n**This book:** {sum(per.values()):,} characters, about {clock(secs)} from scratch (clips already made are skipped)."
+    except Exception:
+        pass
+    return text
+
+
 def gen_settings(project):
     """Generate-tab engine options as saved in the project's config."""
     cfg = _cfg(project)
@@ -1072,6 +1099,7 @@ def build_ui() -> gr.Blocks:
                         term_audio = gr.Audio(label="Pronunciation", scale=2, autoplay=True)
             with gr.Tab("4 · Generate"):
                 eng_status = gr.Markdown(engine_status())
+                speed_md = gr.Markdown(speed_text())
                 with gr.Row():
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
                                          info="Each sentence gets its own expressiveness, from its mood and tags like “cried” or “whispered”.")
@@ -1219,7 +1247,7 @@ def build_ui() -> gr.Blocks:
 
         load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
-            gen_settings, project, [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers])
+            gen_settings, project, [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]).then(speed_text, project, speed_md)
         parse_btn.click(run_parse, [project, chap_df, endpoint, judge_cb],
                         [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group])
@@ -1250,6 +1278,7 @@ def build_ui() -> gr.Blocks:
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
         run = go.click(generate, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers],
                        [status4, m4b, ch1])
+        run.then(speed_text, project, speed_md)
         stop.click(None, cancels=[run])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
