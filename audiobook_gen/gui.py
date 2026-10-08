@@ -984,7 +984,7 @@ def build_ui() -> gr.Blocks:
                             v = resolve_voice(role, cfg)
                             out += [gr.update(visible=True), f"**{role}**  \n{n} line{'s' if n != 1 else ''}",
                                     (cfg.get("genders") or {}).get(role, "unknown"),
-                                    gr.update(choices=choices, value=casting.key_of(v)), v.get("speed", 1.0), role]
+                                    gr.update(choices=choices, value=casting.key_of((cfg.get("voices") or {}).get(role) or v)), v.get("speed", 1.0), role]
                         else:
                             out += [gr.update(visible=False), "", gr.skip(), gr.skip(), gr.skip(), ""]
                     return out

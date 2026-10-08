@@ -303,3 +303,9 @@ def test_placeholder_cover_has_large_readable_title(tmp_path):
     mid = im.crop((200, 480, 1200, 720))                 # where a one-word title is set
     bright = sum(1 for v in mid.getdata() if v > 200)
     assert bright > 20000                                # big cream letters, not the tiny default font
+
+
+def test_voice_menu_keys_round_trip_through_the_config():
+    from audiobook_gen import casting
+    for key in ("kokoro:am_onyx", "kokoro:pack:wakers_ch16", "clone:Walter", "clone:Walter@chatterbox", "clone:Walter@qwen3"):
+        assert casting.key_of(casting.voice_of(key, 1.0)) == key
