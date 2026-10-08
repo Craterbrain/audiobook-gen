@@ -32,9 +32,7 @@ MAX_ROLES = 30
 MODE_MULTI = "Different voice for each character"
 MODE_SINGLE = "One narrator reads everything"
 ENGINE_LABELS = {"F5-TTS": "f5", "Chatterbox": "chatterbox", "Qwen3-TTS": "qwen3"}
-LEX_MODES = {"Tested respellings — plain spelling, fixed where tested (Chatterbox, recommended)": "verified",
-             "Real IPA — for Qwen3": "rawipa",
-             "Phonetic respelling — F5 style": "respell",
+LEX_MODES = {"Phonetic respelling — made from the IPA where blank": "respell",
              "Plain spelling — no substitutions": "plain"}
 CHAP_COLS = ["Include", "#", "Title", "Characters"]
 SEG_COLS = ["id", "chapter", "speaker", "kind", "text"]
@@ -431,7 +429,8 @@ def save_lexicon(project, lex_df):
             e.update(new, source="user")
     fill_respell(old.values(), refresh=True)   # IPA you typed -> an auto-made respelling for F5
     (work / "lexicon.json").write_text(json.dumps(list(old.values()), ensure_ascii=False, indent=2))
-    return "Lexicon saved (respellings for F5 are made from the IPA where you left them blank)."
+    return ("Lexicon saved. Kokoro uses your IPA; Chatterbox and Qwen3 use only respellings you typed; "
+            "F5 also gets a respelling made from the IPA where you left it blank.")
 
 
 def lex_autospell(project, lex_df):
@@ -905,7 +904,7 @@ def gen_settings(project):
     """Generate-tab engine options as saved in the project's config."""
     cfg = _cfg(project)
     mode = cfg.get("text_lexicon", "respell")
-    label = next((k for k, v in LEX_MODES.items() if v == mode), list(LEX_MODES)[2])
+    label = next((k for k, v in LEX_MODES.items() if v == mode), list(LEX_MODES)[0])
     pm = cfg.get("pacing_ms") or {}
     return (bool(cfg.get("emotion")), float(cfg.get("emotion_base", 0.0)), label,
             int(pm.get("continuation", 140)), int(pm.get("tag", 120)),
@@ -1256,7 +1255,9 @@ def build_ui() -> gr.Blocks:
                                               datatype=["str", "number", "str", "str", "str"])
                         save_seg_btn = gr.Button("Save segments")
             with gr.Tab("3 · Lexicon"):
-                gr.Markdown("How names and hard words are pronounced. **Build lexicon**, fill in the IPA (try **Look up**), review, then **Save**.")
+                gr.Markdown("How names and hard words are pronounced. **Build lexicon**, fill in the IPA (try **Look up**), review, then **Save**.\n\n"
+                            "**Who uses what:** Kokoro voices use the **IPA** column. **Chatterbox and Qwen3 use only the respelling you type** in the "
+                            "*respell* column — IPA and auto-made spellings never reach them. F5-TTS uses the respelling, made from the IPA where blank.")
                 with gr.Row():
                     lex_btn = gr.Button("Build lexicon", variant="primary", scale=1)
                     lookup_btn = gr.Button("Look up IPA online (Wiktionary / WikiPron / Bible dictionary)", scale=2)
@@ -1313,7 +1314,8 @@ def build_ui() -> gr.Blocks:
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
                                          info="Each sentence gets its own expressiveness, from its mood and tags like “cried” or “whispered”.")
                     lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[0], scale=3,
-                                      label="How names and hard words are spoken by F5, Chatterbox and Qwen3")
+                                      label="How names and hard words are spoken by F5-TTS",
+                                      info="Chatterbox and Qwen3 always use only the respellings you typed in the lexicon; Kokoro uses the IPA.")
                 with gr.Row():
                     go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Cancel")
                 status4 = gr.Markdown()

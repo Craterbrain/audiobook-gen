@@ -64,6 +64,18 @@ _ENGINES: dict = {}  # shared across calls so the GUI doesn't reload models ever
 DEFAULT_WORKERS = {"kokoro": 4, "f5": 1, "qwen3": 1, "chatterbox": 1}  # Kokoro: 1 worker 59 s, 3 -> 23 s, 4 -> 17 s on John 1; F5 saturates the GPU (no gain)
 
 
+def lexicon_mode(ename: str, cfg: dict) -> str:
+    """How an engine receives the lexicon. Kokoro takes IPA. Chatterbox and Qwen3 take ONLY respellings you typed (Chatterbox
+    also the tested Bible respellings); F5 follows the project's text_lexicon setting."""
+    if ename == "kokoro":
+        return "ipa"
+    if ename == "chatterbox":
+        return "verified"
+    if ename == "qwen3":
+        return "typed"
+    return cfg.get("text_lexicon", "respell")
+
+
 def get_engine(name: str, device_pref: str = "auto", slot: int = 0, precision: str = "float16"):
     key = (name, device_pref, slot)
     if key not in _ENGINES:  # lazy: only load what the config needs
@@ -104,7 +116,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
         voice = resolve_voice(seg["speaker"], cfg)
         ename = voice["engine"]
         if ename not in lex:
-            lex[ename] = load_preprocessor(work, "ipa" if ename == "kokoro" else cfg.get("text_lexicon", "respell"))
+            lex[ename] = load_preprocessor(work, lexicon_mode(ename, cfg))
         files = []
         for ci, chunk in enumerate(lex[ename].substitute(c) for c in raw[si]):
             if feel and ename == "chatterbox":

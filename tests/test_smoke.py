@@ -291,7 +291,7 @@ def test_interface_builds_with_every_engine_option():
     from audiobook_gen import gui
     assert gui.build_ui() is not None
     assert set(gui.ENGINE_LABELS.values()) == {"f5", "chatterbox", "qwen3"}
-    assert set(gui.LEX_MODES.values()) == {"verified", "rawipa", "respell", "plain"}
+    assert set(gui.LEX_MODES.values()) == {"respell", "plain"}
 
 
 def test_placeholder_cover_has_large_readable_title(tmp_path):
@@ -532,3 +532,19 @@ def test_chatterbox_lexicon_uses_only_respellings_you_typed():
            {"term": "Eloi", "respell": "eloy", "source": "auto"}]
     out = Preprocessor(lex, "verified")("Weena met Filby and the Eloi.")
     assert "Weenuh" in out and "Filby" in out and "filbee" not in out and "Eloi" in out
+
+
+def test_chatterbox_and_qwen3_get_only_typed_respellings():
+    from audiobook_gen.lexicon import Preprocessor
+    from audiobook_gen.synth import lexicon_mode
+    cfg = {"text_lexicon": "rawipa"}                                   # even a project set to raw IPA
+    assert lexicon_mode("kokoro", cfg) == "ipa"
+    assert lexicon_mode("chatterbox", cfg) == "verified" and lexicon_mode("qwen3", cfg) == "typed"
+    assert lexicon_mode("f5", cfg) == "rawipa" and lexicon_mode("f5", {}) == "respell"
+    lex = [{"term": "Weena", "ipa": "ˈwiːnə", "respell": "Weenuh", "respell_src": "user", "source": "user"},
+           {"term": "Eloi", "ipa": "ˈiːlɔɪ", "respell": "eeloy", "respell_src": "auto", "source": "auto"},
+           {"term": "Morlock", "ipa": "ˈmɔɹlɑk", "respell": "", "source": "user"}]                # IPA only
+    for mode in ("verified", "typed"):
+        out = Preprocessor(lex, mode)("Weena, Eloi and Morlock.")
+        assert out == "Weenuh, Eloi and Morlock."                      # no IPA, no auto-made spellings
+    assert "Shimmee-eye" in Preprocessor([], "verified")("Shimei came.") and "Shimei" in Preprocessor([], "typed")("Shimei came.")

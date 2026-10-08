@@ -22,16 +22,16 @@ single_voice: {enabled: true, voice: {...}}            # enabled: one voice read
 genders: {Sola: female, Tars: male, Crowd: unknown}    # used to pick voices; male | female | unknown
 emotion: true                 # per-sentence expressiveness, Chatterbox voices only
 emotion_base: 0.0             # -0.3 calmer ... +0.3 more dramatic
-text_lexicon: verified        # verified | respell | rawipa | plain  (see below)
+text_lexicon: respell         # respell | plain  (F5 voices only; see below)
 pacing_ms: {sentence: 350, paragraph: 700, speaker_change: 250, chapter_start: 1200, continuation: 140, tag: 120}
 crossfade_ms: 60
 workers: {kokoro: 4, f5: 1, qwen3: 1, chatterbox: 1}   # chatterbox 2 needs 16 GB of GPU memory
 ```
 - Engines: `kokoro` (fast, preset voices), `chatterbox` (clone voices, expressive, slow, about 22 characters a second),
   `f5` and `qwen3` (clone voices). A clone voice is `{engine: <engine>, library: <name from voices.md>}`.
-- `text_lexicon` is how names are given to the non-Kokoro engines: `verified` = ordinary spelling plus tested respellings
-  (best for Chatterbox), `respell` = phonetic respelling (F5), `rawipa` = bare IPA (Qwen3), `plain` = no substitutions.
-  Kokoro always uses the lexicon's IPA.
+- Names and hard words: Kokoro voices use the lexicon's `ipa`. Chatterbox and Qwen3 voices use ONLY respellings typed in the
+  lexicon (`respell` with `respell_src: user`), and Chatterbox also the project's tested Bible respellings; IPA never reaches them.
+  `text_lexicon` (`respell` or `plain`) only affects F5 voices.
 - Give each character a voice of their gender and keep voices distinct. Do not change the narrator unless asked.
 - Never invent a voice name or library name; use only those in `reference/voices.md`.
 
