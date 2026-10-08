@@ -339,3 +339,15 @@ def test_run_stats_average_and_estimate(tmp_path, monkeypatch):
     assert avg["chatterbox"]["runs"] == 2 and abs(avg["chatterbox"]["cps"] - 5000 / 400) < 1e-6
     assert "kokoro" not in avg
     assert runstats.clock(90 * 60) == "1 h 30 min"
+
+
+def test_cover_with_a_picture_background(tmp_path):
+    from PIL import Image
+    from audiobook_gen.assemble import make_cover
+    Image.new("RGB", (900, 600), (230, 230, 230)).save(tmp_path / "bg.jpg")      # a bright, wide picture
+    out = make_cover(tmp_path / "c.jpg", "A Test Title", "An Author", str(tmp_path / "bg.jpg"), (0.4, 0.5), 1.2)
+    im = Image.open(out)
+    assert im.size == (1400, 1400)
+    assert im.convert("L").resize((1, 1)).getpixel((0, 0)) < 110                  # toned down so the title can be read
+    far = make_cover(tmp_path / "d.jpg", "Zoomed Out", "", str(tmp_path / "bg.jpg"), (0.5, 0.5), 0.8)
+    assert Image.open(far).size == (1400, 1400)

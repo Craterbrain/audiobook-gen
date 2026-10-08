@@ -121,19 +121,46 @@ def _tracked(d, xy, text, font, fill, track: int, anchor_center: bool = True):
         x += w + track
 
 
-def make_cover(path: Path, title: str, author: str) -> Path:
-    """A 1400x1400 placeholder cover: navy gradient, double gold frame, auto-fitted serif title, divider, author."""
+def _photo_background(path: str, W: int, focus: tuple[float, float], zoom: float):
+    """The picture cropped square around `focus` (fractions of its width/height), toned down so light text reads on it."""
+    from PIL import Image
+    im = Image.open(path)
+    if im.mode in ("RGBA", "LA", "P"):
+        im = im.convert("RGBA"); flat = Image.new("RGB", im.size, (0, 0, 0)); flat.paste(im, mask=im.split()[-1]); im = flat
+    im = im.convert("RGB")
+    w, h = im.size
+    side = min(w, h) / zoom                                               # zoom < 1 shows more than the picture: the edges extend in black
+    x0 = min(max(focus[0] * w - side / 2, 0), w - side) if side <= w else (w - side) / 2
+    y0 = min(max(focus[1] * h - side / 2, 0), h - side) if side <= h else (h - side) / 2
+    canvas = Image.new("RGB", (int(side), int(side)), (0, 0, 0))
+    canvas.paste(im, (-int(x0), -int(y0)))
+    a = np.asarray(canvas.resize((W, W), Image.LANCZOS), dtype="float32") / 255
+    lum = float(a.mean() or 1e-3)
+    a = a * min(1.0, 0.32 / lum)                                          # bright pictures are darkened more
+    y = np.linspace(0, 1, W)[:, None, None]
+    a = a * (1 - 0.5 * np.exp(-(((y - 0.5) / 0.2) ** 2)))                 # a darker band where the title sits
+    navy = np.array([18, 24, 44], dtype="float32") / 255
+    a = a * 0.88 + navy * 0.12                                            # one shared tint, so every cover feels like a set
+    return Image.fromarray((np.clip(a, 0, 1) * 255).astype("uint8"))
+
+
+def make_cover(path: Path, title: str, author: str, background: str | None = None,
+               focus: tuple[float, float] = (0.5, 0.5), zoom: float = 1.0) -> Path:
+    """A 1400x1400 cover: navy gradient (or a toned-down picture), double gold frame, auto-fitted serif title, divider, author."""
     from PIL import Image, ImageDraw
     S, N = 2, 1400                                    # drawn at 2x and scaled down, for smooth edges
     W = N * S
     gold, cream, mute = (212, 175, 90), (244, 237, 218), (160, 140, 96)
-    img = Image.new("RGB", (W, W))
-    px = img.load()
-    for y in range(W):                                # vertical gradient, a little lighter in the middle
-        t = abs(y / W - 0.5) * 2
-        c = tuple(int(a + (b - a) * t) for a, b in zip((38, 50, 88), (18, 24, 44)))
-        for x in range(W):
-            px[x, y] = c
+    if background:
+        img = _photo_background(background, W, focus, zoom)
+    else:
+        img = Image.new("RGB", (W, W))
+        px = img.load()
+        for y in range(W):                            # vertical gradient, a little lighter in the middle
+            t = abs(y / W - 0.5) * 2
+            c = tuple(int(a + (b - a) * t) for a, b in zip((38, 50, 88), (18, 24, 44)))
+            for x in range(W):
+                px[x, y] = c
     d = ImageDraw.Draw(img)
     d.rectangle([60 * S, 60 * S, (N - 60) * S, (N - 60) * S], outline=gold, width=7 * S)
     d.rectangle([84 * S, 84 * S, (N - 84) * S, (N - 84) * S], outline=mute, width=2 * S)
@@ -153,6 +180,8 @@ def make_cover(path: Path, title: str, author: str) -> Path:
     total = cap + (len(lines) - 1) * lh + ((80 + 82 * len(authors)) * S if authors else 0)
     y = (W - total) // 2 + cap - 10 * S               # first baseline: the whole block is centred, a touch high
     for l in lines:
+        if background:
+            d.text((cx + 3 * S, y + 4 * S), l, font=f, fill=(0, 0, 0), anchor="ms")      # soft shadow keeps it legible on a picture
         d.text((cx, y), l, font=f, fill=cream, anchor="ms")
         y += lh
     y -= lh                                           # back to the last baseline
