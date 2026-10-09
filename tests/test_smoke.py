@@ -856,3 +856,37 @@ def test_wait_for_does_not_match_itself(tmp_path):
         assert subprocess.run(waiter).returncode == 2        # really running: waits, then times out
     finally:
         p.kill()
+
+
+def test_pace_notices_a_crawl_but_not_a_normal_run():
+    from audiobook_gen.jobqueue import Pace
+    p = Pace(started=0)
+    fast = [i * 20.0 for i in range(100)]                       # a clip every 20 s: 30 per window
+    assert not p.slow(fast, 1500)                               # fine
+    assert not Pace(started=0).slow([], 100)                    # warm-up: too early to judge
+    assert p.slow(fast[:50], 3000) is True                      # nothing new for a long while after being fast
+    assert not Pace(started=0).slow([], 3000)                   # never got fast: nothing to compare with
+
+
+def test_group_rss_counts_a_process_group():
+    import os, subprocess, sys
+    from audiobook_gen.jobqueue import group_rss
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"], start_new_session=True)
+    try:
+        assert group_rss(p.pid) > 0.001
+    finally:
+        p.kill()
+
+
+def test_queue_restarts_a_long_running_speech_process_without_counting_a_failure(tmp_path, monkeypatch):
+    import sys
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "PACE_EVERY", 0.1)
+    out, marker = tmp_path / "x.m4b", tmp_path / "second"
+    job = jq.add(str(work), "Long book", out=str(out))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", f"import os, time\nif os.path.exists({str(marker)!r}): print('[progress] 1/1')\nelse:\n    open({str(marker)!r}, 'w').write('x'); time.sleep(60)"]
+        assemble_cmd = lambda self, j: [sys.executable, "-c", f"open({str(out)!r}, 'w').write('x')"]
+    R(poll=0.1, recycle=0.5, stall=60, grace=60, retry_wait=0, foreign=lambda: "").step()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["status"] == "done" and j.get("restarts", 0) == 0

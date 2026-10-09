@@ -41,6 +41,9 @@ STALL = 600           # seconds without a new clip before the job is restarted
 START_GRACE = 900     # model loading and emotion analysis write no clips for a while
 MAX_RESTARTS = 6
 POLL = 20
+RECYCLE = 4 * 3600    # a speech process that has run this long is restarted (it slowed to a crawl after about 4 h 50 min, twice)
+PACE_EVERY = 60       # seconds between pace checks / memory notes
+MEM_EVERY = 300
 ACTIVE = ("queued", "paused", "running")
 FMT = "%Y-%m-%d %H:%M"
 
@@ -355,10 +358,58 @@ def newest_clip(work: Path) -> float:
     return newest
 
 
+def clip_times(work: Path, since: float = 0.0) -> list[float]:
+    """Modification times of the clips made since `since`."""
+    out = []
+    try:
+        with os.scandir(work / "clips") as it:
+            for e in it:
+                if e.name.endswith(".wav"):
+                    t = e.stat().st_mtime
+                    if t >= since:
+                        out.append(t)
+    except OSError:
+        pass
+    return out
+
+
+class Pace:
+    """Notices a speech process that has slowed to a fraction of its own best speed (clips still trickle in, so the plain
+    "no clip for 10 minutes" stall check never fires)."""
+    WINDOW = 600          # seconds over which clips are counted
+    WARMUP = 1200         # judge only after the process has run this long
+    MIN_PEAK = 20         # clips per window the process must once have reached before a slowdown means anything
+    SLOW = 0.25           # slower than this share of its best window = slow
+
+    def __init__(self, started: float):
+        self.started, self.peak = started, 0
+
+    def slow(self, times: list[float], now: float) -> bool:
+        if now - self.started < self.WARMUP:
+            return False
+        n = sum(1 for t in times if t > now - self.WINDOW)
+        self.peak = max(self.peak, n)
+        return self.peak >= self.MIN_PEAK and n < self.peak * self.SLOW
+
+
+def group_rss(pgid: int) -> float:
+    """Memory (GB) held by every process of a process group (the job and its worker processes)."""
+    total = 0
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                stat = (d / "stat").read_text().rsplit(")", 1)[1].split()
+                if int(stat[2]) == pgid:
+                    total += int(stat[21]) * os.sysconf("SC_PAGE_SIZE")
+            except (OSError, ValueError, IndexError):
+                pass
+    return total / 2**30
+
+
 class Runner:
-    def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS,
+    def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS, recycle: float = RECYCLE,
                  foreign=foreign_synthesis, now=datetime.now, retry_wait: float = 30, sender=send_file, send_every: float = SEND_EVERY):
-        self.poll, self.stall, self.grace, self.max_restarts = poll, stall, grace, max_restarts
+        self.poll, self.stall, self.grace, self.max_restarts, self.recycle = poll, stall, grace, max_restarts, recycle
         self.sender, self.send_every, self._sender_thread = sender, send_every, None
         self.foreign, self.now, self.retry_wait = foreign, now, retry_wait
 
@@ -426,9 +477,18 @@ class Runner:
         except Exception:
             pass
 
+    def _note_memory(self, job: dict, proc: subprocess.Popen, started: float) -> None:
+        """One line in the job log: how much memory the speech process holds after how long (to see whether it grows)."""
+        try:
+            with open(QUEUE / f"{job['id']}.log", "a") as f:
+                f.write(f"[memory] {group_rss(proc.pid):.1f} GB after {(time.time() - started) / 60:.0f} min\n")
+        except OSError:
+            pass
+
     def _watch(self, job: dict, proc: subprocess.Popen, stage: str) -> str:
         """Watch one stage. Returns "ok", "failed", "stalled", "window" (closed), or "cancelled"."""
-        started = last_tick = time.time()
+        started = last_tick = last_check = last_mem = time.time()
+        pace = Pace(started)
         while True:
             time.sleep(self.poll)
             self._beat()
@@ -449,6 +509,17 @@ class Runner:
                 if not in_window(job.get("window", ""), self.now()):
                     _kill_group(proc)
                     return "window"
+                if time.time() - last_check >= PACE_EVERY:
+                    last_check = time.time()
+                    if time.time() - started > self.recycle:
+                        _kill_group(proc)
+                        return "recycle"
+                    if pace.slow(clip_times(Path(job["work"]), started), time.time()):
+                        _kill_group(proc)
+                        return "slow"
+                if time.time() - last_mem >= MEM_EVERY:
+                    last_mem = time.time()
+                    self._note_memory(job, proc, started)
                 last = max(newest_clip(Path(job["work"])), started)
                 if time.time() - started > self.grace and time.time() - last > self.stall:
                     _kill_group(proc)
@@ -497,6 +568,10 @@ class Runner:
                 if result == "window":
                     update(job["id"], status="paused", note="paused: outside its daily window (finished clips are kept)")
                     return
+                if result in ("recycle", "slow"):                # a planned fresh start, not a failure: finished clips are kept
+                    update(job["id"], note=("restarted the speech process to keep it fast" if result == "recycle"
+                                            else "speech had slowed down; restarted it"))
+                    continue
                 restarts = int(cur.get("restarts", 0)) + 1
                 update(job["id"], restarts=restarts, note=f"{stage} {result}; restart {restarts} of {self.max_restarts}")
                 if restarts > self.max_restarts:
