@@ -1191,3 +1191,17 @@ def test_language_pass_marks_questions_and_never_changes_words(tmp_path, monkeyp
     p = emotion.blend({"neutral": 0.9, "anger": 0.1}, {"emo": "anger", "lvl": 3})
     assert p["anger"] > 0.6 and abs(sum(p.values()) - 1) < 1e-9
     assert emotion.blend({"neutral": 1.0}, None) == {"neutral": 1.0}
+
+
+def test_degrees_minutes_and_compass_points_are_spelled_out():
+    from audiobook_gen.lexicon import normalize
+    assert normalize("in latitude 5° 3′ S. and longitude 101° W. in a small boat") == \
+        "in latitude five degrees three minutes south and longitude one hundred and one degrees west in a small boat"
+    assert normalize("latitude 1° S. and") == "latitude one degree south and"
+    assert normalize("42° 15′ N. lat. and 60° 35′ W. long. In the") == \
+        "forty-two degrees fifteen minutes north latitude and sixty degrees thirty-five minutes west longitude. In the"
+    assert normalize("69° 50′ 72″ E.") == "sixty-nine degrees fifty minutes seventy-two seconds east"
+    assert normalize("2 deg. or 3° below zero") == "two degrees or three degrees below zero"
+    assert normalize("98° F. in the shade") == "ninety-eight degrees Fahrenheit in the shade"
+    assert normalize("W.N.W., making") == "west-north-west, making"
+    assert normalize("N. Smith met E. Nesbit") == "N. Smith met E. Nesbit"        # initials are left alone

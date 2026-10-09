@@ -498,8 +498,56 @@ def _roman(s: str) -> int:
     return tot
 
 
+# --- degrees, minutes, seconds: "42° 15′ N. lat." -> "forty-two degrees fifteen minutes north latitude" (engines stumble on the symbols)
+_NUM = r"\d+(?:\.\d+)?"
+_DEG = r"(?:°|\bdeg(?:rees?)?\b\.?)"
+_ANGLE_RE = re.compile(
+    rf"(?P<d>{_NUM})\s*{_DEG}"
+    rf"(?:\s*(?P<m>{_NUM})\s*[′’'](?!\w))?"
+    rf"(?:\s*(?P<s>{_NUM})\s*(?:″|”|\"|′′|''))?"
+    rf"(?:\s*(?P<f>[CF])\b\.?)?"                                       # 98° F.  ->  degrees Fahrenheit
+    rf"(?:\s+(?P<dir>[NSEW])\.(?=[\s,;)]|$))?"
+    rf"(?:\s+(?P<ll>lat|long)\b\.?)?")
+_COMPASS_RE = re.compile(r"(?<![\w.])(?:[NSEW]\.){2,4}(?!\w)")
+_COMPASS = {"N": "north", "S": "south", "E": "east", "W": "west"}
+
+
+def _say_number(x: str) -> str:
+    from num2words import num2words
+    return num2words(float(x)) if "." in x else num2words(int(x))
+
+
+def expand_angles(text: str) -> str:
+    """Spell out degree/minute/second marks, compass letters and lat./long. so the voice reads them as speech."""
+    def unit(n: str, name: str) -> str:
+        return f"{_say_number(n)} {name}" + ("" if n == "1" else "s")
+
+    def angle(m):
+        parts = [unit(m["d"], "degree")]
+        if m["m"]:
+            parts.append(unit(m["m"], "minute"))
+        if m["s"]:
+            parts.append(unit(m["s"], "second"))
+        out = " ".join(parts)
+        if m["f"]:
+            out += " " + {"C": "Celsius", "F": "Fahrenheit"}[m["f"]]
+        if m["dir"]:
+            out += " " + _COMPASS[m["dir"]]
+        if m["ll"]:
+            out += " " + {"lat": "latitude", "long": "longitude"}[m["ll"]]
+        # an abbreviation's period that was swallowed is put back when a new sentence starts right after it ("... W. long. In the")
+        if m.group(0).endswith(".") and re.match(r"\s+[A-Z“\"‘']", m.string[m.end():]):
+            out += "."
+        return out
+
+    def compass(m):
+        return "-".join(_COMPASS[c] for c in re.findall(r"[NSEW]", m.group(0)))
+    return _COMPASS_RE.sub(compass, _ANGLE_RE.sub(angle, text))
+
+
 def normalize(text: str) -> str:
     from num2words import num2words
+    text = expand_angles(text)
     for rx, rep in ABBREVIATIONS:
         text = re.sub(rx, rep, text)
 
