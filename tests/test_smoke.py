@@ -1228,3 +1228,19 @@ def test_a_chunk_cut_mid_phrase_is_not_followed_by_a_sentence_pause(tmp_path):
     full = build_chapter(seg, clips, tmp_path, cfg, {"a.wav": {"text": "It ended.", "cut": "end"}, "b.wav": {"text": "Next."}})
     assert len(full) - len(cut) == int(sr * 0.32)                  # 350 ms vs 30 ms
     assert len(build_chapter(seg, clips, tmp_path, cfg)) == len(full)      # no clip list: the old sentence pause
+
+
+def test_a_finished_book_is_sent_while_the_next_one_is_being_made(tmp_path, monkeypatch):
+    import sys, time
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    done_out = tmp_path / "done.m4b"; done_out.write_text("x")
+    a = jq.add(str(work), "Finished", out=str(done_out), send_to="dev")
+    jq.update(a["id"], status="done", send_try=time.time())     # just tried: the step's own delivery pass skips it
+    b = jq.add(str(work), "Running", out=str(tmp_path / "b.m4b"))
+    sent = []
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "import time; time.sleep(2.5); print('[progress] 1/1')"]
+        assemble_cmd = lambda self, j: [sys.executable, "-c", f"open({str(tmp_path / 'b.m4b')!r}, 'w').write('x')"]
+    r = R(poll=0.2, foreign=lambda: "", sender=lambda d, p: sent.append(p) or True, send_every=1.0)
+    r.step()                                   # makes "Running"; delivery of "Finished" must happen during it, not only before it
+    assert sent and [j for j in jq.load() if j["id"] == a["id"]][0]["sent"]

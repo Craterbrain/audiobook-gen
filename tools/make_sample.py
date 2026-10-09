@@ -25,25 +25,35 @@ def main() -> None:
         if not run:
             raise SystemExit("no book is being made right now; give --work")
         work = Path(run["work"])
+    import yaml
+    from audiobook_gen.assemble import build_chapter
+    from audiobook_gen.synth import load_segments
     meta = json.loads((work / "clips_meta.json").read_text())
-    parts, total, sr = [], 0.0, None
+    cfg = yaml.safe_load((work / "config.yaml").read_text())
+    for k, v in yaml.safe_load((ROOT / "config.yaml").read_text()).items():      # settings the book's own config leaves out
+        cfg.setdefault(k, v)
+    run, total = [], 0.0                     # the first unbroken stretch of finished clips that is long enough
     for f, m in meta.items():
         p = work / "clips" / f
         if not p.exists():
             if total >= a.seconds:
                 break
-            parts, total = [], 0.0                  # the run broke before it was long enough: start again after the gap
+            run, total = [], 0.0
             continue
-        audio, sr = sf.read(p, dtype="float32")
-        if len(audio) / sr < 2.0 and not parts:      # skip a heading read on its own at the start
+        d = sf.info(p).duration
+        if d < 2.0 and not run:              # skip a heading read on its own at the start
             continue
-        parts.append(audio); total += len(audio) / sr + 0.4
+        run.append(f); total += d + 0.4
         if total >= a.seconds:
             break
     if total < a.seconds * 0.6:
         raise SystemExit(f"only {total:.0f} s of unbroken clips so far; try again later")
-    gap = np.zeros(int(sr * 0.4), np.float32)
-    joined = np.concatenate([x for p in parts for x in (p, gap)])
+    seg_ids = list(dict.fromkeys(meta[f]["seg"] for f in run))
+    clips = {sid: [f for f in run if meta[f]["seg"] == sid] for sid in seg_ids}
+    segs = [s for s in load_segments(work, cfg) if s["id"] in clips]
+    joined = build_chapter(segs, clips, work / "clips", cfg, meta)       # the same pauses, trimming and joins as the real audiobook
+    sr, parts = cfg["sample_rate"], run
+    joined = joined[max(0, int(sr * (cfg["pacing_ms"]["chapter_start"] - 150) / 1000)):]      # the book's chapter-start silence is not wanted here
     out = ROOT / "out" / "samples"
     out.mkdir(parents=True, exist_ok=True)
     wav, mp3 = out / f"{work.name}_sample.wav", out / f"{work.name}_sample.mp3"

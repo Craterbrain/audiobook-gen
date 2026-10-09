@@ -718,6 +718,7 @@ class Runner:
         while True:
             time.sleep(self.poll)
             self._beat()
+            self.deliver_pending()                       # a finished book waiting for the phone is retried while the next book is made, too
             self._tick(job, time.time() - last_tick)
             last_tick = time.time()
             code = proc.poll()
