@@ -4,12 +4,14 @@ Text-to-speech sometimes rushes, mumbles, trails off into dead air or produces n
 speech really lasts, how much of it is silence) against what its text should take at this book's usual pace. Clips that stand out
 are made again with other random seeds and the best attempt is kept. Whatever cannot be fixed is listed in qc_report.json."""
 import json
+import re
 import time
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+MIN_SECONDS_FOR_SILENCE = 1.5   # a clip this short is mostly padding by nature ("No!"): judge it by its pace and dead air, not its silent share
 MIN_CHARS = 25          # shorter clips vary too much (a single word has any length) to judge by pace
 FAST, SLOW = 1.6, 0.45  # speech pace outside [SLOW, FAST] x the book's median pace is suspect
 DEAD_AIR = 2.0          # seconds of silence inside a clip
@@ -48,6 +50,14 @@ def measure(path: Path) -> dict:
     return {"seconds": seconds, "speech": speech, "longest_gap": best * win / sr, "silent_share": float(quiet.mean())}
 
 
+MARKUP = re.compile(r"\[([^\]]*)\]\(/[^)]*/\)")
+
+
+def spoken_chars(text: str) -> int:
+    """Characters as the reader would see them: the lexicon's [word](/IPA/) markup counts as just the word."""
+    return len(MARKUP.sub(r"\1", text))
+
+
 def pauses_in(text: str) -> int:
     return sum(text.count(d) for d in ("—", "–", "...", "…", " - "))
 
@@ -59,7 +69,7 @@ def problems(m: dict, chars: int, median_pace: float | None, text: str = "") -> 
     out, dashes = [], pauses_in(text)
     if m["longest_gap"] > DEAD_AIR + DASH_PAUSE * dashes:
         out.append(f"{m['longest_gap']:.1f} s of silence inside")
-    if m["silent_share"] > MAX_SILENT_SHARE + (0.2 if dashes else 0):
+    if m["silent_share"] > MAX_SILENT_SHARE + (0.2 if dashes else 0) and m["seconds"] >= MIN_SECONDS_FOR_SILENCE:
         out.append("mostly silence")
     letters = sum(c.isalpha() for c in text) / max(1, len(text)) if text else 1.0
     if median_pace and chars >= MIN_CHARS and m["speech"] > 0 and letters >= 0.5:      # a row of asterisks has no natural pace
@@ -94,16 +104,16 @@ def scan(work: Path, progress=print) -> tuple[list[dict], dict]:
     chosen = load_overrides(work)
     median = {}
     for eng in {i["engine"] for i in meta.values()}:
-        paces = [len(meta[f]["text"]) / m["speech"] for f, m in measured.items()
-                 if meta[f]["engine"] == eng and "broken" not in m and len(meta[f]["text"]) >= MIN_CHARS and m["speech"] > 0.5]
+        paces = [spoken_chars(meta[f]["text"]) / m["speech"] for f, m in measured.items()
+                 if meta[f]["engine"] == eng and "broken" not in m and spoken_chars(meta[f]["text"]) >= MIN_CHARS and m["speech"] > 0.5]
         median[eng] = float(np.median(paces)) if len(paces) >= 20 else None
     flagged = []
     for f, info in meta.items():
-        why = problems(measured[f], len(info["text"]), median[info["engine"]], info["text"])
+        why = problems(measured[f], spoken_chars(info["text"]), median[info["engine"]], info["text"])
         if why and info.get("key") in chosen:                    # you picked this take yourself: leave it alone
             why = []
         if why:
-            flagged.append({"file": f, "text": info["text"], "engine": info["engine"], "why": why, "chars": len(info["text"])})
+            flagged.append({"file": f, "text": info["text"], "engine": info["engine"], "why": why, "chars": spoken_chars(info["text"])})
     return flagged, {"checked": len(meta), "median_pace": median}
 
 

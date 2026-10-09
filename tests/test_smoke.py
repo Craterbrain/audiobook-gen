@@ -1425,3 +1425,14 @@ def test_notify_file_accepts_a_multi_line_caption(tmp_path, monkeypatch):
     f = tmp_path / "x.mp3"; f.write_bytes(b"abc")
     assert jq.notify_file(str(f), "line one\nline two\n3. three", "A title") is True
     assert "\n" not in seen["Message"] and seen["Message"].startswith("line one | line two")
+
+
+def test_quality_check_ignores_lexicon_markup_and_short_interjections():
+    from audiobook_gen import qc
+    assert qc.spoken_chars("But, [Montgomery](/məntˈɡʌməɹi/), come.") == len("But, Montgomery, come.")
+    quiet_short = {"seconds": 0.5, "speech": 0.15, "longest_gap": 0.0, "silent_share": 0.7}          # "No!" with padding
+    assert qc.problems(quiet_short, 3, 20.0, "No!") == []
+    quiet_long = {"seconds": 4.0, "speech": 1.0, "longest_gap": 1.2, "silent_share": 0.75}
+    assert "mostly silence" in qc.problems(quiet_long, 60, 20.0, "A long line that came out almost silent here.")
+    assert qc.problems({"seconds": 1.2, "speech": 0.5, "longest_gap": 0.0, "silent_share": 0.1}, qc.spoken_chars("[Montgomery](/məntˈɡʌməɹi/),"), 20.0,
+                       "[Montgomery](/məntˈɡʌməɹi/),") == []       # 11 spoken characters: too short to judge by pace
