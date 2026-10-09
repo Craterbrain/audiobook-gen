@@ -223,6 +223,7 @@ def run_parse(project, chap_df, endpoint, use_judge=False, progress=gr.Progress(
     if use_judge:
         progress(0.02, desc="Loading the small model (first time downloads it)")
         from .tiebreak import Judge
+        need_gpu()
         judge = Judge(_cfg(project).get("judge_model", "Qwen/Qwen2.5-1.5B-Instruct"),
                       _cfg(project).get("device", "auto"))
     try:
@@ -330,6 +331,7 @@ def preview_line(project, lines_df, target):
     role = (target or "").strip() or row["speaker"]
     cfg = _cfg(project)
     v = resolve_voice(role, cfg)
+    need_gpu()
     eng = get_engine(v["engine"], cfg.get("device", "auto"))
     return _wav(eng.synth(row["text"][:400], v), eng.sample_rate, "line.wav"), f"Previewing line {row['id']} as **{role}**."
 
@@ -366,6 +368,7 @@ def run_lexicon(project, seed_name, lang, use_judge=False, title="", author="", 
     if use_judge:
         progress(0.0, desc="Loading the small model (first time downloads it)")
         from .tiebreak import Judge
+        need_gpu()
         judge = Judge(_cfg(project).get("judge_model", "Qwen/Qwen2.5-1.5B-Instruct"), _cfg(project).get("device", "auto"))
     try:
         lex = build_lexicon(work, (lang or "").strip(), judge, (title or "").strip(), (author or "").strip(),
@@ -470,6 +473,7 @@ def fw_hear(project, word, ipa, respell, voice_key, template):
     else:
         spoken = (f5_text(respell, word) if (respell or "").strip()
                   else auto_respell({"ipa": ipa}) and f5_text(auto_respell({"ipa": ipa}), word)) or word
+    need_gpu()
     eng = get_engine(v["engine"], _cfg(project).get("device", "auto") if project else "auto")
     text = (template or "Then said {word} unto him, Come and see.").replace("{word}", spoken)
     return _wav(eng.synth(text, v), eng.sample_rate, "word.wav"), f"Spoke it as: `{spoken}`"
@@ -502,6 +506,7 @@ def fw_search(project, word, ipa, voice_key, n, progress=gr.Progress()):
     if not (voice_key or "").startswith("clone:") or "@" in voice_key:
         raise gr.Error("Choose one of your F5 clone voices in “Test with voice” — the spelling search only runs on F5.")
     v = vlib.load_voice(voice_key.split(":", 1)[1])
+    need_gpu()
     f5 = get_engine("f5", "auto")
     outdir = ROOT / "work" / "_spell_search" / re.sub(r"\W+", "_", word)
     progress(0, desc="Loading the phoneme recognizer")
@@ -583,6 +588,7 @@ def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, s
     import random
     import time
     base = int(seed) if int(seed) >= 0 else random.randint(0, 10**6)
+    need_gpu()
     eng = get_engine(key, "auto")
     outs, seeds, notes = [], [], []
     for i in range(int(takes)):
@@ -616,6 +622,7 @@ def clone_compare(name, text):
             outs.append(None)
             continue
         v = resolve({"engine": key, "library": name})
+        need_gpu()
         eng = get_engine(key, "auto")
         outs.append(_wav(eng.synth(text or TEST_TEXT, v), eng.sample_rate, f"compare_{key}.wav"))
     return (*outs, f"**{name}** in F5-TTS, Chatterbox and Qwen3-TTS (an engine that isn't installed is left blank).")
@@ -777,6 +784,7 @@ def vp_make(source, clone_name, audio_file, m4b_file, around, name, steps, warm,
         v = vlib.load_voice(clone_name)
         a, sr = sf.read(v["ref_audio"], dtype="float32")
         clips = [(a, sr)]
+        need_gpu()
         eng = get_engine("f5", "auto")      # a few sentences in that voice make a richer target than 12 s of reference
         for t in ["And Jesus answered and said unto them, The hour is come, that the Son of man should be glorified.",
                   "Then said the Jews, Forty and six years was this temple in building, and wilt thou rear it up?",
@@ -811,6 +819,7 @@ def vp_make(source, clone_name, audio_file, m4b_file, around, name, steps, warm,
         except Exception:
             pass
     progress(0.95, desc="Making comparison samples")
+    need_gpu()
     kok = get_engine("kokoro", "auto")
     new = _wav(kok.synth(VP_TEXT, {"voice": f"pack:{name}"}), kok.sample_rate, "new.wav")
     stock = _wav(kok.synth(VP_TEXT, {"voice": rep["top_stock"][0][0]}), kok.sample_rate, "stock.wav")
@@ -845,6 +854,7 @@ def vp_tag(name, label, tags):
 def vp_hear(name, text):
     if not name:
         raise gr.Error("Choose one of your Kokoro voices.")
+    need_gpu()
     kok = get_engine("kokoro", "auto")
     return _wav(kok.synth(text or VP_TEXT, {"voice": f"pack:{name}"}), kok.sample_rate, "pack.wav")
 
@@ -1520,10 +1530,14 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Audiobook Gen") as ui:
         project = gr.State("")
         gr.Markdown("# Audiobook Gen\nEPUB/TXT → multi-voice chaptered M4B, on Intel Arc (XPU).")
-        with gr.Row():
-            gpu_md = gr.Markdown(gpu_banner(), scale=4)
-            gpu_take_btn = gr.Button("Pause the book and use the GPU", scale=1, size="sm")
-            gpu_give_btn = gr.Button("Give the GPU back to the queue", scale=1, size="sm")
+        gpu_bars = []                       # one banner on every tab that uses the GPU, all kept the same
+
+        def gpu_bar():
+            with gr.Row():
+                md = gr.Markdown(gpu_banner(), scale=4)
+                take = gr.Button("Pause the book and use the GPU", scale=1, size="sm")
+                give = gr.Button("Give the GPU back to the queue", scale=1, size="sm")
+            gpu_bars.append((md, take, give))
         gpu_timer = gr.Timer(15)
         with gr.Tabs():
             with gr.Tab("1 · Book"):
@@ -1539,6 +1553,7 @@ def build_ui() -> gr.Blocks:
                 chap_df = gr.Dataframe(headers=CHAP_COLS, datatype=["bool", "number", "str", "number"],
                                        interactive=True, label="Chapters (untick to skip)")
             with gr.Tab("2 · Cast"):
+                gpu_bar()
                 with gr.Row():
                     parse_btn = gr.Button("Parse speakers", variant="primary", scale=1)
                     status2 = gr.Markdown(scale=3)
@@ -1639,6 +1654,7 @@ def build_ui() -> gr.Blocks:
                                               datatype=["str", "number", "str", "str", "str"])
                         save_seg_btn = gr.Button("Save segments")
             with gr.Tab("3 · Lexicon"):
+                gpu_bar()
                 gr.Markdown("How names and hard words are pronounced. **Build lexicon**, fill in the IPA (try **Look up**), review, then **Save**.\n\n"
                             "**Who uses what:** Kokoro voices use the **IPA** column. **Chatterbox and Qwen3 use only the respelling you type** in the "
                             "*respell* column — IPA and auto-made spellings never reach them. F5-TTS uses the respelling, made from the IPA where blank.")
@@ -1744,6 +1760,7 @@ def build_ui() -> gr.Blocks:
                     gr.Markdown("*Qwen3-TTS has no settings of its own here.*")
 
             with gr.Tab("5 · Queue"):
+                gpu_bar()
                 gr.Markdown("Every book you generate is added here and made by the queue runner, which watches it: if it stalls (a GPU hang) "
                             "or crashes it is restarted, it waits while anything else is using the GPU, and it carries on if you close the app. "
                             "Set a start time or overnight hours on the **Generate** tab.")
@@ -1786,6 +1803,7 @@ def build_ui() -> gr.Blocks:
                 q_timer = gr.Timer(10)
 
             with gr.Tab("6 · Corrections"):
+                gpu_bar()
                 gr.Markdown("Find clips of this book, hear them, and remake single ones: say a name differently, or change the emotion of a "
                             "line the emotion reader got wrong. Remaking uses the GPU, so a book being made is paused (use the button at the top) "
                             "and carries on by itself afterwards. To remake **every** clip with a name after changing the lexicon, search for the "
@@ -1867,6 +1885,7 @@ def build_ui() -> gr.Blocks:
                 cv_hits, cv_pic, cv_credit = gr.State([]), gr.State(""), gr.State("")
 
             with gr.Tab("🎙 Clone", elem_id="clone-tab"):
+                gpu_bar()
                 gr.Markdown("Clone a voice from a short clean clip (5–12 s, one speaker, no music), compare the takes, then save it. "
                             "A saved voice can be spoken by F5-TTS, Chatterbox or Qwen3-TTS.")
                 with gr.Row(equal_height=False):
@@ -2026,10 +2045,14 @@ def build_ui() -> gr.Blocks:
         q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
         q_runner.click(queue_toggle_runner, None, QMSG)
-        gpu_take_btn.click(gpu_take, None, gpu_md); gpu_give_btn.click(gpu_give, None, gpu_md); gpu_timer.tick(gpu_tick, None, gpu_md)
+        gpu_mds = [b[0] for b in gpu_bars]
+        same = lambda fn: (lambda: (fn(),) * len(gpu_mds))            # every banner shows the same text
+        for _, take_b, give_b in gpu_bars:
+            take_b.click(same(gpu_take), None, gpu_mds); give_b.click(same(gpu_give), None, gpu_mds)
+        gpu_timer.tick(same(gpu_tick), None, gpu_mds)
         c_find.click(corr_find, [project, c_query, c_chapter, c_speaker, c_flagged, c_corrected], [c_tbl, c_files, c_msg])
         c_tbl.select(corr_pick, [project, c_files], [c_old, c_orig, c_text, c_exag, c_cfg, c_seed, c_file, c_info, c_new, c_out])
-        c_make.click(corr_take, [project, c_file, c_text, c_exag, c_cfg, c_seed], [c_new, c_take_path, c_out]).then(gpu_banner, None, gpu_md)
+        c_make.click(corr_take, [project, c_file, c_text, c_exag, c_cfg, c_seed], [c_new, c_take_path, c_out]).then(same(gpu_banner), None, gpu_mds)
         c_use.click(corr_use, [project, c_file, c_text, c_exag, c_cfg, c_seed, c_take_path], [c_out, c_file])
         c_back.click(corr_revert, [project, c_file], c_out)
         c_rebuild.click(corr_rebuild, project, c_out)
