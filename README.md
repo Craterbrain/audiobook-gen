@@ -2,6 +2,36 @@
 
 Local pipeline: `.epub`/`.txt` -> speaker-parsed segments -> pronunciation lexicon -> Kokoro-82M / F5-TTS on an Intel Arc GPU (PyTorch XPU) -> chapterized, tagged `.m4b`.
 
+## A quick look
+
+The app (`python -m audiobook_gen.gui`) walks a book through five tabs, then keeps watching the queue for you.
+
+**Cast** — each character gets a voice (here, Frankenstein: a male voice for Clerval, your own cloned voice for the narrator), with a pace control and a Hear button. The banner at the top of each GPU tab shows whether a book is being made and lets you borrow the GPU.
+
+![Cast tab](docs/images/cast.png)
+
+**Generate** — start now or at a set time, optionally only overnight, optionally send the finished book to your phone (KDE Connect). The speed shown is the measured average of your own machine.
+
+![Generate tab](docs/images/generate.png)
+
+**Queue** — every book waits here, is watched by the queue runner, and restarts itself if the GPU stalls. It shows progress and when everything should be finished.
+
+![Queue tab](docs/images/queue.png)
+
+**Corrections** — find any clip by the words in it, hear it, and remake just that clip with other words or settings.
+
+![Corrections tab](docs/images/corrections.png)
+
+**Cover** — search free (public-domain or CC0) pictures on Wikimedia Commons, pick a layout and a book-cloth colour, and preview the cover. People go in a picture window on cloth; scenery fills the whole cover. The Assistant tab can do the same from a sentence ("make a cover for this book").
+
+![Cover tab](docs/images/cover.jpg)
+
+### Covers made this way
+
+![Covers made with the Cover tool](docs/images/covers.jpg)
+
+The pictures are public-domain works from Wikimedia Commons; each is credited in [docs/images/CREDITS.md](docs/images/CREDITS.md). Top row: *Narrative of the Life of Frederick Douglass*, *Personal Memoirs of U. S. Grant*, *Up from Slavery*, *Twelve Years a Slave* (picture window on cloth). Bottom row: *The Island of Doctor Moreau* (picture window), *Frankenstein*, *The Time Machine*, *The War of the Worlds* (full background).
+
 ## Setup
 ```
 ./setup.sh      # .venv (Python 3.12 via uv bootstrap if absent), torch XPU wheels, deps, en_core_web_sm
