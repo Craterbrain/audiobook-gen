@@ -135,11 +135,15 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
     overrides = load_overrides(work)
     lex = {}
     raw = [chunk_text(normalize(seg["text"]), cfg.get("max_chunk_chars", 300)) for seg in segs]
+    from . import refine
+    refined = refine.load(work)                      # the language pass, if the book has had one: added question marks, delivery
+    if refined:
+        raw = refine.apply_fixes(raw, segs, refined)
     feel = None   # per-chunk emotion settings (cfg "emotion: true"), for engines that take them
     if cfg.get("emotion") and any(resolve_voice(sg["speaker"], cfg)["engine"] == "chatterbox" for sg in segs):
         from .emotion import delivery
         yield 0, max(1, sum(map(len, raw))), "Reading the emotion of each sentence"
-        feel = delivery(segs, raw, cfg.get("emotion_base", 0.0))
+        feel = delivery(segs, raw, cfg.get("emotion_base", 0.0), refine.hints(segs, raw, refined) if refined else None)
     for si, seg in enumerate(segs):
         voice = resolve_voice(seg["speaker"], cfg)
         ename = voice["engine"]

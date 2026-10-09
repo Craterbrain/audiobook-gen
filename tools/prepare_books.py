@@ -22,7 +22,7 @@ MIN_DIALOGUE = 0.07               # share of the text that is dialogue before a 
 MIN_LINES, MIN_CAST = 8, 2        # a character needs this many lines; this many characters make it a dynamic (multi-voice) book
 
 
-def prepare(path: str, lang: str = "", single: bool = False, walter: bool = False) -> dict:
+def prepare(path: str, lang: str = "", single: bool = False, walter: bool = False, refine_text: bool = True) -> dict:
     src = Path(path)
     book = extract(str(src), str(ROOT / "work" / "_tmp"), None)
     slug = re.sub(r"\W+", "_", book["title"].lower()).strip("_")[:40]
@@ -67,6 +67,15 @@ def prepare(path: str, lang: str = "", single: bool = False, walter: bool = Fals
     info = {"slug": slug, "title": book["title"], "author": book["author"] or "", "cover": book["cover"] or "",
             "chapters": len(book["chapters"]), "dynamic": dynamic, "cast": cast[:12], "lexicon": len(lex), "ipa_found": r["found"], "ipa_asked": r["asked"]}
     (work / "prepared.json").write_text(json.dumps(info, indent=1, ensure_ascii=False))
+    if refine_text:             # language pass: question marks and delivery, decided by a small model (uses the GPU; a running book steps aside)
+        from audiobook_gen import jobqueue, refine
+        jobqueue.lease_take("the language pass")
+        try:
+            rep = refine.run(work, cfg, progress=lambda m: print(m, flush=True))
+        finally:
+            jobqueue.lease_give_back()
+        info["question_marks_added"] = len(rep["fixes"])
+        (work / "prepared.json").write_text(json.dumps(info, indent=1, ensure_ascii=False))
     print(f"[{slug}] {'multi-voice, ' + str(len(cast)) + ' characters' if dynamic else 'single narrator'}; lexicon {len(lex)} entries, IPA for {r['found']}/{r['asked']}", flush=True)
     return info
 
@@ -75,9 +84,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("books", nargs="+", help="epub[:lang]")
     ap.add_argument("--single", action="store_true"); ap.add_argument("--walter", action="store_true")
+    ap.add_argument("--no-refine", action="store_true", help="skip the language pass (question marks and delivery)")
     a = ap.parse_args()
     for arg in a.books:
         p, _, lang = arg.partition(":")
-        info = prepare(p, lang, a.single, a.walter)
-        with open(ROOT / "books" / "queue.txt", "a") as q:
-            q.write(info["slug"] + "\n")
+        info = prepare(p, lang, a.single, a.walter, not a.no_refine)
+        queue_txt = ROOT / "books" / "queue.txt"
+        if info["slug"] not in (queue_txt.read_text().split() if queue_txt.exists() else []):
+            with open(queue_txt, "a") as q:
+                q.write(info["slug"] + "\n")

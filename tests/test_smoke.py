@@ -1143,3 +1143,51 @@ def test_corrections_tab_is_wired_to_its_own_boxes():
     take = [d for d in cfg["dependencies"] if "New take" in [label(o) for o in d["outputs"]] and any("Make a new take" in (comps[t[0]]["props"].get("value") or "") for t in d["targets"])]
     ins = [label(i) for i in take[0]["inputs"] if label(i)]
     assert "Text to speak (change a spelling or respelling here)" in ins and "Emotion (exaggeration)" in ins and "Seed (-1 = keep as is)" in ins
+
+
+def test_language_pass_marks_questions_and_never_changes_words(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    from audiobook_gen import refine, synth, emotion
+    text = "Where is your brother? I do not know. Am I my brother's keeper. He went away."
+    assert refine.question_candidates(text) == [2]                               # only the one that opens like a question and has no "?"
+    assert refine.with_question_marks(text, {2}) == "Where is your brother? I do not know. Am I my brother's keeper? He went away."
+    assert refine.with_question_marks("“Are you there.” he said.", {0}) == "“Are you there?” he said."
+    assert refine.question_candidates("Why, he said, I am here!") == []         # an exclamation is left alone
+
+    class Fake:                                                                  # says "yes" to questions; "angry, intense" for passages with "Cain"
+        def letters(self, items, n, **k):
+            out = []
+            for s, u in items:
+                if n == 2 and "direct question" in u:
+                    out.append([0.95, 0.05])
+                elif n == 2:                                                      # plain or emotional?
+                    out.append([0.01, 0.99] if "Cain" in u.split("Passage")[-1] else [0.9, 0.1])
+                elif n == 6:                                                      # which feeling: joy, sadness, anger, fear, surprise, disgust
+                    out.append([0.02, 0.03, 0.85, 0.04, 0.03, 0.03])
+                else:
+                    out.append([0.1, 0.1, 0.8])
+            return out
+    segs = [{"id": "001-00000", "chapter": 1, "speaker": "Narrator", "kind": "narration", "text": "Am I my brother's keeper. Said Cain.", "para_start": True},
+            {"id": "001-00001", "chapter": 1, "speaker": "Narrator", "kind": "narration", "text": "A quiet evening.", "para_start": True}]
+    (tmp_path / "segments.json").write_text(json.dumps(segs))
+    cfg = {"voices": {}, "default_voice": {"engine": "kokoro", "voice": "bm_george"}}
+    rep = refine.run(tmp_path, cfg, scorer=Fake(), progress=lambda *_: None)
+    assert list(rep["fixes"].values())[0]["to"].startswith("Am I my brother's keeper?")
+    assert rep["items"]["001-00000:0"]["emo"] == "anger" and rep["items"]["001-00000:0"]["lvl"] == 1      # narration, no "!": mild
+    assert rep["items"]["001-00001:0"]["emo"] == "neutral"
+    # words are identical before and after
+    for f in rep["fixes"].values():
+        assert f["from"].replace("?", ".") == f["to"].replace("?", ".")
+    # the speech step speaks the fixed text
+    spoken = []
+    class Eng:
+        sample_rate = 24000
+        def synth(self, t, v): spoken.append(t); return np.full(2400, 0.1, np.float32)
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Eng())
+    list(synth.synthesize_iter(tmp_path, cfg))
+    assert any("keeper?" in t for t in spoken)
+    # delivery: the language pass pulls a calm-looking passage toward its feeling
+    p = emotion.blend({"neutral": 0.9, "anger": 0.1}, {"emo": "anger", "lvl": 3})
+    assert p["anger"] > 0.6 and abs(sum(p.values()) - 1) < 1e-9
+    assert emotion.blend({"neutral": 1.0}, None) == {"neutral": 1.0}

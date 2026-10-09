@@ -54,10 +54,27 @@ def tag_shift(text: str) -> tuple[float, float]:
     return max(-.3, min(.3, ex)), max(-.15, min(.15, cfg))
 
 
-def delivery(segs: list[dict], chunks: list[list[str]], base: float = 0.0) -> list[list[dict]]:
-    """For each segment, one {"exaggeration", "cfg_weight"} per chunk. `chunks[i]` are segment i's text chunks."""
+LLM_WEIGHT = 0.65          # how much the language pass (refine.py) counts against the sentence classifier
+STRENGTH = {1: 0.5, 2: 0.8, 3: 1.0}
+
+
+def blend(classifier: dict, hint: dict | None) -> dict:
+    """The classifier's probabilities mixed with the language pass's reading of the passage (if there is one)."""
+    if not hint:
+        return classifier
+    s = 0.0 if hint["emo"] == "neutral" else STRENGTH.get(hint.get("lvl", 2), 0.8)
+    llm = {"neutral": 1.0 - s, hint["emo"]: s} if s else {"neutral": 1.0}
+    keys = set(classifier) | set(llm)
+    return {k: LLM_WEIGHT * llm.get(k, 0.0) + (1 - LLM_WEIGHT) * classifier.get(k, 0.0) for k in keys}
+
+
+def delivery(segs: list[dict], chunks: list[list[str]], base: float = 0.0, hints: list[list[dict | None]] | None = None) -> list[list[dict]]:
+    """For each segment, one {"exaggeration", "cfg_weight"} per chunk. `chunks[i]` are segment i's text chunks.
+    `hints` (same shape) are the language pass's reading of each chunk."""
     flat = [(i, j, c) for i, cs in enumerate(chunks) for j, c in enumerate(cs)]
     probs = probabilities([c for _, _, c in flat]) if flat else []
+    if hints:
+        probs = [blend(p, hints[i][j]) for p, (i, j, _) in zip(probs, flat)]
     out: list[list[dict]] = [[{} for _ in cs] for cs in chunks]
     for n, (i, j, _) in enumerate(flat):
         seg = segs[i]
