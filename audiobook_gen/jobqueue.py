@@ -295,6 +295,22 @@ def notify(text: str, title: str = "Audiobook queue", priority: str = "default",
     return ok
 
 
+def notify_file(path: str, text: str = "", title: str = "Audiobook queue") -> bool:
+    """Send a file to the ntfy topic as an attachment (ntfy.sh keeps it for a few hours; it is limited to about 15 MB)."""
+    topic = ntfy_topic()
+    if not topic:
+        return False
+    try:
+        data = Path(path).read_bytes()
+        headers = {"Filename": Path(path).name, "Title": title.encode("ascii", "ignore").decode() or "Audiobook queue"}
+        if text:
+            headers["Message"] = text.encode("ascii", "ignore").decode()
+        req = urllib.request.Request(f"{NTFY_SERVER}/{topic}", data=data, headers=headers, method="PUT")
+        return urllib.request.urlopen(req, timeout=120).status == 200
+    except Exception:
+        return False
+
+
 def halted() -> str:
     """Why the queue paused itself ("" = it has not)."""
     try:
