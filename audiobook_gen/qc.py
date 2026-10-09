@@ -11,8 +11,9 @@ import numpy as np
 import soundfile as sf
 
 MIN_CHARS = 25          # shorter clips vary too much (a single word has any length) to judge by pace
-FAST, SLOW = 1.6, 0.55  # speech pace outside [SLOW, FAST] x the book's median pace is suspect
+FAST, SLOW = 1.6, 0.45  # speech pace outside [SLOW, FAST] x the book's median pace is suspect
 DEAD_AIR = 2.0          # seconds of silence inside a clip
+DASH_PAUSE = 1.5        # more allowed for each dash or ellipsis in the text: the voice pauses there (headings full of dashes do)
 SILENT_DB = -45.0
 MAX_SILENT_SHARE = 0.6
 RETRIES = (101, 202, 303, 404)       # seeds tried for a flagged clip
@@ -47,16 +48,21 @@ def measure(path: Path) -> dict:
     return {"seconds": seconds, "speech": speech, "longest_gap": best * win / sr, "silent_share": float(quiet.mean())}
 
 
-def problems(m: dict, chars: int, median_pace: float | None) -> list[str]:
+def pauses_in(text: str) -> int:
+    return sum(text.count(d) for d in ("—", "–", "...", "…", " - "))
+
+
+def problems(m: dict, chars: int, median_pace: float | None, text: str = "") -> list[str]:
     """Why this clip is suspect (empty = fine)."""
     if "broken" in m:
         return [m["broken"]]
-    out = []
-    if m["longest_gap"] > DEAD_AIR:
+    out, dashes = [], pauses_in(text)
+    if m["longest_gap"] > DEAD_AIR + DASH_PAUSE * dashes:
         out.append(f"{m['longest_gap']:.1f} s of silence inside")
-    if m["silent_share"] > MAX_SILENT_SHARE:
+    if m["silent_share"] > MAX_SILENT_SHARE + (0.2 if dashes else 0):
         out.append("mostly silence")
-    if median_pace and chars >= MIN_CHARS and m["speech"] > 0:
+    letters = sum(c.isalpha() for c in text) / max(1, len(text)) if text else 1.0
+    if median_pace and chars >= MIN_CHARS and m["speech"] > 0 and letters >= 0.5:      # a row of asterisks has no natural pace
         pace = chars / m["speech"]
         if pace > FAST * median_pace:
             out.append(f"rushed ({pace:.0f} characters/s, usual {median_pace:.0f})")
@@ -91,7 +97,7 @@ def scan(work: Path, progress=print) -> tuple[list[dict], dict]:
         median[eng] = float(np.median(paces)) if len(paces) >= 20 else None
     flagged = []
     for f, info in meta.items():
-        why = problems(measured[f], len(info["text"]), median[info["engine"]])
+        why = problems(measured[f], len(info["text"]), median[info["engine"]], info["text"])
         if why:
             flagged.append({"file": f, "text": info["text"], "engine": info["engine"], "why": why, "chars": len(info["text"])})
     return flagged, {"checked": len(meta), "median_pace": median}
@@ -113,7 +119,7 @@ def repair(work: Path, cfg: dict, flagged: list[dict], median: dict, progress=pr
         if eng_name in REPAIRABLE:
             eng = get_engine(eng_name, device, 0, precision)
             for seed in RETRIES:
-                if not problems(best, item["chars"], median.get(eng_name)):
+                if not problems(best, item["chars"], median.get(eng_name), info["text"]):
                     break
                 tried += 1
                 tmp = path.with_suffix(".try.wav")
@@ -129,7 +135,7 @@ def repair(work: Path, cfg: dict, flagged: list[dict], median: dict, progress=pr
                     best, best_bad = m, bad
                 else:
                     tmp.unlink(missing_ok=True)
-        (left if problems(best, item["chars"], median.get(eng_name)) else fixed).append({**item, "attempts": tried})
+        (left if problems(best, item["chars"], median.get(eng_name), info["text"]) else fixed).append({**item, "attempts": tried})
         print(f"[progress] {n + 1}/{len(flagged)}", flush=True)
     return {"fixed": fixed, "unfixed": left}
 

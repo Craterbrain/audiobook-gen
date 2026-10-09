@@ -1028,7 +1028,8 @@ def queue_eta() -> str:
     if e["all"] is None:
         return ""
     text = f"🏁 **Everything should be finished about {e['all']:%a %d %b, %H:%M}** (from the measured speed of each voice engine, through each book's hours)."
-    return text + (f" No estimate yet for: {', '.join(e['unknown'])}." if e["unknown"] else "")
+    return (text + (f" Rough for: {', '.join(e['rough'])} (a voice engine in them has no measured speed yet)." if e["rough"] else "")
+            + (f" No estimate yet for: {', '.join(e['unknown'])}." if e["unknown"] else ""))
 
 
 def queue_table():

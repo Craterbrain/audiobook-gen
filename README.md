@@ -108,3 +108,13 @@ The code is released under the [MIT License](LICENSE). The bundled Bible IPA dic
   (people, on a book-cloth colour) or *full background* (scenery), preview, and press *Use this cover*. `python -m audiobook_gen.covers` does the same from the command line.
 - **Assistant tab** — ask Claude (through your Claude Code login) to set up voices, pacing or pronunciations, or to make a cover. It edits a copy,
   the only command it may run is the cover tool, you review what it proposes, and nothing changes until you press Apply.
+
+## Leaving it alone: the safeguards
+
+The queue runner is built to be started and forgotten:
+
+- **Watchdogs.** A speech process that stops making clips, or slows to a fraction of its own best speed, is restarted (finished clips are kept). A process is also replaced on a schedule: the first time one slows down on your machine, the queue learns how long it had run and recycles a few minutes before that from then on (never sooner than 3 h 30). The audiobook build and the clip check have their own watchdogs.
+- **Clip check.** After the speech and before the build, every clip is measured against the book's usual pace and checked for dead air, silence and breakage. Odd clips are made again with other seeds (Chatterbox, Qwen3) and the best attempt is kept; what cannot be fixed is listed in the book's `qc_report.json`.
+- **Alerts and questions (ntfy).** In the Queue tab, enter an [ntfy](https://ntfy.sh) topic (a long random name; anyone who knows it can read it). You get a message when a book finishes or fails, when the queue is empty, and when it paused itself after three failed books in a row. Send `current`, `queue` or `done` to the same topic and the queue answers.
+- **Estimates.** The Queue tab shows when everything should be finished, from the measured speed of each voice engine (whole books, start to finished file) and each book's start time and hours.
+- **Disk.** Optionally delete a book's clips and chapter files once it is finished and sent.

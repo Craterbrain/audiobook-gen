@@ -833,11 +833,11 @@ def answer(text: str, now: datetime | None = None) -> str | None:
         lines = []
         for i, j in enumerate([j for j in jobs if j["status"] in ACTIVE or j["status"] == "held"], 1):
             tail = (f"{j.get('progress', '')} · done {_when(est['ends'].get(j['id']))}" if j["status"] == "running" else
-                    f"done {_when(est['ends'][j['id']])}" if j["id"] in est["ends"] else "saved for later" if j["status"] == "held" else "no estimate yet")
+                    f"done {_when(est['ends'][j['id']])}{'~' if j['title'] in est['rough'] else ''}" if j["id"] in est["ends"] else "saved for later" if j["status"] == "held" else "no estimate yet")
             lines.append(f"{i}. {j['title'][:38]} — {j['status']}, {tail}")
         if not lines:
             return "The queue is empty."
-        return "\n".join(lines) + (f"\nAll finished about {_when(est['all'])}." if est["all"] else "")
+        return "\n".join(lines) + (f"\nAll finished about {_when(est['all'])}." + (" (~ = rough: a voice engine has no measured speed yet)" if est["rough"] else "") if est["all"] else "")
     done = [j for j in jobs if j["status"] in ("done", "failed")]
     if not done:
         return "Nothing has finished yet."
@@ -1027,15 +1027,18 @@ def estimate_queue(now: datetime | None = None) -> dict:
     in queue order, through each book's start time and daily window. {"ends": {job id: datetime}, "all": datetime | None, "unknown": [titles]}."""
     from .runstats import averages
     now = now or datetime.now()
-    avg, t, ends, unknown = averages(), now, {}, []
+    avg, t, ends, unknown, rough = averages(), now, {}, [], []
     for j in load():
         if j["status"] not in ACTIVE:
             continue
         try:
             per = book_chars(j)
-            if not per or any(e not in avg for e in per):
+            if not per or not avg:
                 raise KeyError
-            secs = sum(n / avg[e]["cps"] for e, n in per.items())
+            slowest = min(a["cps"] for a in avg.values())                 # an engine never measured is assumed as slow as the slowest known
+            if any(e not in avg for e in per):
+                rough.append(j["title"])
+            secs = sum(n / avg[e]["cps"] if e in avg else n / slowest for e, n in per.items())
         except Exception:
             unknown.append(j["title"])
             continue
@@ -1054,7 +1057,7 @@ def estimate_queue(now: datetime | None = None) -> dict:
                 secs -= step.total_seconds()
             t += step
         ends[j["id"]] = t
-    return {"ends": ends, "all": max(ends.values()) if ends else None, "unknown": unknown}
+    return {"ends": ends, "all": max(ends.values()) if ends else None, "unknown": unknown, "rough": rough}
 
 
 def table(now: datetime | None = None) -> list[list]:
