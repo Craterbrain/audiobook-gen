@@ -335,6 +335,35 @@ def notify_file(path: str, text: str = "", title: str = "Audiobook queue") -> bo
         return False
 
 
+def wait_for_reply(since: float, timeout: float = 3600, every: float = 5.0) -> str | None:
+    """Wait for the next message YOU send to the ntfy topic after `since` (epoch seconds) and return its text; None on timeout.
+    Our own posts (they carry a title or an attachment) and the queue's command words (current, queue, done, now N, stop...) are skipped.
+    Used after asking a question over ntfy, so the answer is not missed."""
+    topic = ntfy_topic()
+    if not topic:
+        return None
+    end = time.time() + timeout
+    seen = set()
+    while time.time() < end:
+        try:
+            with urllib.request.urlopen(f"{NTFY_SERVER}/{topic}/json?poll=1&since={int(since)}", timeout=30) as r:
+                for line in r:
+                    m = json.loads(line)
+                    if m.get("event") != "message" or m.get("id") in seen:
+                        continue
+                    seen.add(m.get("id"))
+                    text = (m.get("message") or "").strip()
+                    cmd = text.lower().strip(".!?")
+                    if m.get("title") or m.get("attachment") or not text or cmd in COMMANDS or cmd in ("status", "finished") or re.fullmatch(r"now\s+#?\d+", cmd):
+                        continue
+                    if m.get("time", 0) > since:
+                        return text
+        except Exception:
+            pass
+        time.sleep(every)
+    return None
+
+
 def halted() -> str:
     """Why the queue paused itself ("" = it has not)."""
     try:

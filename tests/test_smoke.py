@@ -1436,3 +1436,17 @@ def test_quality_check_ignores_lexicon_markup_and_short_interjections():
     assert "mostly silence" in qc.problems(quiet_long, 60, 20.0, "A long line that came out almost silent here.")
     assert qc.problems({"seconds": 1.2, "speech": 0.5, "longest_gap": 0.0, "silent_share": 0.1}, qc.spoken_chars("[Montgomery](/məntˈɡʌməɹi/),"), 20.0,
                        "[Montgomery](/məntˈɡʌməɹi/),") == []       # 11 spoken characters: too short to judge by pace
+
+
+def test_wait_for_reply_skips_our_posts_and_the_command_words(monkeypatch):
+    import io, json
+    from audiobook_gen import jobqueue as jq
+    monkeypatch.setenv("AUDIOBOOK_NTFY", "t")
+    now = 1000
+    msgs = [{"event": "open"}, {"event": "message", "id": "1", "time": now + 1, "title": "Which Montgomery?", "message": "Option 1..."},
+            {"event": "message", "id": "2", "time": now + 2, "message": "queue"}, {"event": "message", "id": "3", "time": now + 3, "message": "now 3"},
+            {"event": "message", "id": "4", "time": now + 4, "message": "Option 2"}]
+    monkeypatch.setattr(jq.urllib.request, "urlopen", lambda *a, **k: io.StringIO("\n".join(json.dumps(m) for m in msgs)))
+    assert jq.wait_for_reply(now, timeout=2, every=0.01) == "Option 2"
+    monkeypatch.setattr(jq.urllib.request, "urlopen", lambda *a, **k: io.StringIO(json.dumps(msgs[1])))
+    assert jq.wait_for_reply(now, timeout=0.1, every=0.01) is None
