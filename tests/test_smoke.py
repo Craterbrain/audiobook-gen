@@ -1367,3 +1367,34 @@ def test_the_clone_tab_starts_and_reports_a_pacing_measurement(tmp_path, monkeyp
     pacing.save_profile("V", {**pacing.fit_table(_pacing_records()), "records": 400}, "x.m4b")
     text, table = gui.pacing_status("V")
     assert "has its own pacing profile" in text and len(table) >= 4
+
+
+def test_chapters_encoded_side_by_side_match_the_single_pass_encode(tmp_path, monkeypatch):
+    import json, subprocess
+    import numpy as np
+    from audiobook_gen import assemble, synth
+    class Eng:
+        sample_rate = 24000
+        def synth(self, text, voice):
+            t = np.arange(24000) / 24000
+            return (0.2 * np.sin(2 * np.pi * (200 + 40 * len(text)) * t)).astype(np.float32)
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Eng())
+    segs = [{"id": f"{c:03d}-{i:05d}", "chapter": c, "speaker": "Narrator", "kind": "narration", "text": f"Chapter {c} sentence {i}.", "para_start": i == 0}
+            for c in (1, 2, 3) for i in range(3)]
+    (tmp_path / "segments.json").write_text(json.dumps(segs))
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T", "author": "A", "chapters": [{"index": c, "title": f"Ch {c}", "text": ""} for c in (1, 2, 3)]}))
+    cfg = {"voices": {}, "default_voice": {"engine": "kokoro", "voice": "bm_george"}, "workers": {"kokoro": 1}, "sample_rate": 24000,
+           "pacing_ms": {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 500}, "crossfade_ms": 60, "pacing_style": "fixed"}
+    list(synth.synthesize_iter(tmp_path, cfg))
+    probe = lambda f: json.loads(subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_chapters", "-show_format", str(f)], capture_output=True, text=True).stdout)
+    outs = {}
+    for label, workers in (("serial", 1), ("parallel", 3)):
+        outs[label] = probe(assemble.assemble(tmp_path, {**cfg, "encode_workers": workers}, tmp_path / f"{label}.m4b", None, "T", "A"))
+    assert abs(float(outs["serial"]["format"]["duration"]) - float(outs["parallel"]["format"]["duration"])) < 0.2
+    assert len(outs["parallel"]["chapters"]) == 3
+    for a, b in zip(outs["serial"]["chapters"], outs["parallel"]["chapters"]):
+        assert abs(float(a["start_time"]) - float(b["start_time"])) < 0.15
+    # if the pieces do not join to the expected length the assembler falls back to one pass instead of shipping a skewed book
+    monkeypatch.setattr(assemble, "AAC_FRAME", 48000)
+    out = probe(assemble.assemble(tmp_path, {**cfg, "encode_workers": 3}, tmp_path / "fallback.m4b", None, "T", "A"))
+    assert abs(float(out["format"]["duration"]) - float(outs["serial"]["format"]["duration"])) < 0.2

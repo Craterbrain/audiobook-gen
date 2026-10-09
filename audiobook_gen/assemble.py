@@ -358,6 +358,33 @@ def make_cover(path: Path, title: str, author: str, background: str | None = Non
     return path
 
 
+AAC_FRAME = 1024          # samples in one AAC frame: each separately encoded piece adds one frame of encoder lead-in when joined
+
+
+def encode_workers(cfg: dict) -> int:
+    import os
+    return int(cfg.get("encode_workers") or max(1, min(6, (os.cpu_count() or 2) // 2)))
+
+
+def encode_chapters(wavs: list[Path], sr: int, workers: int, run=None) -> list[Path]:
+    """Loudness-normalise and AAC-encode each chapter file on its own, several at a time (one ffmpeg process per chapter)."""
+    from concurrent.futures import ThreadPoolExecutor
+    run = run or (lambda cmd: subprocess.run(cmd, check=True))
+
+    def one(wav: Path) -> Path:
+        out = wav.with_suffix(".m4a")
+        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", "loudnorm=I=-18:TP=-2:LRA=11", "-ar", str(sr), "-ac", "1",
+             "-c:a", "aac", "-b:a", "64k", "-f", "ipod", str(out)])
+        return out
+    with ThreadPoolExecutor(workers) as ex:
+        return list(ex.map(one, wavs))
+
+
+def probe_duration(path: Path) -> float:
+    return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                                capture_output=True, text=True, check=True).stdout.strip())
+
+
 def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
              title: str | None = None, author: str | None = None, only_chapters=None) -> Path:
     meta = json.loads((work / "chapters.json").read_text())
@@ -391,18 +418,36 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
         listing.append(f"file '{wav.resolve()}'")
         print(f"[assemble] {ch['title']}: {len(audio) / sr:.1f}s")
 
-    (work / "list.txt").write_text("\n".join(listing))
-    (work / "chapters.ffmeta").write_text(ffmeta(chap_info, title, author))
     cover_path = Path(cover or meta.get("cover") or "") if (cover or meta.get("cover")) else \
         make_cover(work / "cover.jpg", title, author)
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["ffmpeg", "-y", "-loglevel", "error",
-           "-f", "concat", "-safe", "0", "-i", str(work / "list.txt"),
-           "-i", str(work / "chapters.ffmeta"), "-i", str(cover_path),
-           "-map", "0:a", "-map", "2:v", "-map_metadata", "1", "-map_chapters", "1",
-           "-af", "loudnorm=I=-18:TP=-2:LRA=11", "-ar", str(sr), "-ac", "1",
-           "-c:a", "aac", "-b:a", "64k", "-c:v", "mjpeg", "-disposition:v:0", "attached_pic",
-           "-movflags", "+faststart", "-f", "ipod", str(out_path)]
-    subprocess.run(cmd, check=True)
+    wavs = [Path(x[6:-1]) for x in listing]
+
+    def finish(list_file: Path, info: list, codec_args: list[str], filters: list[str]) -> None:
+        (work / "chapters.ffmeta").write_text(ffmeta(info, title, author))
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(list_file),
+                        "-i", str(work / "chapters.ffmeta"), "-i", str(cover_path),
+                        "-map", "0:a", "-map", "2:v", "-map_metadata", "1", "-map_chapters", "1", *filters,
+                        *codec_args, "-c:v", "mjpeg", "-disposition:v:0", "attached_pic", "-movflags", "+faststart", "-f", "ipod", str(out_path)], check=True)
+
+    workers = encode_workers(cfg)
+    if workers > 1 and len(wavs) > 1:
+        try:                  # chapters are normalised and encoded side by side, then joined without re-encoding
+            print(f"[assemble] encoding {len(wavs)} chapters, {workers} at a time", flush=True)
+            pieces = encode_chapters(wavs, sr, workers)
+            lead = AAC_FRAME / sr                                       # every piece after the first starts one frame late in the joined file
+            lengths = [d for _, d in chap_info]
+            expected = sum(lengths) + lead * (len(pieces) - 1)
+            (work / "list_aac.txt").write_text("\n".join(f"file '{x.resolve()}'" for x in pieces))
+            finish(work / "list_aac.txt", [(n, d + lead if i < len(chap_info) - 1 else d) for i, (n, d) in enumerate(chap_info)], ["-c:a", "copy"], [])
+            got = probe_duration(out_path)
+            if abs(got - expected) > 0.25:
+                raise RuntimeError(f"joined length {got:.2f} s is not the expected {expected:.2f} s")
+            for x in pieces:
+                x.unlink(missing_ok=True)
+            return out_path
+        except Exception as e:                                          # anything unexpected: the single-pass way below
+            print(f"[assemble] parallel encode not used ({e}); encoding in one pass", flush=True)
+    (work / "list.txt").write_text("\n".join(listing))
+    finish(work / "list.txt", chap_info, ["-c:a", "aac", "-b:a", "64k"], ["-af", "loudnorm=I=-18:TP=-2:LRA=11", "-ar", str(sr), "-ac", "1"])
     return out_path
