@@ -18,8 +18,10 @@ POOL = ["af_sarah", "am_echo", "bf_emma", "am_liam", "af_nicole", "bm_fable", "a
 def chunk_text(text: str, max_chars: int = 300) -> list[str]:
     chunks, cur = [], ""
     for sent in SENT_RE.split(text.strip()):
-        while len(sent) > max_chars:  # hard-split very long sentences at a comma/space
-            cut = max(sent.rfind(",", 0, max_chars), sent.rfind(" ", 0, max_chars))
+        while len(sent) > max_chars:  # hard-split very long sentences, at the last comma/semicolon/dash in the back half, else at a space
+            window = sent[:max_chars]
+            stops = [i for i, ch in enumerate(window) if ch in ",;:—" and i >= int(max_chars * 0.45)]
+            cut = stops[-1] if stops else window.rfind(" ")
             cut = cut if cut > 0 else max_chars
             piece, sent = sent[:cut + 1].strip(), sent[cut + 1:].strip()
             if cur:
