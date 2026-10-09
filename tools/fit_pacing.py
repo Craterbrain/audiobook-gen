@@ -38,8 +38,20 @@ def main() -> None:
                          lo_ms=round(float(np.percentile(long, 3))), hi_ms=round(float(np.percentile(long, 97))))
         table[name] = entry
         print(f"{name:20s} n={entry['n']:4d}  almost none {100 * entry['short_share']:3.0f}%  rest median {np.exp(entry.get('mu', 0)):5.0f} ms (sigma {entry.get('sigma', 0):.2f})")
+    emotion = {}                  # how much the feeling of the sentence before shifts a pause: log(pause) changes by coefficient x feel (0-1)
+    for name, pick in (("sentence", lambda r: r["base"] in ("period", "question", "exclaim")), ("paragraph", lambda r: r["base"] == "paragraph")):
+        sub = [r for r in recs if pick(r) and "feel" in r]
+        if len(sub) < 100:
+            continue
+        X = np.array([[1, r["feel"], np.log(r["words"] + 1), 1.0 if (r["in_quote"] or "closequote" in r["cls"]) else 0.0] for r in sub])
+        y = np.log1p(np.array([r["pause"] for r in sub]))
+        beta = np.linalg.lstsq(X, y, rcond=None)[0]
+        resid = y - X @ beta
+        se = np.sqrt(np.diag(resid @ resid / (len(y) - X.shape[1]) * np.linalg.inv(X.T @ X)))
+        emotion[name] = {"coefficient": round(float(beta[1]), 3), "t": round(float(beta[1] / se[1]), 1), "n": len(sub)}
+        print(f"emotion on {name} pauses: {beta[1]:+.2f} per unit of feeling (t={beta[1] / se[1]:+.1f}, n={len(sub)})")
     out = {"about": "Pauses between spoken units measured on one professional narrator (about 90 minutes of audio matched to the book text). "
-                    "Numbers only. Refit with tools/fit_pacing.py.", "kinds": table}
+                    "Numbers only. Refit with tools/fit_pacing.py.", "kinds": table, "emotion": emotion}
     (ROOT / "data" / "narrator_pacing.json").write_text(json.dumps(out, indent=1))
     print("-> data/narrator_pacing.json")
 

@@ -76,6 +76,46 @@ def draw_pause(kind: str, key: str, table: dict | None = None) -> int | None:
     return max(MIN_PAUSE_MS, int(min(e["hi_ms"], max(e["lo_ms"], math.exp(e["mu"] + e["sigma"] * z)))))
 
 
+def emotion_scale(kind: str, feel: float | None, coefficients: dict | None = None) -> float:
+    """How much the feeling of the sentence before (0 = calm, 1 = strongly emotional) lengthens or shortens a pause of this kind:
+    exp(coefficient x feel), kept within 0.7-1.3. The coefficients are fitted with the pause table; only sentence ends and
+    paragraph ends show a dependence worth using."""
+    if feel is None:
+        return 1.0
+    c = (coefficients if coefficients is not None else narrator_emotion())
+    family = "sentence" if kind.startswith("sentence") else "paragraph" if kind == "paragraph" else None
+    if family not in c:
+        return 1.0
+    import math
+    return max(0.7, min(1.3, math.exp(c[family]["coefficient"] * feel)))
+
+
+def narrator_emotion() -> dict:
+    try:
+        return json.loads(PACING_FILE.read_text()).get("emotion", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def chunk_feel(work: Path, texts: dict, files: list[str]) -> dict[str, float]:
+    """The feeling (1 - probability of "neutral") of each clip's text from the pipeline's emotion classifier, cached in the book's
+    folder (clip names are content hashes, so the cache never goes stale)."""
+    cache_file = work / "feel.json"
+    try:
+        cache = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    todo = [f for f in dict.fromkeys(files) if f not in cache and f in texts]
+    if todo:
+        from .emotion import probabilities
+        for i in range(0, len(todo), 256):
+            part = todo[i:i + 256]
+            for f, pr in zip(part, probabilities([texts[f]["text"][:600] or "." for f in part])):
+                cache[f] = round(1 - pr.get("neutral", 0.0), 3)
+        cache_file.write_text(json.dumps(cache))
+    return cache
+
+
 def chunk_join(prev: dict | str | None, p: dict) -> tuple[str, int]:
     """How the chunk before ended -- "end" (a finished sentence), "comma" (a long sentence cut at a comma or dash) or "space" (cut
     mid-phrase) -- and the fixed pause for it. The splitter's record ("cut" in clips_meta.json) says it exactly; without it the
@@ -91,23 +131,28 @@ def chunk_pause(prev: dict | str | None, p: dict) -> int:
     return chunk_join(prev, p)[1]
 
 
-def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, texts: dict | None = None) -> np.ndarray:
+def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, texts: dict | None = None, feel: dict | None = None) -> np.ndarray:
     """Join a chapter's clips. With pacing_style "narrator" (the default) every pause is drawn from a measured narrator's spread for that
     kind of boundary (sentence end in narration or in speech, comma, before a dialogue tag, paragraph, change of speaker); with "fixed"
-    the numbers in pacing_ms are used as they are. `texts` (clips_meta.json: file -> record) says how each chunk ended."""
+    the numbers in pacing_ms are used as they are. `texts` (clips_meta.json: file -> record) says how each chunk ended; `feel` (file -> 0-1)
+    is how emotional the clip is, which shortens a sentence-end pause and lengthens a paragraph pause a little."""
     sr, p, xf = cfg["sample_rate"], cfg["pacing_ms"], cfg["crossfade_ms"]
     table = narrator_pacing() if cfg.get("pacing_style", "narrator") == "narrator" else {}
-    out, prev = None, None
+    out, prev, last = None, None, None
+    coefficients = narrator_emotion() if (feel and table) else {}
 
     def pick(kind: str, key: str, fixed: int) -> int:
         d = draw_pause(kind, key, table) if table else None
-        return fixed if d is None else d
+        if d is None:
+            return fixed
+        return max(MIN_PAUSE_MS, int(d * emotion_scale(kind, (feel or {}).get(last), coefficients))) if coefficients else d
     for seg in segs:
         speech = "dialogue" if seg.get("kind") == "dialogue" else "narration"
         for ci, f in enumerate(clips.get(seg["id"], [])):
             a = _load(clip_dir / f, sr)
             if out is None:
                 out = np.concatenate([np.zeros(int(sr * p["chapter_start"] / 1000), np.float32), a])
+                last = f
                 continue
             if ci:
                 if texts:
@@ -126,6 +171,7 @@ def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, text
             else:
                 pause = pick("speaker_change", f, p["speaker_change"])
             out = join(out, a, sr, pause, xf)
+            last = f
         prev = seg
     return out if out is not None else np.zeros(sr, np.float32)
 
@@ -326,7 +372,10 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
         if only_chapters and ch["index"] not in only_chapters:
             continue
         cs = [s for s in segs if s["chapter"] == ch["index"]]
-        audio = build_chapter(cs, clips, work / "clips", cfg, texts)
+        feel = None
+        if texts and cfg.get("pacing_style", "narrator") == "narrator" and cfg.get("pacing_emotion", True):
+            feel = chunk_feel(work, texts, [f for sg in cs for f in clips.get(sg["id"], [])])
+        audio = build_chapter(cs, clips, work / "clips", cfg, texts, feel)
         peak = np.abs(audio).max() or 1.0
         audio = audio * min(1.0, 0.7 / peak)  # peak-limit to ~ -3 dBFS
         wav = work / "chapters" / f"{ch['index']:03d}.wav"

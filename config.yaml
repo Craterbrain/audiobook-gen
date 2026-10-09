@@ -16,6 +16,7 @@ voices:
   # Jesus: {engine: f5, ref_audio: voices/jesus.wav, ref_text: "transcript of the clip"}
 # pacing_style: narrator draws every pause from a measured narrator's spread (data/narrator_pacing.json); fixed uses the numbers below as they are
 pacing_style: narrator
+pacing_emotion: true      # the feeling of the sentence before a pause shortens sentence pauses and lengthens paragraph pauses a little
 pacing_ms:
   sentence: 350
   split: 30          # after a chunk cut mid-phrase (very long sentences)

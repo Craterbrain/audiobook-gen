@@ -1281,3 +1281,27 @@ def test_narrator_style_chooses_the_kind_from_speech_or_narration(tmp_path, monk
     meta["a.wav"] = {"text": "Hello,", "cut": "end"}
     assemble.build_chapter([segs[0], segs[1]], {"s1": ["a.wav"], "s2": ["b.wav"]}, tmp_path, cfg, meta)
     assert asked == ["before_tag"]                                           # speech running into its narration tag
+
+
+def test_emotion_scales_sentence_and_paragraph_pauses_gently():
+    from audiobook_gen.assemble import emotion_scale
+    c = {"sentence": {"coefficient": -0.38}, "paragraph": {"coefficient": 0.22}}
+    assert emotion_scale("sentence_narration", 0.0, c) == 1.0 and emotion_scale("sentence_dialogue", None, c) == 1.0
+    assert 0.65 < emotion_scale("sentence_narration", 1.0, c) < 0.72 or emotion_scale("sentence_narration", 1.0, c) == 0.7      # shorter, never below 0.7
+    assert 1.2 < emotion_scale("paragraph", 1.0, c) < 1.3                                                                   # a little longer
+    assert emotion_scale("comma_narration", 1.0, c) == 1.0 and emotion_scale("before_tag", 1.0, c) == 1.0                   # no effect worth using
+
+
+def test_pauses_use_the_feeling_of_the_sentence_before(tmp_path):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import assemble
+    sr = 24000
+    for n in "ab":
+        sf.write(tmp_path / f"{n}.wav", np.full(sr, 0.1, np.float32), sr)
+    p = {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30}
+    cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60}
+    seg = [{"id": "s", "text": "x", "kind": "narration", "para_start": True}]
+    clips, meta = {"s": ["a.wav", "b.wav"]}, {"a.wav": {"text": "It ended.", "cut": "end"}, "b.wav": {"text": "Next."}}
+    calm = assemble.build_chapter(seg, clips, tmp_path, cfg, meta, {"a.wav": 0.0})
+    upset = assemble.build_chapter(seg, clips, tmp_path, cfg, meta, {"a.wav": 1.0})
+    assert len(calm) > len(upset)                                    # the same drawn pause, shortened after an emotional sentence
