@@ -35,7 +35,7 @@ JOB_PID = QUEUE / "job.pid"                     # the job's process group, so St
 STOPPED = QUEUE / "stopped"                      # you stopped the runner on purpose: the app must not restart it behind your back
 SERVICE = "audiobook-queue.service"
 SETTINGS = QUEUE / "settings.json"
-SEND_EVERY = 300                                 # seconds between tries while the phone is out of reach
+SEND_EVERY = 120                                 # seconds between tries while the phone is out of reach
 GUI_LOCK = QUEUE / "gui_generate.lock"          # reserved: anything in the app that holds the GPU for long writes its pid here and the queue waits
 
 STALL = 600           # seconds without a new clip before the job is restarted
