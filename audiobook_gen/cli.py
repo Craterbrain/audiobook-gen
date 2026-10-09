@@ -33,7 +33,7 @@ def _printer():
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="audiobook_gen")
-    p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "rank", "synth", "assemble", "run"])
+    p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "rank", "synth", "qc", "assemble", "run"])
     p.add_argument("input", help=".epub or .txt")
     p.add_argument("--work", help="working dir (default work/<name>)")
     p.add_argument("--config", default=ROOT / "config.yaml")
@@ -126,6 +126,9 @@ def main(argv=None):
         elif step == "synth":
             from .synth import synthesize
             synthesize(work, cfg, only)
+        elif step == "qc":
+            from . import qc
+            qc.run(work, cfg)
         elif step == "assemble":
             from .assemble import assemble
             out = Path(a.out) if a.out else ROOT / "out" / f"{work.name}.m4b"

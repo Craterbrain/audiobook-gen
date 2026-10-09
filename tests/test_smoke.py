@@ -371,8 +371,11 @@ def _queue_env(tmp_path, monkeypatch):
     monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue")
     monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
     monkeypatch.setattr(jq, "HEARTBEAT", tmp_path / "queue" / "heartbeat")
-    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED", "SPEECH_LIMIT"):                      # never touch the real queue's files
+    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED", "SPEECH_LIMIT", "SETTINGS", "HALTED"):   # never touch the real queue's files
         monkeypatch.setattr(jq, name, tmp_path / "queue" / name.lower())
+    sent = []                                                                   # alerts are recorded, never sent
+    monkeypatch.setattr(jq, "notify", lambda text, title="", **k: sent.append((title, text)) or True)
+    jq.sent_alerts = sent
     work = tmp_path / "book"; work.mkdir()
     (work / "segments.json").write_text("[]")
     return jq, work
@@ -900,3 +903,133 @@ def test_speech_limit_is_learned_from_the_first_slowdown(tmp_path, monkeypatch):
     assert jq.speech_limit() == 4 * 3600 + 44 * 60
     assert jq.learn_speech_limit(5 * 3600) is None and jq.speech_limit() == 4 * 3600 + 44 * 60   # never raised
     assert jq.learn_speech_limit(3 * 3600 + 32 * 60) == 3.5 * 3600                    # never below 3 h 30
+
+
+def _wavs(folder, specs, sr=16000):
+    """specs: [(name, seconds, quiet gap in the middle in seconds)] -> noise 'speech' files."""
+    import numpy as np, soundfile as sf
+    folder.mkdir(exist_ok=True)
+    rng = np.random.default_rng(1)
+    for name, secs, gap in specs:
+        a = (rng.standard_normal(int(sr * secs)) * 0.1).astype("float32")
+        if gap:
+            mid = len(a) // 2
+            a[mid: mid + int(sr * gap)] = 0
+        sf.write(folder / name, a, sr)
+
+
+def test_quality_check_flags_the_odd_clips(tmp_path):
+    import json
+    from audiobook_gen import qc
+    text = "x" * 100                                           # 100 characters: about 5 s at the usual pace
+    specs = [(f"ok{i}.wav", 5.0 + (i % 3) * 0.2, 0) for i in range(30)]
+    specs += [("rushed.wav", 1.5, 0), ("dead.wav", 6.0, 2.6), ("slow.wav", 14.0, 0)]
+    _wavs(tmp_path / "clips", specs)
+    import soundfile as sf
+    sf.write(tmp_path / "clips" / "empty.wav", [0.0] * 16000, 16000)
+    specs.append(("empty.wav", 1, 0))
+    (tmp_path / "clips_meta.json").write_text(json.dumps({n: {"text": text, "speaker": "N", "engine": "kokoro", "voice": {}} for n, *_ in specs}))
+    flagged, stats = qc.scan(tmp_path, progress=lambda *_: None)
+    got = {f["file"]: f["why"] for f in flagged}
+    assert set(got) == {"rushed.wav", "dead.wav", "slow.wav", "empty.wav"}, got
+    assert "rushed" in got["rushed.wav"][0] and "silence" in got["dead.wav"][0] and "drawn out" in got["slow.wav"][0]
+    # engines without a seed are reported, not remade
+    rep = qc.run(tmp_path, {}, progress=lambda *_: None)
+    assert rep["flagged"] == 4 and rep["unfixed"] == 4 and (tmp_path / "qc_report.json").exists()
+
+
+def test_queue_builds_the_book_even_if_the_quality_check_breaks(tmp_path, monkeypatch):
+    import sys
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    (work / "clips_meta.json").write_text("{}")
+    out = tmp_path / "x.m4b"
+    job = jq.add(str(work), "Checked book", out=str(out))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "print('[progress] 1/1')"]
+        qc_cmd = lambda self, j: [sys.executable, "-c", "raise SystemExit(3)"]
+        assemble_cmd = lambda self, j: [sys.executable, "-c", f"open({str(out)!r}, 'w').write('x')"]
+    R(poll=0.1, foreign=lambda: "", retry_wait=0).step()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["status"] == "done" and "could not finish" in j["qc"]
+    assert any(t == "Queue finished" for t, _ in jq.sent_alerts)
+
+
+def test_a_hung_audiobook_build_is_restarted_then_the_job_fails(tmp_path, monkeypatch):
+    import sys
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    job = jq.add(str(work), "Hung build", out=str(tmp_path / "x.m4b"))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "print('[progress] 1/1')"]
+        assemble_cmd = lambda self, j: [sys.executable, "-c", "import time; time.sleep(60)"]
+    R(poll=0.1, max_restarts=1, retry_wait=0, stall_scale=0.3 / jq.ASSEMBLE_STALL, foreign=lambda: "").step()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["status"] == "failed" and j["restarts"] == 2
+    assert any(t == "Book failed" for t, _ in jq.sent_alerts)
+
+
+def test_the_queue_pauses_itself_after_repeated_failures_until_resumed(tmp_path, monkeypatch):
+    import sys
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "service_installed", lambda: False)
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    for n in range(4):
+        jq.add(str(work), f"Bad {n}", out=str(tmp_path / f"{n}.m4b"))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "raise SystemExit(1)"]
+    r = R(poll=0.1, max_restarts=0, retry_wait=0, foreign=lambda: "")
+    while r.step():
+        pass
+    jobs = jq.load()
+    assert [j["status"] for j in jobs] == ["failed"] * 3 + ["queued"]
+    assert "3 books in a row" in jq.halted()
+    assert r.step() is False                                       # stays paused
+    assert any(t == "Queue paused" for t, _ in jq.sent_alerts)
+    jq.start_runner()
+    assert jq.halted() == "" and jq.settings()["fail_streak"] == 0
+
+
+def test_a_finished_book_can_free_its_disk_space(tmp_path, monkeypatch):
+    import sys
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    (work / "clips").mkdir(); (work / "clips" / "a.wav").write_text("x")
+    out = tmp_path / "x.m4b"
+    jq.add(str(work), "Tidy book", out=str(out))
+    jq.save_settings(clean_after_done=True)
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "print('[progress] 1/1')"]
+        assemble_cmd = lambda self, j: [sys.executable, "-c", f"open({str(out)!r}, 'w').write('x')"]
+    R(poll=0.1, foreign=lambda: "").step()
+    assert out.exists() and not (work / "clips").exists()
+
+
+def test_whole_queue_estimate_follows_the_windows(tmp_path, monkeypatch):
+    import json, yaml
+    from datetime import datetime
+    from audiobook_gen import runstats
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(runstats, "PATH", tmp_path / "run_stats.json")
+    runstats.record_job("j", {"kokoro": 3600}, 60)                          # 60 characters per second
+    (work / "segments.json").write_text(json.dumps([{"chapter": 1, "id": 1, "speaker": "Narrator", "text": "x" * 360000}]))   # 6000 s = 100 min
+    (tmp_path / "c.yaml").write_text(yaml.safe_dump({"voices": {"Narrator": {"engine": "kokoro", "voice": "bm_george"}}, "default_voice": {"engine": "kokoro", "voice": "bm_george"}}))
+    job = jq.add(str(work), "Timed", out=str(tmp_path / "x.m4b"), config=str(tmp_path / "c.yaml"), window="23:00-06:30")
+    e = jq.estimate_queue(datetime.strptime("2026-10-09 22:00", jq.FMT))
+    assert e["unknown"] == [] and e["all"] == datetime.strptime("2026-10-10 00:40", jq.FMT)     # waits for 23:00, then 100 min
+
+
+def test_ntfy_commands_answer_with_queue_state(tmp_path, monkeypatch):
+    import json
+    from datetime import datetime
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    now = datetime.strptime("2026-10-09 12:00", jq.FMT)
+    assert jq.answer("hello there") is None and jq.answer("") is None and jq.answer("Queue is long") is None
+    assert "Nothing is being made and nothing is waiting" in jq.answer("current", now)
+    assert "queue is empty" in jq.answer("QUEUE!", now) and "Nothing has finished" in jq.answer("done", now)
+    a = jq.add(str(work), "First", out=str(tmp_path / "a.m4b")); b = jq.add(str(work), "Second", out=str(tmp_path / "b.m4b"), window="23:00-06:30")
+    jq.update(a["id"], status="running", progress="50/100", note="making the speech")
+    text = jq.answer("current", now)
+    assert "“First”" in text and "50%" in text
+    q = jq.answer("queue", now)
+    assert "1. First — running" in q and "2. Second — queued" in q
+    jq.update(a["id"], status="done", finished="2026-10-09 11:00", send_to="dev", sent="2026-10-09 11:05")
+    assert "✓ First" in jq.answer("done", now) and "sent" in jq.answer("done", now)
+    assert "Send one word" in jq.answer("help", now)

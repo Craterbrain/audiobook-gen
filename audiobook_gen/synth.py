@@ -105,6 +105,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
     device, precision = cfg.get("device", "auto"), cfg.get("f5_precision", "float16")
 
     plan, todo, total = [], [], 0   # plan: (seg, [clip file names]); todo: clips still to make
+    meta = {}                       # clip file -> what it should say and who says it (the quality check reads this)
     lex = {}
     raw = [chunk_text(normalize(seg["text"]), cfg.get("max_chunk_chars", 300)) for seg in segs]
     feel = None   # per-chunk emotion settings (cfg "emotion: true"), for engines that take them
@@ -123,11 +124,13 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
                 voice = {**voice, **feel[si][ci]}
             key = hashlib.sha1(json.dumps([chunk, voice, ename]).encode()).hexdigest()[:16]
             files.append(f"{key}.wav")
+            meta[f"{key}.wav"] = {"text": chunk, "speaker": seg["speaker"], "engine": ename, "voice": voice}
             total += 1
             if not (clips / f"{key}.wav").exists():
                 todo.append((seg["speaker"], chunk, voice, ename, clips / f"{key}.wav"))
         plan.append((seg, files))
 
+    (work / "clips_meta.json").write_text(json.dumps(meta, ensure_ascii=False))
     done = total - len(todo)
     if done:
         yield done, total, f"{done} clip(s) already made"

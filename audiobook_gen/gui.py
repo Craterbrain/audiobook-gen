@@ -1013,12 +1013,22 @@ def queue_status() -> str:
     jobs = jobqueue.load()
     alive = jobqueue.runner_alive()
     waiting = sum(j["status"] in ("queued", "paused") for j in jobs)
-    return (("🟢 **Queue runner is running and watching every job.**" if alive else
+    why = jobqueue.halted()
+    return (("⚠️ **The queue paused itself:** " + why if why else "") + "\n\n" if why else "") + (("🟢 **Queue runner is running and watching every job.**" if alive else
              ("🔴 **The queue runner is stopped** (you stopped it) — press “Start the queue runner”. Nothing is made until you do."
               if jobqueue.STOPPED.exists() else
               "🔴 **The queue runner is not running** — press “Start the queue runner”. Jobs wait until it is."))
             + f"  {waiting} waiting · {sum(j['status'] == 'running' for j in jobs)} running · "
               f"{sum(j['status'] == 'held' for j in jobs)} saved for later · {sum(j['status'] == 'done' for j in jobs)} done")
+
+
+def queue_eta() -> str:
+    from . import jobqueue
+    e = jobqueue.estimate_queue()
+    if e["all"] is None:
+        return ""
+    text = f"🏁 **Everything should be finished about {e['all']:%a %d %b, %H:%M}** (from the measured speed of each voice engine, through each book's hours)."
+    return text + (f" No estimate yet for: {', '.join(e['unknown'])}." if e["unknown"] else "")
 
 
 def queue_table():
@@ -1034,16 +1044,18 @@ def queue_now() -> str:
         prog = f"{r['pct']}% ({r['done']:,} of {r['total']:,} clips)" if r["total"] else (r["note"] or "starting")
         live = ("" if r["since_clip"] is None else
                 f" · last clip {int(r['since_clip'])} s ago" + (" ⚠️ stalled? the watchdog will restart it" if r["since_clip"] > 300 else ""))
-        return f"▶️ **Making “{r['title']}”** — {prog}{live} · started {r['started']}"
+        return f"▶️ **Making “{r['title']}”** — {prog}{live} · started {r['started']}\n\n{queue_eta()}"
     nxt = [j for j in jobqueue.load() if j["status"] in ("queued", "paused")]
     if nxt:
         j = min(nxt, key=lambda x: jobqueue.next_start(x, datetime.now()))
-        return f"⏳ Nothing is being made right now. Next: **{j['title']}** at {jobqueue.next_start(j, datetime.now())}."
+        return f"⏳ Nothing is being made right now. Next: **{j['title']}** at {jobqueue.next_start(j, datetime.now())}.\n\n{queue_eta()}"
     return "Nothing is queued."
 
 
 def runner_button_args() -> dict:
     from . import jobqueue
+    if jobqueue.halted():
+        return {"value": "Resume the queue", "variant": "primary"}
     return ({"value": "Stop the queue runner", "variant": "stop"} if jobqueue.runner_alive()
             else {"value": "Start the queue runner", "variant": "primary"})
 
@@ -1051,8 +1063,7 @@ def runner_button_args() -> dict:
 def runner_button():
     """The button shows the opposite of the runner's state: Stop while it runs, Start while it does not."""
     from . import jobqueue
-    return (gr.update(value="Stop the queue runner", variant="stop") if jobqueue.runner_alive()
-            else gr.update(value="Start the queue runner", variant="primary"))
+    return gr.update(**runner_button_args())
 
 
 def queue_pick_update(picked=None):
@@ -1122,9 +1133,29 @@ def queue_asap(picked):
     return f"{n} book(s) will start as soon as the GPU is free, at any time of day.", *queue_refresh(picked)
 
 
+def alerts_settings():
+    from . import jobqueue
+    st = jobqueue.settings()
+    return st.get("ntfy_topic", ""), bool(st.get("clean_after_done"))
+
+
+def alerts_save(topic, clean):
+    from . import jobqueue
+    jobqueue.save_settings(ntfy_topic=(topic or "").strip(), clean_after_done=bool(clean))
+    return "Saved."
+
+
+def alerts_test(topic):
+    from . import jobqueue
+    jobqueue.save_settings(ntfy_topic=(topic or "").strip())
+    if not jobqueue.ntfy_topic():
+        return "Type a topic name first."
+    return "Sent. Check your phone." if jobqueue.notify("This is a test from the audiobook queue.", "Test", tags=["bell"]) else "Could not reach ntfy; check the topic and your connection."
+
+
 def queue_toggle_runner():
     from . import jobqueue
-    running = jobqueue.runner_alive()
+    running = jobqueue.runner_alive() and not jobqueue.halted()
     msg = jobqueue.stop_runner() if running else jobqueue.start_runner()
     if not running:                                   # give it a moment to report in
         for _ in range(20):
@@ -1566,6 +1597,16 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     q_runner = gr.Button(**runner_button_args())
                 q_msg = gr.Markdown()
+                with gr.Accordion("Alerts and disk space", open=False):
+                    gr.Markdown("Get a message on your phone when a book finishes or fails, when the queue is empty, and when it paused itself "
+                                "after repeated failures. Install the free **ntfy** app and subscribe to a topic name of your own choosing; "
+                                "type the same name here. Anyone who knows the name can read the messages, so make it long and random.")
+                    with gr.Row():
+                        q_ntfy = gr.Textbox(value=alerts_settings()[0], label="ntfy topic", scale=3)
+                        q_ntfy_save = gr.Button("Save", scale=1); q_ntfy_test = gr.Button("Send a test", scale=1)
+                    q_clean = gr.Checkbox(value=alerts_settings()[1], label="Free disk space: delete a book's clips and chapter files once it is finished "
+                                                                            "(and sent to the phone, if sending). You would have to remake the speech to change anything later.")
+                    q_alert_msg = gr.Markdown()
                 q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=False, wrap=True,
                                      label="Queue — the book at the top is made first")
                 q_pick = gr.CheckboxGroup(choices=[], value=[], label="Select books (tick one or more, then use the buttons below)")
@@ -1799,6 +1840,9 @@ def build_ui() -> gr.Blocks:
         q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
         q_runner.click(queue_toggle_runner, None, QMSG)
+        q_ntfy_save.click(alerts_save, [q_ntfy, q_clean], q_alert_msg)
+        q_clean.change(alerts_save, [q_ntfy, q_clean], q_alert_msg)
+        q_ntfy_test.click(alerts_test, q_ntfy, q_alert_msg)
         for btn, where in ((q_top, "top"), (q_up, "up"), (q_down, "down"), (q_bottom, "bottom")):
             btn.click(lambda picked, w=where: queue_move(picked, w), q_pick, QMSG)
         g_find.click(devices_refresh, None, g_dev)

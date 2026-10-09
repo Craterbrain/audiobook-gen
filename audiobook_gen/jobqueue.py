@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import threading
+import urllib.request
 import subprocess
 import sys
 import time
@@ -43,6 +44,11 @@ MAX_RESTARTS = 6
 POLL = 20
 MIN_RECYCLE = 3.5 * 3600     # the speech process is never recycled sooner than this
 RECYCLE_MARGIN = 300         # recycle this long before the uptime at which this machine's first slowdown began
+HALTED = QUEUE / "halted"                    # the queue paused itself after repeated failures; its text says why
+FAIL_HALT = 3                                # failed books in a row that halt the queue
+QC_STALL = 1200                              # seconds without output from the quality check
+ASSEMBLE_STALL = 1500                        # seconds in which the audiobook build touches no file
+NTFY_SERVER = "https://ntfy.sh"
 SPEECH_LIMIT = QUEUE / "speech_limit.json"   # learned on this machine: {"seconds": the longest a speech process should run}
 PACE_EVERY = 60       # seconds between pace checks / memory notes
 MEM_EVERY = 300
@@ -240,19 +246,76 @@ def send_file(device: str, path: str) -> bool:
         return False
 
 
-def default_device() -> str:
+def settings() -> dict:
     try:
-        return json.loads(SETTINGS.read_text()).get("device", "")
+        return json.loads(SETTINGS.read_text())
     except Exception:
-        return ""
+        return {}
+
+
+def save_settings(**kw) -> None:
+    """Change some settings and keep the others."""
+    try:
+        QUEUE.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps({**settings(), **kw}))
+    except OSError:
+        pass
+
+
+def default_device() -> str:
+    return settings().get("device", "")
 
 
 def save_default_device(device: str) -> None:
+    save_settings(device=device)
+
+
+def ntfy_topic() -> str:
+    """The ntfy topic alerts go to (AUDIOBOOK_NTFY overrides the saved one). Anyone who knows the name can read it."""
+    return (os.environ.get("AUDIOBOOK_NTFY") or settings().get("ntfy_topic", "")).strip()
+
+
+def notify(text: str, title: str = "Audiobook queue", priority: str = "default", tags: list[str] | None = None, desktop: bool = True) -> bool:
+    """Tell the user: a message on the ntfy topic (reaches the phone) and a desktop notice. Never raises, never waits long."""
+    ok = False
+    topic = ntfy_topic()
+    if topic:
+        try:
+            body = json.dumps({"topic": topic, "title": title, "message": text, "priority": {"low": 2, "default": 3, "high": 4, "urgent": 5}.get(priority, 3),
+                               "tags": tags or []}).encode()
+            req = urllib.request.Request(NTFY_SERVER, data=body, headers={"Content-Type": "application/json"})
+            ok = urllib.request.urlopen(req, timeout=15).status == 200
+        except Exception:
+            ok = False
+    if desktop:
+        try:
+            subprocess.run(["notify-send", "-a", "Audiobook queue", title, text], timeout=5, capture_output=True)
+        except Exception:
+            pass
+    return ok
+
+
+def halted() -> str:
+    """Why the queue paused itself ("" = it has not)."""
     try:
-        QUEUE.mkdir(parents=True, exist_ok=True)
-        SETTINGS.write_text(json.dumps({"device": device}))
+        return HALTED.read_text().strip() or "paused after repeated failures"
     except OSError:
-        pass
+        return ""
+
+
+def gpu_temp() -> float | None:
+    """Hottest sensor of the Intel GPU in degrees C, if the driver shows one."""
+    best = None
+    for hw in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            if (hw / "name").read_text().strip() != "xe":
+                continue
+            for t in hw.glob("temp*_input"):
+                v = int(t.read_text()) / 1000
+                best = v if best is None else max(best, v)
+        except (OSError, ValueError):
+            pass
+    return best
 
 
 def set_send(ids: list[str], device: str) -> int:
@@ -348,6 +411,22 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+def stage_activity(job: dict) -> float:
+    """When the job last showed life outside the speech stage: its log, the chapter files, the audiobook being written."""
+    newest = 0.0
+    paths = [QUEUE / f"{job['id']}.log"]
+    out = Path(job.get("out", "") or "x")
+    paths += list(out.parent.glob(out.name + "*")) if out.parent.exists() else []
+    chapters = Path(job["work"]) / "chapters"
+    paths += list(chapters.glob("*")) if chapters.exists() else []
+    for p in paths:
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
 def newest_clip(work: Path) -> float:
     newest = 0.0
     try:
@@ -435,15 +514,19 @@ def group_rss(pgid: int) -> float:
 
 
 class Runner:
-    def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS, recycle: float | None = None,
+    def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS, recycle: float | None = None, stall_scale: float = 1.0,
                  foreign=foreign_synthesis, now=datetime.now, retry_wait: float = 30, sender=send_file, send_every: float = SEND_EVERY):
-        self.poll, self.stall, self.grace, self.max_restarts, self.recycle = poll, stall, grace, max_restarts, recycle
+        self.poll, self.stall, self.grace, self.max_restarts, self.recycle, self.stall_scale = poll, stall, grace, max_restarts, recycle, stall_scale
         self.sender, self.send_every, self._sender_thread = sender, send_every, None
         self.foreign, self.now, self.retry_wait = foreign, now, retry_wait
 
     # commands (replaceable in tests)
     def synth_cmd(self, job: dict) -> list[str]:
         cmd = [sys.executable, "-m", "audiobook_gen", "synth", "x", "--work", job["work"], "--config", job["config"]]
+        return cmd + (["--chapters", ",".join(map(str, job["chapters"]))] if job.get("chapters") else [])
+
+    def qc_cmd(self, job: dict) -> list[str]:
+        cmd = [sys.executable, "-m", "audiobook_gen", "qc", "x", "--work", job["work"], "--config", job["config"]]
         return cmd + (["--chapters", ",".join(map(str, job["chapters"]))] if job.get("chapters") else [])
 
     def assemble_cmd(self, job: dict) -> list[str]:
@@ -481,6 +564,47 @@ class Runner:
             pass
         return ""
 
+    def _qc_summary(self, job: dict) -> None:
+        try:
+            r = json.loads((Path(job["work"]) / "qc_report.json").read_text())
+            text = (f"{r['fixed']} clip(s) fixed" if r["fixed"] else "all clips fine") + (f", {r['unfixed']} could not be fixed" if r["unfixed"] else "")
+            update(job["id"], qc=f"{text} (of {r['checked']:,})")
+        except (OSError, ValueError, KeyError):
+            update(job["id"], qc="no quality report")
+
+    def _outcome(self, job: dict, ok: bool) -> None:
+        """A book finished or failed: keep the failure streak, tell the user, halt the queue if everything keeps failing."""
+        st = settings()
+        streak = 0 if ok else int(st.get("fail_streak", 0)) + 1
+        save_settings(fail_streak=streak)
+        cur = next((j for j in load() if j["id"] == job["id"]), job)
+        if ok:
+            qc = f" ({cur['qc']})" if cur.get("qc") and "fine" not in cur["qc"] else ""
+            left = [j for j in load() if j["status"] in ACTIVE]
+            if left:
+                notify(f"Finished “{job['title']}”{qc}. {len(left)} more in the queue.", "Book finished", tags=["white_check_mark"])
+            else:
+                notify(f"Finished “{job['title']}”{qc}. The queue is empty.", "Queue finished", tags=["tada"])
+            if not cur.get("send_to"):
+                self._cleanup(cur)
+            return
+        notify(f"“{job['title']}” failed: {cur.get('note', '')}", "Book failed", priority="high", tags=["x"])
+        if streak >= FAIL_HALT:
+            try:
+                HALTED.write_text(f"{streak} books in a row failed (last: “{job['title']}”). Fix the cause, then press Resume.")
+            except OSError:
+                pass
+            notify(f"{streak} books in a row failed, so the queue paused itself. Open the app and press Resume once the cause is fixed.",
+                   "Queue paused", priority="urgent", tags=["warning"])
+
+    def _cleanup(self, job: dict) -> None:
+        """If asked to (a setting), delete a finished and delivered book's clips and chapter files to free disk space."""
+        if not settings().get("clean_after_done"):
+            return
+        import shutil
+        for sub in ("clips", "chapters"):
+            shutil.rmtree(Path(job["work"]) / sub, ignore_errors=True)
+
     def _tick(self, job: dict, seconds: float) -> None:
         """Add time a stage spent running to the job's active time (waiting for its window or the GPU is not counted)."""
         cur = next((j for j in load() if j["id"] == job["id"]), None)
@@ -509,7 +633,9 @@ class Runner:
         """One line in the job log: how much memory the speech process holds after how long (to see whether it grows)."""
         try:
             with open(QUEUE / f"{job['id']}.log", "a") as f:
-                f.write(f"[memory] {group_rss(proc.pid):.1f} GB after {(time.time() - started) / 60:.0f} min\n")
+                t = gpu_temp()
+                f.write(f"[memory] {group_rss(proc.pid):.1f} GB after {(time.time() - started) / 60:.0f} min"
+                        + (f" · GPU {t:.0f} °C" if t is not None else "") + "\n")
         except OSError:
             pass
 
@@ -530,6 +656,11 @@ class Runner:
                 return "cancelled" if cur is None or cur["status"] == "cancelled" else "held"
             if code is not None:
                 return "ok" if code == 0 else "failed"
+            if stage != "synth":
+                idle = time.time() - stage_activity(job)
+                if idle > (QC_STALL if stage == "qc" else ASSEMBLE_STALL) * self.stall_scale:
+                    _kill_group(proc)
+                    return "stalled"
             if stage == "synth":
                 prog = self._progress(job)
                 if prog and prog != cur.get("progress"):
@@ -567,6 +698,7 @@ class Runner:
                 update(j["id"], send_try=time.time())
                 if self.sender(j["send_to"], j["out"]):
                     update(j["id"], sent=time.strftime(FMT), note="sent to your phone")
+                    self._cleanup(j)
                 else:
                     update(j["id"], note="waiting for your phone to be reachable")
 
@@ -581,7 +713,9 @@ class Runner:
         if fresh is None or fresh["status"] not in ACTIVE:              # held or cancelled in the instant before it started
             return
         update(job["id"], status="running", started=job.get("started") or time.strftime(FMT), note="")
-        for stage, cmd in (("synth", self.synth_cmd(job)), ("assemble", self.assemble_cmd(job))):
+        for stage, cmd in (("synth", self.synth_cmd(job)), ("qc", self.qc_cmd(job)), ("assemble", self.assemble_cmd(job))):
+            if stage == "qc" and not (Path(job["work"]) / "clips_meta.json").exists():
+                continue                                           # made before the checker existed: nothing to check against
             while True:
                 cur = next((j for j in load() if j["id"] == job["id"]), job)
                 if cur["status"] in ("cancelled", "held"):
@@ -589,16 +723,21 @@ class Runner:
                 if stage == "synth" and not in_window(job.get("window", ""), self.now()):
                     update(job["id"], status="paused", note="waiting for its daily window")
                     return
-                update(job["id"], note=f"{'making the speech' if stage == 'synth' else 'building the audiobook'}")
+                update(job["id"], note={"synth": "making the speech", "qc": "checking the clips", "assemble": "building the audiobook"}[stage])
                 proc = self._spawn(cmd, job)
                 result = self._watch(job, proc, stage)
                 if result == "ok":
+                    if stage == "qc":
+                        self._qc_summary(job)
                     break
                 if result in ("cancelled", "held"):
                     return
                 if result == "window":
                     update(job["id"], status="paused", note="paused: outside its daily window (finished clips are kept)")
                     return
+                if stage == "qc":                                # a safeguard must never stop the book: build it anyway
+                    update(job["id"], qc="the check could not finish; see the log", note="quality check skipped")
+                    break
                 if result in ("recycle", "slow"):                # a planned fresh start, not a failure: finished clips are kept
                     update(job["id"], note=("restarted the speech process to keep it fast" if result == "recycle"
                                             else "speech had slowed down; restarted it"))
@@ -608,6 +747,7 @@ class Runner:
                 if restarts > self.max_restarts:
                     update(job["id"], status="failed", finished=time.strftime(FMT),
                            note=f"gave up after {self.max_restarts} restarts; see work/queue/{job['id']}.log")
+                    self._outcome(job, False)
                     return
                 time.sleep(self.retry_wait)
         cur = next((j for j in load() if j["id"] == job["id"]), job)
@@ -618,11 +758,14 @@ class Runner:
                note="" if done else "the audiobook file was not created", progress="finished" if done else "")
         if done:
             self._record(job)
+        self._outcome(job, done)
 
     def step(self) -> bool:
         """One scheduling decision. Returns True if a job ran."""
         self._beat()
         self.deliver_pending()
+        if HALTED.exists():
+            return False
         for j in load():                                            # a job left "running" by a dead runner starts over
             if j["status"] == "running":
                 update(j["id"], status="queued", note="resuming after a restart")
@@ -641,6 +784,7 @@ class Runner:
     def run_forever(self) -> None:
         QUEUE.mkdir(parents=True, exist_ok=True)
         RUNNER_PID.write_text(str(os.getpid()))
+        threading.Thread(target=listen_ntfy, daemon=True).start()
         print(f"[queue] runner started {time.strftime(FMT)}", flush=True)
         while True:
             try:
@@ -649,6 +793,86 @@ class Runner:
             except Exception as e:                                  # a bug in one job must not stop the runner
                 print(f"[queue] error: {e!r}", flush=True)
                 time.sleep(self.poll)
+
+
+# ---------- questions over ntfy ----------
+COMMANDS = {"current": "what is being made now", "queue": "the waiting books and when each should be done",
+            "done": "the finished books", "help": "this list"}
+
+
+def _when(t) -> str:
+    return t.strftime("%a %H:%M") if t else "?"
+
+
+def answer(text: str, now: datetime | None = None) -> str | None:
+    """The reply to a message sent to the ntfy topic, or None if it is not one of the commands (other messages are ignored)."""
+    cmd = (text or "").strip().lower().strip(".!?")
+    if cmd not in COMMANDS and cmd not in ("status", "now", "finished"):
+        return None
+    cmd = {"status": "current", "now": "current", "finished": "done"}.get(cmd, cmd)
+    now = now or datetime.now()
+    jobs = load()
+    if cmd == "help":
+        return "Send one word: " + ", ".join(f"{k} ({v})" for k, v in COMMANDS.items() if k != "help") + "."
+    est = estimate_queue(now)
+    if cmd == "current":
+        r = now_running()
+        why = halted()
+        if r:
+            end = est["ends"].get(r["id"])
+            return (f"Making “{r['title']}”: {r['pct']}% ({r['done']:,} of {r['total']:,} clips)" if r["total"] else f"Making “{r['title']}”: {r['note'] or 'starting'}") \
+                + (f"\nExpected done {_when(end)}" if end else "") + (f"\nStep: {r['note']}" if r["note"] and r["total"] else "") + (f"\n⚠ {why}" if why else "")
+        if why:
+            return f"The queue paused itself: {why}"
+        nxt = [j for j in jobs if j["status"] in ("queued", "paused")]
+        if nxt:
+            j = min(nxt, key=lambda x: next_start(x, now))
+            return f"Nothing is being made right now. Next: “{j['title']}” at {next_start(j, now)}."
+        return "Nothing is being made and nothing is waiting."
+    if cmd == "queue":
+        lines = []
+        for i, j in enumerate([j for j in jobs if j["status"] in ACTIVE or j["status"] == "held"], 1):
+            tail = (f"{j.get('progress', '')} · done {_when(est['ends'].get(j['id']))}" if j["status"] == "running" else
+                    f"done {_when(est['ends'][j['id']])}" if j["id"] in est["ends"] else "saved for later" if j["status"] == "held" else "no estimate yet")
+            lines.append(f"{i}. {j['title'][:38]} — {j['status']}, {tail}")
+        if not lines:
+            return "The queue is empty."
+        return "\n".join(lines) + (f"\nAll finished about {_when(est['all'])}." if est["all"] else "")
+    done = [j for j in jobs if j["status"] in ("done", "failed")]
+    if not done:
+        return "Nothing has finished yet."
+    return "\n".join(f"{'✓' if j['status'] == 'done' else '✗'} {j['title'][:38]} — {j.get('finished', '')}"
+                     + (f", {('sent' if j.get('sent') else 'not sent yet') if j.get('send_to') else 'not sent'}" if j["status"] == "done" else f" ({j.get('note', '')[:40]})")
+                     for j in done[-12:])
+
+
+def listen_ntfy() -> None:
+    """Answer the commands above for as long as the runner lives: follow the topic's message stream, reconnect when it drops.
+    Only messages that arrive after it starts are read, and only the exact command words get an answer."""
+    since, backoff = str(int(time.time())), 5
+    while True:
+        topic = ntfy_topic()
+        if not topic:
+            time.sleep(30)
+            continue
+        try:
+            req = urllib.request.Request(f"{NTFY_SERVER}/{topic}/json?since={since}")
+            with urllib.request.urlopen(req, timeout=90) as stream:            # the server sends a keep-alive every 30 s
+                backoff = 5
+                for line in stream:
+                    try:
+                        m = json.loads(line)
+                    except ValueError:
+                        continue
+                    if m.get("event") != "message":
+                        continue
+                    since = str(m.get("time", since))
+                    reply = answer(m.get("message", ""))
+                    if reply:
+                        notify(reply, "Audiobook queue", desktop=False)
+        except Exception:
+            time.sleep(backoff)
+            backoff = min(300, backoff * 2)
 
 
 # ---------- supervisor ----------
@@ -733,6 +957,8 @@ def stop_runner() -> str:
 
 def start_runner() -> str:
     STOPPED.unlink(missing_ok=True)
+    HALTED.unlink(missing_ok=True)
+    save_settings(fail_streak=0)
     if service_installed():
         subprocess.run(["systemctl", "--user", "start", SERVICE], timeout=60)
         return "Started the queue runner (system service)."
@@ -772,6 +998,63 @@ def now_running() -> dict | None:
             return {"id": j["id"], "title": j["title"], "done": done, "total": total, "pct": pct, "note": j.get("note", ""),
                     "since_clip": (time.time() - newest) if newest else None, "started": j.get("started", ""), "work": j["work"]}
     return None
+
+
+_CHARS: dict = {}
+
+
+def book_chars(job: dict) -> dict[str, int]:
+    """Characters per engine in the job's chapters (cached while the book's segments file is unchanged)."""
+    path = Path(job["work"]) / "segments.json"
+    try:
+        key = (str(path), path.stat().st_mtime, tuple(job.get("chapters") or ()))
+    except OSError:
+        return {}
+    if key not in _CHARS:
+        from .synth import resolve_voice
+        cfg = yaml.safe_load(Path(job["config"]).read_text()) or {}
+        only, out = set(job.get("chapters") or []), {}
+        for sg in json.loads(path.read_text()):
+            if not only or sg["chapter"] in only:
+                e = resolve_voice(sg["speaker"], cfg)["engine"]
+                out[e] = out.get(e, 0) + len(sg["text"])
+        _CHARS[key] = out
+    return _CHARS[key]
+
+
+def estimate_queue(now: datetime | None = None) -> dict:
+    """When each waiting or running book should be finished, from the measured speed of each engine (whole books, start to file),
+    in queue order, through each book's start time and daily window. {"ends": {job id: datetime}, "all": datetime | None, "unknown": [titles]}."""
+    from .runstats import averages
+    now = now or datetime.now()
+    avg, t, ends, unknown = averages(), now, {}, []
+    for j in load():
+        if j["status"] not in ACTIVE:
+            continue
+        try:
+            per = book_chars(j)
+            if not per or any(e not in avg for e in per):
+                raise KeyError
+            secs = sum(n / avg[e]["cps"] for e, n in per.items())
+        except Exception:
+            unknown.append(j["title"])
+            continue
+        try:
+            done, total = (int(x) for x in j.get("progress", "").split("/"))
+            if j["status"] == "running" and total:
+                secs *= 1 - done / total
+        except ValueError:
+            pass
+        t = max(t, datetime.strptime(j["not_before"], FMT)) if j.get("not_before") else t
+        step = timedelta(minutes=5)
+        for _ in range(60 * 24 * 12):                                 # at most 60 days ahead
+            if secs <= 0:
+                break
+            if in_window(j.get("window", ""), t):
+                secs -= step.total_seconds()
+            t += step
+        ends[j["id"]] = t
+    return {"ends": ends, "all": max(ends.values()) if ends else None, "unknown": unknown}
 
 
 def table(now: datetime | None = None) -> list[list]:
