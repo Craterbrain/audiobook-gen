@@ -42,6 +42,8 @@ FRAMED = {   # slug -> book-cloth colour behind the picture
     "narrative_of_the_life_of_frederick_dougl": (78, 14, 22),       # oxblood red
     "personal_memoirs_of_u_s_grant_complete": (20, 34, 70),         # Union navy
     "up_from_slavery_an_autobiography": (18, 52, 38),               # dark green
+    "the_island_of_doctor_moreau": (22, 56, 36),                    # forest green: a wide painting reads best as a window
+    "twelve_years_a_slave_narrative_of_solomo": (52, 56, 28),       # deep olive
 }
 out_dir = ROOT / "books" / "covers"
 credits = ["# Cover art credits", "", "Backgrounds are public-domain works from Wikimedia Commons (licence shown on each file page).", ""]
