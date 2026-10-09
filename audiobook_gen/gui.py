@@ -1809,30 +1809,30 @@ def build_ui() -> gr.Blocks:
                             "and carries on by itself afterwards. To remake **every** clip with a name after changing the lexicon, search for the "
                             "name to see them, then press “Rebuild the audiobook”: only the clips whose words changed are made again.")
                 with gr.Row():
-                    c_query = gr.Textbox(label="Words in the text (a name, a phrase)", scale=3)
-                    c_chapter = gr.Number(label="Chapter (0 = all)", value=0, precision=0, scale=1)
-                    c_speaker = gr.Textbox(label="Speaker contains", scale=2)
+                    cr_query = gr.Textbox(label="Words in the text (a name, a phrase)", scale=3)
+                    cr_chapter = gr.Number(label="Chapter (0 = all)", value=0, precision=0, scale=1)
+                    cr_speaker = gr.Textbox(label="Speaker contains", scale=2)
                 with gr.Row():
-                    c_flagged = gr.Checkbox(label="Only clips the quality check flagged"); c_corrected = gr.Checkbox(label="Only clips I corrected")
-                    c_find = gr.Button("Find clips", variant="primary")
-                c_msg = gr.Markdown()
-                c_tbl = gr.Dataframe(value=pd.DataFrame([], columns=CORR_HEADERS), headers=CORR_HEADERS, interactive=False, wrap=True,
+                    cr_flagged = gr.Checkbox(label="Only clips the quality check flagged"); cr_corrected = gr.Checkbox(label="Only clips I corrected")
+                    cr_find = gr.Button("Find clips", variant="primary")
+                cr_msg = gr.Markdown()
+                cr_tbl = gr.Dataframe(value=pd.DataFrame([], columns=CORR_HEADERS), headers=CORR_HEADERS, interactive=False, wrap=True,
                                      label="Clips (click one)")
-                c_files, c_file, c_take_path = gr.State([]), gr.State(""), gr.State("")
-                c_info = gr.Markdown()
+                cr_files, cr_file, cr_take_path = gr.State([]), gr.State(""), gr.State("")
+                cr_info = gr.Markdown()
                 with gr.Row():
-                    c_old = gr.Audio(label="This clip now", type="filepath", interactive=False)
-                    c_new = gr.Audio(label="New take", type="filepath", interactive=False)
-                c_orig = gr.Textbox(label="Original text of the passage", interactive=False)
-                c_text = gr.Textbox(label="Text to speak (change a spelling or respelling here)", lines=3)
+                    cr_old = gr.Audio(label="This clip now", type="filepath", interactive=False)
+                    cr_new = gr.Audio(label="New take", type="filepath", interactive=False)
+                cr_orig = gr.Textbox(label="Original text of the passage", interactive=False)
+                cr_text = gr.Textbox(label="Text to speak (change a spelling or respelling here)", lines=3)
                 with gr.Row():
-                    c_exag = gr.Slider(0.0, 1.5, value=0.5, step=0.05, label="Emotion (exaggeration)")
-                    c_cfg = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="Pace / adherence (cfg weight)")
-                    c_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = keep as is)")
+                    cr_exag = gr.Slider(0.0, 1.5, value=0.5, step=0.05, label="Emotion (exaggeration)")
+                    cr_cfg = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="Pace / adherence (cfg weight)")
+                    cr_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = keep as is)")
                 with gr.Row():
-                    c_make = gr.Button("🎙 Make a new take", variant="primary"); c_use = gr.Button("✅ Use this take")
-                    c_back = gr.Button("↩ Back to the original"); c_rebuild = gr.Button("Rebuild the audiobook")
-                c_out = gr.Markdown()
+                    cr_make = gr.Button("🎙 Make a new take", variant="primary"); cr_use = gr.Button("✅ Use this take")
+                    cr_back = gr.Button("↩ Back to the original"); cr_rebuild = gr.Button("Rebuild the audiobook")
+                cr_out = gr.Markdown()
 
             with gr.Tab("✨ Assistant"):
                 gr.Markdown("Ask Claude to set up this book — “give the women different voices”, “make the narration calmer”, "
@@ -2050,12 +2050,12 @@ def build_ui() -> gr.Blocks:
         for _, take_b, give_b in gpu_bars:
             take_b.click(same(gpu_take), None, gpu_mds); give_b.click(same(gpu_give), None, gpu_mds)
         gpu_timer.tick(same(gpu_tick), None, gpu_mds)
-        c_find.click(corr_find, [project, c_query, c_chapter, c_speaker, c_flagged, c_corrected], [c_tbl, c_files, c_msg])
-        c_tbl.select(corr_pick, [project, c_files], [c_old, c_orig, c_text, c_exag, c_cfg, c_seed, c_file, c_info, c_new, c_out])
-        c_make.click(corr_take, [project, c_file, c_text, c_exag, c_cfg, c_seed], [c_new, c_take_path, c_out]).then(same(gpu_banner), None, gpu_mds)
-        c_use.click(corr_use, [project, c_file, c_text, c_exag, c_cfg, c_seed, c_take_path], [c_out, c_file])
-        c_back.click(corr_revert, [project, c_file], c_out)
-        c_rebuild.click(corr_rebuild, project, c_out)
+        cr_find.click(corr_find, [project, cr_query, cr_chapter, cr_speaker, cr_flagged, cr_corrected], [cr_tbl, cr_files, cr_msg])
+        cr_tbl.select(corr_pick, [project, cr_files], [cr_old, cr_orig, cr_text, cr_exag, cr_cfg, cr_seed, cr_file, cr_info, cr_new, cr_out])
+        cr_make.click(corr_take, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed], [cr_new, cr_take_path, cr_out]).then(same(gpu_banner), None, gpu_mds)
+        cr_use.click(corr_use, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed, cr_take_path], [cr_out, cr_file])
+        cr_back.click(corr_revert, [project, cr_file], cr_out)
+        cr_rebuild.click(corr_rebuild, project, cr_out)
         q_ntfy_save.click(alerts_save, [q_ntfy, q_clean], q_alert_msg)
         q_clean.change(alerts_save, [q_ntfy, q_clean], q_alert_msg)
         q_ntfy_test.click(alerts_test, q_ntfy, q_alert_msg)

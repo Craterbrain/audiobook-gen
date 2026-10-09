@@ -1127,3 +1127,19 @@ def test_ntfy_now_and_stop(tmp_path, monkeypatch):
     assert second["not_before"] == "" and second["window"] == ""
     assert "Stopped “First”" in jq.answer("stop") and [j for j in jq.load() if j["id"] == a["id"]][0]["status"] == "held"
     assert jq.answer("stop") == "Nothing is being made."
+
+
+def test_corrections_tab_is_wired_to_its_own_boxes():
+    """Regression: the Corrections boxes once shared variable names with the Clone tab, so clicking a clip filled the wrong boxes."""
+    from audiobook_gen import gui
+    cfg = gui.build_ui().get_config_file()
+    comps = {c["id"]: c for c in cfg["components"]}
+    label = lambda i: comps[i]["props"].get("label")
+    pick = [d for d in cfg["dependencies"] if any(t[1] == "select" for t in d["targets"]) and "This clip now" in [label(o) for o in d["outputs"]]]
+    assert len(pick) == 1
+    assert [label(o) for o in pick[0]["outputs"] if label(o)] == ["This clip now", "Original text of the passage",
+        "Text to speak (change a spelling or respelling here)", "Emotion (exaggeration)", "Pace / adherence (cfg weight)",
+        "Seed (-1 = keep as is)", "New take"]
+    take = [d for d in cfg["dependencies"] if "New take" in [label(o) for o in d["outputs"]] and any("Make a new take" in (comps[t[0]]["props"].get("value") or "") for t in d["targets"])]
+    ins = [label(i) for i in take[0]["inputs"] if label(i)]
+    assert "Text to speak (change a spelling or respelling here)" in ins and "Emotion (exaggeration)" in ins and "Seed (-1 = keep as is)" in ins
