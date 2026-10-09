@@ -16,6 +16,7 @@ voices:
   # Jesus: {engine: f5, ref_audio: voices/jesus.wav, ref_text: "transcript of the clip"}
 pacing_ms:
   sentence: 350
+  split: 30          # after a chunk cut mid-phrase (very long sentences)
   paragraph: 700
   speaker_change: 250
   chapter_start: 1200

@@ -44,8 +44,23 @@ def join(a: np.ndarray, b: np.ndarray, sr: int, pause_ms: int, xfade_ms: int) ->
     return np.concatenate([a[:-n], mid, b[n:]])
 
 
-def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict) -> np.ndarray:
-    """Chunks within a segment get a sentence pause; segments get paragraph / speaker-change pauses."""
+def chunk_pause(prev: dict | str | None, p: dict) -> int:
+    """The pause after a chunk. `prev` is its record from clips_meta.json: how the splitter ended it ("cut") says it exactly. A chunk
+    that ended a sentence gets the sentence pause; one cut at a comma or dash a short one; one cut in the middle of a phrase (a very long
+    sentence) hardly any, so it does not sound like a stop. Without the record the ending of its text decides."""
+    if isinstance(prev, dict) and prev.get("cut"):
+        return {"end": p["sentence"], "comma": p.get("continuation", 140), "space": p.get("split", 30)}.get(prev["cut"], p["sentence"])
+    t = ((prev.get("text") if isinstance(prev, dict) else prev) or "").rstrip().rstrip("\"”’')]")
+    if not t or t.endswith((".", "!", "?", "…")):
+        return p["sentence"]
+    if t.endswith((",", ";", ":", "—", "–", "-")):
+        return p.get("continuation", 140)
+    return p.get("split", 30)
+
+
+def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, texts: dict | None = None) -> np.ndarray:
+    """Chunks within a segment get a pause that depends on how the chunk before ended (when clips_meta.json is known, `texts`:
+    file -> its record), else the sentence pause; segments get paragraph / speaker-change pauses."""
     sr, p, xf = cfg["sample_rate"], cfg["pacing_ms"], cfg["crossfade_ms"]
     out, prev = None, None
     for seg in segs:
@@ -55,7 +70,7 @@ def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict) -> n
                 out = np.concatenate([np.zeros(int(sr * p["chapter_start"] / 1000), np.float32), a])
                 continue
             if ci:
-                pause = p["sentence"]
+                pause = chunk_pause((texts or {}).get(clips[seg["id"]][ci - 1], ""), p) if texts else p["sentence"]
             elif prev and prev["text"].rstrip().endswith((",", ";", ":", "—", "–", "-")):
                 pause = p.get("continuation", 140)    # the sentence carries on: "Upon my word," / cried the old man,
             elif prev and prev.get("kind") == "dialogue" and seg.get("kind") == "narration" and len(seg["text"]) < 90:
@@ -250,6 +265,10 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
     from .synth import load_segments
     segs = load_segments(work, cfg)
     clips = json.loads((work / "clips.json").read_text())
+    try:                                       # what each clip says, to pause by how it ends (books made before the list existed: sentence pause)
+        texts = json.loads((work / "clips_meta.json").read_text())
+    except (OSError, ValueError):
+        texts = None
     sr = cfg["sample_rate"]
     title, author = title or meta["title"], author or meta.get("author", "")
     (work / "chapters").mkdir(exist_ok=True)
@@ -259,7 +278,7 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
         if only_chapters and ch["index"] not in only_chapters:
             continue
         cs = [s for s in segs if s["chapter"] == ch["index"]]
-        audio = build_chapter(cs, clips, work / "clips", cfg)
+        audio = build_chapter(cs, clips, work / "clips", cfg, texts)
         peak = np.abs(audio).max() or 1.0
         audio = audio * min(1.0, 0.7 / peak)  # peak-limit to ~ -3 dBFS
         wav = work / "chapters" / f"{ch['index']:03d}.wav"

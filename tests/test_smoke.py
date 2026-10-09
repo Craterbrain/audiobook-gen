@@ -1205,3 +1205,26 @@ def test_degrees_minutes_and_compass_points_are_spelled_out():
     assert normalize("98° F. in the shade") == "ninety-eight degrees Fahrenheit in the shade"
     assert normalize("W.N.W., making") == "west-north-west, making"
     assert normalize("N. Smith met E. Nesbit") == "N. Smith met E. Nesbit"        # initials are left alone
+
+
+def test_a_chunk_cut_mid_phrase_is_not_followed_by_a_sentence_pause(tmp_path):
+    import numpy as np, soundfile as sf
+    from audiobook_gen.assemble import build_chapter, chunk_pause
+    p = {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30}
+    assert chunk_pause("It ended here.", p) == 350 and chunk_pause("“Is it?”", p) == 350 and chunk_pause("so, then,", p) == 140
+    assert chunk_pause("one hundred and one", p) == 30 and chunk_pause("", p) == 350                    # no record: decided by the ending
+    assert chunk_pause({"text": "x, y", "cut": "end"}, p) == 350 and chunk_pause({"text": "x.", "cut": "space"}, p) == 30      # the record wins
+    from audiobook_gen.synth import chunk_text_cuts
+    long = "A short one. " + "word " * 14 + "clause, " + "tail " * 40 + "end. Last."
+    kinds = [k for _, k in chunk_text_cuts(long, 100)]
+    assert kinds[-1] == "end" and set(kinds) <= {"end", "comma", "space"} and "comma" in kinds
+    sr = 24000
+    for n in "ab":
+        sf.write(tmp_path / f"{n}.wav", np.full(sr, 0.1, np.float32), sr)
+    cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60}
+    seg = [{"id": "s", "text": "x", "kind": "narration", "para_start": True}]
+    clips = {"s": ["a.wav", "b.wav"]}
+    cut = build_chapter(seg, clips, tmp_path, cfg, {"a.wav": {"text": "longitude one hundred and one", "cut": "space"}, "b.wav": {"text": "degrees west."}})
+    full = build_chapter(seg, clips, tmp_path, cfg, {"a.wav": {"text": "It ended.", "cut": "end"}, "b.wav": {"text": "Next."}})
+    assert len(full) - len(cut) == int(sr * 0.32)                  # 350 ms vs 30 ms
+    assert len(build_chapter(seg, clips, tmp_path, cfg)) == len(full)      # no clip list: the old sentence pause

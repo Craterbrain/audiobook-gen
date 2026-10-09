@@ -15,8 +15,10 @@ SENT_RE = re.compile(r"(?<=[.!?;:])\s+")
 POOL = ["af_sarah", "am_echo", "bf_emma", "am_liam", "af_nicole", "bm_fable", "af_sky", "am_onyx"]
 
 
-def chunk_text(text: str, max_chars: int = 300) -> list[str]:
-    chunks, cur = [], ""
+def chunk_text_cuts(text: str, max_chars: int = 300) -> list[tuple[str, str]]:
+    """[(chunk, how it ends)]: "end" for a natural sentence boundary, "comma" when a very long sentence had to be cut at a comma,
+    semicolon or dash, "space" when it had to be cut in the middle of a phrase. The pause after a chunk follows from this."""
+    out, cur = [], ""
     for sent in SENT_RE.split(text.strip()):
         while len(sent) > max_chars:  # hard-split very long sentences, at the last comma/semicolon/dash in the back half, else at a space
             window = sent[:max_chars]
@@ -25,14 +27,18 @@ def chunk_text(text: str, max_chars: int = 300) -> list[str]:
             cut = cut if cut > 0 else max_chars
             piece, sent = sent[:cut + 1].strip(), sent[cut + 1:].strip()
             if cur:
-                chunks.append(cur); cur = ""
-            chunks.append(piece)
+                out.append((cur, "end")); cur = ""
+            out.append((piece, "comma" if stops else "space"))
         if cur and len(cur) + 1 + len(sent) > max_chars:
-            chunks.append(cur); cur = ""
+            out.append((cur, "end")); cur = ""
         cur = f"{cur} {sent}".strip()
     if cur:
-        chunks.append(cur)
-    return [c for c in chunks if c]
+        out.append((cur, "end"))
+    return [(c, k) for c, k in out if c]
+
+
+def chunk_text(text: str, max_chars: int = 300) -> list[str]:
+    return [c for c, _ in chunk_text_cuts(text, max_chars)]
 
 
 def load_segments(work: Path, cfg: dict) -> list[dict]:
@@ -136,7 +142,9 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
     meta = {}                       # clip file -> what it should say and who says it (the quality check and the Corrections tab read this)
     overrides = load_overrides(work)
     lex = {}
-    raw = [chunk_text(normalize(seg["text"]), cfg.get("max_chunk_chars", 300)) for seg in segs]
+    pairs = [chunk_text_cuts(normalize(seg["text"]), cfg.get("max_chunk_chars", 300)) for seg in segs]
+    raw = [[c for c, _ in p] for p in pairs]
+    cuts = [[k for _, k in p] for p in pairs]                 # how each chunk ends: the join pauses by this
     from . import refine
     refined = refine.load(work)                      # the language pass, if the book has had one: added question marks, delivery
     if refined:
@@ -161,7 +169,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
             key = clip_key(spoken, vv, ename)
             files.append(f"{key}.wav")
             meta[f"{key}.wav"] = {"text": spoken, "speaker": seg["speaker"], "engine": ename, "voice": vv, "key": f"{seg['id']}:{ci}",
-                                  "orig": raw[si][ci], "chapter": seg["chapter"], "seg": seg["id"], "ci": ci}
+                                  "orig": raw[si][ci], "chapter": seg["chapter"], "seg": seg["id"], "ci": ci, "cut": cuts[si][ci]}
             total += 1
             if not (clips / f"{key}.wav").exists():
                 todo.append((seg["speaker"], spoken, vv, ename, clips / f"{key}.wav"))
