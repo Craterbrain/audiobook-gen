@@ -133,7 +133,7 @@ The code is released under the [MIT License](LICENSE). The bundled Bible IPA dic
 - `./setup_queue_service.sh` installs the queue as a systemd user service so it starts at boot and is restarted if it ever
   dies (`--remove` uninstalls it). Without it, the app starts the queue whenever it opens.
 - **Send to your phone** — tick *Send the finished audiobook to my phone* on the Generate tab (or use the buttons on the Queue tab) and the
-  queue shares each finished book through KDE Connect, retrying every 5 minutes while the phone is out of reach.
+  queue shares each finished book through KDE Connect, retrying every 2 minutes while the phone is out of reach.
 - **Cover tab** — pick a picture (upload your own, or search public-domain / CC0 pictures on Wikimedia Commons), choose *picture window*
   (people, on a book-cloth colour) or *full background* (scenery), preview, and press *Use this cover*. `python -m audiobook_gen.covers` does the same from the command line.
 - **Assistant tab** — ask Claude (through your Claude Code login) to set up voices, pacing or pronunciations, or to make a cover. It edits a copy,
