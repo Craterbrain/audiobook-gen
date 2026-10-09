@@ -236,14 +236,38 @@ def kde_devices() -> list[dict]:
     return devs
 
 
-def send_file(device: str, path: str) -> bool:
-    """Share a file to the device. False if the device is out of reach or the share failed (it is tried again later)."""
+UPLOAD_FAILED = "no connection received"        # what KDE Connect's daemon logs when the phone never came to fetch the file
+VERIFY_SECONDS = 90                               # how long after a share to watch for that message
+
+
+def kde_journal(since: float) -> str:
+    """The daemon's log lines since a time (empty if the journal cannot be read)."""
+    try:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
+        return subprocess.run(["journalctl", "--user", "--since", stamp, "--no-pager", "-q"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return ""
+
+
+def send_file(device: str, path: str, journal=None, verify_seconds: float | None = None) -> bool:
+    """Share a file to the device. False if the device is out of reach, the share failed, or the phone never came to fetch the file
+    (KDE Connect's command only says the request was queued; the daemon logs a timeout when nobody connects, which is watched for here).
+    Anything false is tried again later."""
     if not any(d["id"] == device and d["reachable"] for d in kde_devices()):
         return False
+    journal = journal or kde_journal
+    wait = VERIFY_SECONDS if verify_seconds is None else verify_seconds
+    t0 = time.time()
     try:
-        return subprocess.run(["kdeconnect-cli", "-d", device, "--share", str(path)], capture_output=True, timeout=900).returncode == 0
+        if subprocess.run(["kdeconnect-cli", "-d", device, "--share", str(path)], capture_output=True, timeout=900).returncode != 0:
+            return False
     except Exception:
         return False
+    while time.time() - t0 < wait:
+        time.sleep(min(5.0, max(0.05, wait / 12)))
+        if UPLOAD_FAILED in journal(t0 - 2):
+            return False
+    return UPLOAD_FAILED not in journal(t0 - 2)
 
 
 def settings() -> dict:
@@ -775,12 +799,12 @@ class Runner:
         for j in load():
             if (j["status"] == "done" and j.get("send_to") and not j.get("sent") and Path(j["out"]).exists()
                     and time.time() - j.get("send_try", 0) >= self.send_every):
-                update(j["id"], send_try=time.time())
+                update(j["id"], send_try=time.time(), note="sending to your phone")
                 if self.sender(j["send_to"], j["out"]):
                     update(j["id"], sent=time.strftime(FMT), note="sent to your phone")
                     self._cleanup(j)
                 else:
-                    update(j["id"], note="waiting for your phone to be reachable")
+                    update(j["id"], note="waiting for your phone to be reachable (or to take the file); trying again")
 
     def deliver_pending(self) -> None:
         """Run the sending on its own thread: a big file or an absent phone must never stop the heartbeat (or the queue)."""

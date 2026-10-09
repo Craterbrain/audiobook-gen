@@ -1398,3 +1398,16 @@ def test_chapters_encoded_side_by_side_match_the_single_pass_encode(tmp_path, mo
     monkeypatch.setattr(assemble, "AAC_FRAME", 48000)
     out = probe(assemble.assemble(tmp_path, {**cfg, "encode_workers": 3}, tmp_path / "fallback.m4b", None, "T", "A"))
     assert abs(float(out["format"]["duration"]) - float(outs["serial"]["format"]["duration"])) < 0.2
+
+
+def test_a_send_the_phone_never_fetched_counts_as_failed(monkeypatch):
+    import subprocess
+    from audiobook_gen import jobqueue as jq
+    monkeypatch.setattr(jq, "kde_devices", lambda: [{"id": "dev", "name": "Phone", "reachable": True}])
+    class Done:
+        returncode = 0
+    monkeypatch.setattr(jq.subprocess, "run", lambda *a, **k: Done())
+    assert jq.send_file("dev", "/x", journal=lambda since: "", verify_seconds=0.2) is True                          # nothing logged: it was fetched
+    assert jq.send_file("dev", "/x", journal=lambda since: "kdeconnectd: CompositeUploadJob::timeoutTriggered() - no connection received", verify_seconds=0.2) is False
+    monkeypatch.setattr(jq, "kde_devices", lambda: [{"id": "dev", "name": "Phone", "reachable": False}])
+    assert jq.send_file("dev", "/x", journal=lambda since: "", verify_seconds=0.2) is False                         # out of reach
