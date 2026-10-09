@@ -1032,7 +1032,7 @@ def test_ntfy_commands_answer_with_queue_state(tmp_path, monkeypatch):
     assert "1. First — running" in q and "2. Second — queued" in q
     jq.update(a["id"], status="done", finished="2026-10-09 11:00", send_to="dev", sent="2026-10-09 11:05")
     assert "✓ First" in jq.answer("done", now) and "sent" in jq.answer("done", now)
-    assert "Send one word" in jq.answer("help", now)
+    assert "now <number>" in jq.answer("help", now) and jq.answer("now", now) is None
 
 
 def test_corrections_find_remake_and_keep_the_new_take(tmp_path, monkeypatch):
@@ -1108,3 +1108,22 @@ def test_a_running_book_is_paused_when_the_app_takes_the_gpu(tmp_path, monkeypat
     R(poll=0.1, stall=60, grace=60, foreign=lambda: "").step()
     j = [x for x in jq.load() if x["id"] == job["id"]][0]
     assert j["status"] == "queued" and "paused while you use the GPU" in j["note"] and j.get("restarts", 0) == 0
+
+
+def test_ntfy_now_and_stop(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    a = jq.add(str(work), "First", out=str(tmp_path / "a.m4b"))
+    b = jq.add(str(work), "Second", out=str(tmp_path / "b.m4b"), window="23:00-06:30", not_before="2030-01-01 00:00")
+    c = jq.add(str(work), "Third", out=str(tmp_path / "c.m4b"))
+    jq.update(a["id"], status="running", progress="10/100")
+    assert "no number 9" in jq.answer("now 9")
+    assert "already being made" in jq.answer("now 1")
+    text = jq.answer("now 3")
+    assert "“Third” goes first" in text and "“First” steps aside" in text
+    jobs = {j["id"]: j for j in jq.load()}
+    assert [j["title"] for j in jq.load()][0] == "Third" and jobs[a["id"]]["preempt"] is True
+    jq.answer("now #3")                                              # a scheduled book loses its start time and window
+    second = [j for j in jq.load() if j["title"] == "Second"][0]
+    assert second["not_before"] == "" and second["window"] == ""
+    assert "Stopped “First”" in jq.answer("stop") and [j for j in jq.load() if j["id"] == a["id"]][0]["status"] == "held"
+    assert jq.answer("stop") == "Nothing is being made."

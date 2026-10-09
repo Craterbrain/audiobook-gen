@@ -710,6 +710,10 @@ class Runner:
                 if code is None:
                     _kill_group(proc)
                 return "cancelled" if cur is None or cur["status"] == "cancelled" else "held"
+            if cur.get("preempt"):                                      # another book was told to start now: step aside, keep the clips
+                if code is None:
+                    _kill_group(proc)
+                return "preempt"
             if code is not None:
                 return "ok" if code == 0 else "failed"
             if stage != "synth":
@@ -791,6 +795,9 @@ class Runner:
                     break
                 if result in ("cancelled", "held"):
                     return
+                if result == "preempt":
+                    update(job["id"], status="queued", preempt=False, note="stepped aside so another book could start first")
+                    return
                 if result == "lease":
                     update(job["id"], status="queued", note="paused while you use the GPU in the app (it carries on by itself)")
                     return
@@ -859,23 +866,65 @@ class Runner:
 
 # ---------- questions over ntfy ----------
 COMMANDS = {"current": "what is being made now", "queue": "the waiting books and when each should be done",
-            "done": "the finished books", "help": "this list"}
+            "done": "the finished books", "now <number>": "start that book from `queue` right away", "stop": "stop the book being made",
+            "help": "this list"}
 
 
 def _when(t) -> str:
     return t.strftime("%a %H:%M") if t else "?"
 
 
+def numbered() -> list[dict]:
+    """The books in the order and numbering the `queue` reply shows."""
+    return [j for j in load() if j["status"] in ACTIVE or j["status"] == "held"]
+
+
+def start_now(number: int) -> str:
+    """`now <number>`: put that book first with no waiting time, and make any book being made step aside (its clips are kept)."""
+    books = numbered()
+    if not 1 <= number <= len(books):
+        return f"There is no number {number}; send `queue` to see the list."
+    job = books[number - 1]
+    if job["status"] == "running":
+        return f"“{job['title']}” is already being made."
+    if halted():
+        return f"The queue paused itself after repeated failures; press Resume in the app first. ({halted()})"
+    resume([job["id"]])
+    set_schedule([job["id"]], "", "")
+    move([job["id"]], "top")
+    running = [j for j in load() if j["status"] == "running"]
+    for j in running:
+        update(j["id"], preempt=True)
+    return (f"“{job['title']}” goes first, at any time of day." +
+            (f" “{running[0]['title']}” steps aside (its clips are kept) and carries on afterwards." if running else "") +
+            " It starts within about 30 seconds.")
+
+
+def stop_active() -> str:
+    """`stop`: stop the book being made and save it for later (its clips are kept)."""
+    r = now_running()
+    if not r:
+        return "Nothing is being made."
+    hold([r["id"]])
+    return (f"Stopped “{r['title']}” at {r['pct']}% and saved it for later; its clips are kept. "
+            "Resume it in the app, or send `now <number>`.")
+
+
 def answer(text: str, now: datetime | None = None) -> str | None:
     """The reply to a message sent to the ntfy topic, or None if it is not one of the commands (other messages are ignored)."""
     cmd = (text or "").strip().lower().strip(".!?")
-    if cmd not in COMMANDS and cmd not in ("status", "now", "finished"):
+    start = re.fullmatch(r"now\s+#?(\d+)", cmd)
+    if start:
+        return start_now(int(start.group(1)))
+    if cmd == "stop":
+        return stop_active()
+    if cmd not in COMMANDS and cmd not in ("status", "finished"):
         return None
-    cmd = {"status": "current", "now": "current", "finished": "done"}.get(cmd, cmd)
+    cmd = {"status": "current", "finished": "done"}.get(cmd, cmd)
     now = now or datetime.now()
     jobs = load()
     if cmd == "help":
-        return "Send one word: " + ", ".join(f"{k} ({v})" for k, v in COMMANDS.items() if k != "help") + "."
+        return "Send: " + "; ".join(f"{k} ({v})" for k, v in COMMANDS.items() if k != "help") + "."
     est = estimate_queue(now)
     if cmd == "current":
         r = now_running()
