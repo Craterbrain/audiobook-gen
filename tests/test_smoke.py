@@ -742,3 +742,22 @@ def test_generate_tab_can_send_to_a_phone(tmp_path, monkeypatch):
     assert len(jq.load()) == 1                                                       # the refused click queued nothing
     assert "will not be sent" in gui.queue_nosend([jq.load()[0]["id"]])[0] and jq.load()[0]["send_to"] == ""
     assert "will be sent" in gui.queue_send([jq.load()[0]["id"]], "dev2")[0] and jq.load()[0]["send_to"] == "dev2"
+
+
+def test_framed_cover_takes_a_book_cloth_colour(tmp_path):
+    from PIL import Image
+    from audiobook_gen.assemble import make_cover_portrait
+    Image.new("RGB", (800, 500), (200, 200, 200)).save(tmp_path / "wide.png")                      # a rectangular picture
+    oval = Image.new("RGBA", (500, 700), (0, 0, 0, 0))                                             # an oval portrait with see-through corners
+    from PIL import ImageDraw
+    ImageDraw.Draw(oval).ellipse([0, 0, 499, 699], fill=(160, 160, 160, 255)); oval.save(tmp_path / "oval.png")
+    for pic in ("wide.png", "oval.png"):
+        out = make_cover_portrait(tmp_path / f"{pic}.jpg", "A Title", "An Author", str(tmp_path / pic), (18, 52, 38))
+        im = Image.open(out).convert("RGB")
+        assert im.size == (1400, 1400) and all(abs(a - b) < 12 for a, b in zip(im.getpixel((150, 700)), (18, 52, 38)))   # the colour shows
+        assert sum(im.getpixel((700, 700))) > 300                                                   # the picture is in the middle
+    im = Image.open(tmp_path / "oval.png.jpg").convert("RGB")
+    near = lambda c, ref=(18, 52, 38): all(abs(a - b) < 14 for a, b in zip(c, ref))
+    ys = [y for y in range(300, 1250) if not near(im.getpixel((700, y)))]       # the picture's top and bottom (column through its centre)
+    xs = [x for x in range(150, 1250) if not near(im.getpixel((x, (ys[0] + ys[-1]) // 2)))]                      # and its left edge
+    assert im.getpixel((xs[0] + 6, ys[0] + 6)) is not None and near(im.getpixel((xs[0] + 6, ys[0] + 6)))        # the oval's corner shows the colour, not black

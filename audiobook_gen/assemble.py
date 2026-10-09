@@ -144,13 +144,14 @@ def _photo_background(path: str, W: int, focus: tuple[float, float], zoom: float
     return Image.fromarray((np.clip(a, 0, 1) * 255).astype("uint8"))
 
 
-def make_cover_portrait(path: Path, title: str, author: str, picture: str) -> Path:
-    """Black cover: the title across the top, a smaller picture beneath it, the author under the picture (for portraits)."""
+def make_cover_portrait(path: Path, title: str, author: str, picture: str, color: tuple[int, int, int] = (0, 0, 0)) -> Path:
+    """Framed cover for pictures of people: the title across the top, the whole picture beneath it, the author under it, on a plain
+    book-cloth colour (black, navy, dark green, oxblood red...)."""
     from PIL import Image, ImageDraw
     S, N = 2, 1400
     W = N * S
     gold, cream, mute = (212, 175, 90), (244, 237, 218), (160, 140, 96)
-    img = Image.new("RGB", (W, W), (0, 0, 0))
+    img = Image.new("RGB", (W, W), color)
     d = ImageDraw.Draw(img)
     d.rectangle([60 * S, 60 * S, (N - 60) * S, (N - 60) * S], outline=gold, width=7 * S)
     d.rectangle([84 * S, 84 * S, (N - 84) * S, (N - 84) * S], outline=mute, width=2 * S)
@@ -167,15 +168,17 @@ def make_cover_portrait(path: Path, title: str, author: str, picture: str) -> Pa
     for l in lines:
         d.text((cx, y), l, font=f, fill=cream, anchor="ms")
         y += lh
-    top = y - lh + 45 * S                                 # the picture sits between the title and the author
+    top = y - lh + 66 * S                                 # the picture sits between the title and the author
     bottom = 1215 * S
     pic = Image.open(picture)
-    if pic.mode in ("RGBA", "LA", "P"):
-        pic = pic.convert("RGBA"); flat = Image.new("RGB", pic.size, (0, 0, 0)); flat.paste(pic, mask=pic.split()[-1]); pic = flat
-    pic = pic.convert("RGB")
+    cut_out = pic.mode in ("RGBA", "LA", "P") and pic.convert("RGBA").getextrema()[3][0] < 255      # an oval portrait with see-through corners
+    pic = pic.convert("RGBA")
     k = min((bottom - top) / pic.height, (N - 2 * 190) * S / pic.width)
     pic = pic.resize((int(pic.width * k), int(pic.height * k)), Image.LANCZOS)
-    img.paste(pic, (cx - pic.width // 2, top + (bottom - top - pic.height) // 2))
+    x, y = cx - pic.width // 2, top + (bottom - top - pic.height) // 2
+    if not cut_out:                                                       # a rectangular picture gets a thin gold keyline
+        d.rectangle([x - 6 * S, y - 6 * S, x + pic.width + 6 * S, y + pic.height + 6 * S], outline=gold, width=2 * S)
+    img.paste(pic.convert("RGB"), (x, y), pic.split()[-1] if cut_out else None)
     if (author or "").strip():
         y = 1240 * S
         d.line([cx - 230 * S, y, cx - 22 * S, y], fill=gold, width=3 * S)

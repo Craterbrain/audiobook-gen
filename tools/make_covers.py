@@ -1,4 +1,6 @@
 """Build each prepared book's cover from a public-domain picture (Wikimedia Commons) and write books/covers/CREDITS.md.
+A picture that shows off PEOPLE (a portrait, a group) gets the framed layout: title on top, the whole picture beneath it, on a
+classic book-cloth colour (FRAMED below). Scenery fills the whole cover behind the title.
 Images are in books/covers/raw/ (see tools/commons_search.py). Usage: python tools/make_covers.py"""
 import json
 import sys
@@ -36,15 +38,19 @@ TITLES = {   # slug -> (title on the cover, title in the file's tags)
     "personal_memoirs_of_u_s_grant_complete": ("Personal Memoirs of U. S. Grant", "Personal Memoirs of U. S. Grant"),
     "twenty_thousand_leagues_under_the_sea": ("Twenty Thousand Leagues Under the Sea", "Twenty Thousand Leagues Under the Sea"),
 }
-PORTRAITS = {"narrative_of_the_life_of_frederick_dougl", "personal_memoirs_of_u_s_grant_complete"}
+FRAMED = {   # slug -> book-cloth colour behind the picture
+    "narrative_of_the_life_of_frederick_dougl": (78, 14, 22),       # oxblood red
+    "personal_memoirs_of_u_s_grant_complete": (20, 34, 70),         # Union navy
+    "up_from_slavery_an_autobiography": (18, 52, 38),               # dark green
+}
 out_dir = ROOT / "books" / "covers"
 credits = ["# Cover art credits", "", "Backgrounds are public-domain works from Wikimedia Commons (licence shown on each file page).", ""]
 for slug in open(ROOT / "books" / "queue.txt").read().split():
     img, focus, zoom, work, artist, date, fname = COVERS[slug]
     info = json.loads((ROOT / "work" / slug / "prepared.json").read_text())
     path = out_dir / f"{slug}.jpg"
-    if slug in PORTRAITS:               # title on top, a smaller picture below, on black
-        make_cover_portrait(path, TITLES[slug][0], info["author"], str(out_dir / "raw" / f"{img}.jpg"))
+    if slug in FRAMED:                  # people: title on top, the whole picture below, on a colour
+        make_cover_portrait(path, TITLES[slug][0], info["author"], str(out_dir / "raw" / f"{img}.jpg"), FRAMED[slug])
     else:
         make_cover(path, TITLES[slug][0], info["author"], str(out_dir / "raw" / f"{img}.jpg"), focus, zoom)
     info["cover"], info["title"] = str(path), TITLES[slug][1]
