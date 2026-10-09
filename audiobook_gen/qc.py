@@ -90,6 +90,8 @@ def scan(work: Path, progress=print) -> tuple[list[dict], dict]:
         measured[f] = measure(clips / f)
         if i % 250 == 0:
             progress(f"  checked {i}/{len(meta)}")
+    from .synth import load_overrides
+    chosen = load_overrides(work)
     median = {}
     for eng in {i["engine"] for i in meta.values()}:
         paces = [len(meta[f]["text"]) / m["speech"] for f, m in measured.items()
@@ -98,6 +100,8 @@ def scan(work: Path, progress=print) -> tuple[list[dict], dict]:
     flagged = []
     for f, info in meta.items():
         why = problems(measured[f], len(info["text"]), median[info["engine"]], info["text"])
+        if why and info.get("key") in chosen:                    # you picked this take yourself: leave it alone
+            why = []
         if why:
             flagged.append({"file": f, "text": info["text"], "engine": info["engine"], "why": why, "chars": len(info["text"])})
     return flagged, {"checked": len(meta), "median_pace": median}

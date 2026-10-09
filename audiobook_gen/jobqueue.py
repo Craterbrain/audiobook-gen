@@ -379,15 +379,71 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def foreign_synthesis() -> str:
-    """Something other than this runner is using the GPU: a synth started by hand, or the GUI's Generate button."""
+LEASE_STALE = 1800        # a lease that was not renewed for this long is forgotten (the app crashed or was left alone)
+
+
+def lease_holder() -> str:
+    """Who has the GPU on loan from the queue ("" = nobody). The app takes a lease to load a model while no book is being made."""
     try:
-        pid = int(GUI_LOCK.read_text().split()[0])
-        if _alive(pid):
-            return "the Generate button in the app"
+        pid, owner = (GUI_LOCK.read_text().split(None, 1) + [""])[:2]
+        if _alive(int(pid)) and time.time() - GUI_LOCK.stat().st_mtime < LEASE_STALE:
+            return owner.strip() or "the app"
         GUI_LOCK.unlink(missing_ok=True)
     except Exception:
         pass
+    return ""
+
+
+def lease_take(owner: str = "the app", wait: float = 120) -> bool:
+    """Take the GPU from the queue. A book being made is paused: its speech process is stopped (finished clips are kept) and
+    it carries on by itself when the lease is given back. Returns True once the GPU is free (or after `wait` seconds, False)."""
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    GUI_LOCK.write_text(f"{os.getpid()} {owner}")
+    end = time.time() + wait
+    while time.time() < end:
+        if not _synth_running():
+            return True
+        time.sleep(1)
+    return False
+
+
+def lease_touch() -> None:
+    try:
+        os.utime(GUI_LOCK)
+    except OSError:
+        pass
+
+
+def lease_mine() -> bool:
+    try:
+        return int(GUI_LOCK.read_text().split()[0]) == os.getpid()
+    except Exception:
+        return False
+
+
+def lease_idle() -> float:
+    """Seconds since the lease was last used (0 if there is none)."""
+    try:
+        return time.time() - GUI_LOCK.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def lease_give_back() -> None:
+    if lease_mine():
+        GUI_LOCK.unlink(missing_ok=True)
+
+
+def _synth_running() -> bool:
+    out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True).stdout
+    return any(("-m audiobook_gen synth" in l or "-m audiobook_gen qc" in l) and "ps -eo" not in l for l in out.splitlines())
+
+
+def foreign_synthesis() -> str:
+    """Something other than this runner is using the GPU: a synth started by hand, or the app holding a lease."""
+    who = lease_holder()
+    if who:
+        return who + " (you are using the GPU there)"
     out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True).stdout
     for line in out.splitlines():
         if "-m audiobook_gen synth" in line and "ps -eo" not in line:
@@ -661,6 +717,9 @@ class Runner:
                 if idle > (QC_STALL if stage == "qc" else ASSEMBLE_STALL) * self.stall_scale:
                     _kill_group(proc)
                     return "stalled"
+            if stage in ("synth", "qc") and lease_holder():                    # the app asked for the GPU: give it up, come back later
+                _kill_group(proc)
+                return "lease"
             if stage == "synth":
                 prog = self._progress(job)
                 if prog and prog != cur.get("progress"):
@@ -731,6 +790,9 @@ class Runner:
                         self._qc_summary(job)
                     break
                 if result in ("cancelled", "held"):
+                    return
+                if result == "lease":
+                    update(job["id"], status="queued", note="paused while you use the GPU in the app (it carries on by itself)")
                     return
                 if result == "window":
                     update(job["id"], status="paused", note="paused: outside its daily window (finished clips are kept)")

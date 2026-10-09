@@ -24,6 +24,7 @@ from . import voicepack as vpk
 from . import voices as vlib
 from . import respell_search as rs
 from . import covers as covers_mod
+from . import corrections as corr
 from .synth import get_engine, resolve_voice, synthesize_iter
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,6 +157,7 @@ def set_role_voice(project, role, key, speed):
 def hear_voice(project, key, speed, text):
     if not key:
         raise gr.Error("Choose a voice first.")
+    need_gpu()
     v = casting.voice_of(key, speed)
     from .voices import resolve
     v = resolve(v)
@@ -170,6 +172,7 @@ def find_genders(project, roles, title, progress=gr.Progress()):
     """Ask the small model for each character's gender, in the context of the book's title."""
     if not roles:
         raise gr.Error("Parse the book first.")
+    need_gpu()
     from .tiebreak import Judge
     cfg = _cfg(project)
     book = (title or "").strip() or json.loads((_wd(project) / "chapters.json").read_text()).get("title", "this book")
@@ -526,6 +529,7 @@ def hear_term(project, lex_df, term, which):
     row = lex_df[lex_df["term"] == term]
     if row.empty:
         raise gr.Error("Choose a term from the table.")
+    need_gpu()
     r = row.iloc[0]
     ipa = (r["ipa"] or "").strip().strip("/")
     spoken = f"{term}. [{term}](/{ipa}/). {term}." if (which == "Compare" and ipa) else \
@@ -1367,10 +1371,160 @@ CSS = """
 """
 
 
+# ---------- sharing the GPU with the queue ----------
+LEASE_IDLE = 180          # seconds without using a model here before the GPU goes back to the queue
+
+
+def _need_gpu_real() -> None:
+    """Call before loading or using a model in this app. If a book is being made, ask for it to be paused first (the button at the
+    top); if nothing is, take the GPU so the queue waits for us. Every use renews the lease; it is given back when we go idle."""
+    from . import jobqueue
+    if jobqueue.lease_mine():
+        jobqueue.lease_touch()
+        return
+    run = jobqueue.now_running()
+    if run and run["note"] in ("making the speech", "checking the clips"):
+        raise gr.Error(f"“{run['title']}” is being made on the GPU. Press “Pause the book and use the GPU” at the top of the page, then try again. "
+                       f"It carries on by itself about {LEASE_IDLE // 60} minutes after you stop (reloading takes about 1½ minutes).")
+    other = jobqueue.lease_holder()
+    if other:
+        raise gr.Error(f"{other} has the GPU right now.")
+    jobqueue.lease_take()
+
+
+need_gpu = _need_gpu_real
+
+
+def gpu_banner() -> str:
+    from . import jobqueue
+    if jobqueue.lease_mine():
+        left = max(0, LEASE_IDLE - int(jobqueue.lease_idle()))
+        return f"🟢 **You have the GPU.** The queue is paused and carries on by itself {left // 60} min {left % 60:02d} s after you stop using a model here."
+    run = jobqueue.now_running()
+    if run and run["note"] in ("making the speech", "checking the clips"):
+        return f"⏳ **“{run['title']}” is being made on the GPU.** Pausing it frees the GPU for hearing voices or remaking clips here."
+    other = jobqueue.lease_holder()
+    return f"🔒 {other} has the GPU." if other else "⚪ The GPU is free."
+
+
+def gpu_take():
+    from . import jobqueue
+    if not jobqueue.lease_mine():
+        jobqueue.lease_take()
+    jobqueue.lease_touch()
+    return gpu_banner()
+
+
+def gpu_give():
+    from . import jobqueue
+    from .synth import unload_engines
+    if jobqueue.lease_mine():
+        unload_engines()
+        jobqueue.lease_give_back()
+    return gpu_banner()
+
+
+def gpu_tick():
+    """Every few seconds: refresh the banner, and give the GPU back to the queue once we have been idle for a while."""
+    from . import jobqueue
+    if jobqueue.lease_mine() and jobqueue.lease_idle() > LEASE_IDLE:
+        gpu_give()
+    return gpu_banner()
+
+
+# ---------- Corrections ----------
+CORR_HEADERS = ["#", "Ch", "Speaker", "Text", "Notes"]
+
+
+def _clip(project, file):
+    c = next((x for x in corr.clips(_wd(project)) if x["file"] == file), None)
+    if c is None:
+        raise gr.Error("Pick a clip in the list first.")
+    return c
+
+
+def corr_find(project, query, chapter, speaker, flagged, corrected):
+    found = corr.search(_wd(project), query, int(chapter) if chapter else None, speaker, flagged, corrected)
+    rows = [[i + 1, c["chapter"], c["speaker"], c["text"][:110], ("corrected " if c["corrected"] else "") + c["flags"]] for i, c in enumerate(found)]
+    if not corr.clips(_wd(project)):
+        msg = "This book has no clip list yet. It is written the next time the speech is made (a finished book can be made again; clips already made are reused)."
+    else:
+        msg = f"{len(found)} clip(s)" + (" (showing the first 400)" if len(found) >= 400 else "") + ". Click one to hear it."
+    return pd.DataFrame(rows, columns=CORR_HEADERS), [c["file"] for c in found], msg
+
+
+def corr_pick(project, files, evt: gr.SelectData):
+    row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    if row >= len(files):
+        raise gr.Error("Pick a clip in the list first.")
+    c = _clip(project, files[row])
+    v = c["voice"]
+    path = _wd(project) / "clips" / c["file"]
+    seed = int(v.get("seed", -1)) if isinstance(v.get("seed", -1), (int, float)) else -1
+    info = (f"**{c['speaker']}**, chapter {c['chapter']} · engine **{c['engine']}**" + (f" · flagged: {c['flags']}" if c["flags"] else "")
+            + (" · corrected" if c["corrected"] else "")
+            + ("" if c["engine"] == "chatterbox" else " · only the text can be changed for this engine"))
+    return (str(path) if path.exists() else None, c["orig"], c["text"], float(v.get("exaggeration", 0.5)), float(v.get("cfg_weight", 0.5)), seed,
+            c["file"], info, None, "")
+
+
+def _changes(c, exag, cfg_w, seed):
+    """Only the settings that differ from what the clip has now."""
+    v, out = c["voice"], {}
+    if c["engine"] in ("chatterbox", "qwen3"):
+        for k, val in (("exaggeration", exag), ("cfg_weight", cfg_w)):
+            if val is not None and abs(float(val) - float(v.get(k, 0.5))) > 1e-6:
+                out[k] = round(float(val), 3)
+        if seed is not None and int(seed) >= 0 and int(seed) != v.get("seed"):
+            out["seed"] = int(seed)
+    return out
+
+
+def corr_take(project, file, text, exag, cfg_w, seed):
+    c = _clip(project, file)
+    if not (text or "").strip():
+        raise gr.Error("The text to speak is empty.")
+    need_gpu()
+    eng = get_engine(c["engine"], _cfg(project).get("device", "auto"))
+    path = corr.make_take(_wd(project), c, text.strip(), _changes(c, exag, cfg_w, seed), eng)
+    from . import jobqueue
+    jobqueue.lease_touch()
+    return str(path), str(path), "Here is the new take. Use it if it sounds right, or change the settings and make another."
+
+
+def corr_use(project, file, text, exag, cfg_w, seed, take):
+    if not take:
+        raise gr.Error("Make a new take first.")
+    c = _clip(project, file)
+    name = corr.accept(_wd(project), c, text.strip(), _changes(c, exag, cfg_w, seed), Path(take))
+    return f"Done: this clip now uses the new take. Rebuild the audiobook to hear it in the book.", name
+
+
+def corr_revert(project, file):
+    c = _clip(project, file)
+    return "Back to the original clip." if corr.revert(_wd(project), c) else "This clip has no correction."
+
+
+def corr_rebuild(project):
+    from . import jobqueue
+    work = _wd(project)
+    book = json.loads((work / "chapters.json").read_text())
+    cover = next((str(work / n) for n in ("cover_custom.jpg", "cover.jpg") if (work / n).exists()), "")
+    job = jobqueue.add(str(work.resolve()), book.get("title", work.name), book.get("author", ""), cover)
+    jobqueue.ensure_supervisor()
+    return (f"Queued “{job['title']}” to be rebuilt. Clips that exist are reused, so only the missing ones are made (for example after a "
+            "lexicon change), then the audiobook is built again.")
+
+
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Audiobook Gen") as ui:
         project = gr.State("")
         gr.Markdown("# Audiobook Gen\nEPUB/TXT → multi-voice chaptered M4B, on Intel Arc (XPU).")
+        with gr.Row():
+            gpu_md = gr.Markdown(gpu_banner(), scale=4)
+            gpu_take_btn = gr.Button("Pause the book and use the GPU", scale=1, size="sm")
+            gpu_give_btn = gr.Button("Give the GPU back to the queue", scale=1, size="sm")
+        gpu_timer = gr.Timer(15)
         with gr.Tabs():
             with gr.Tab("1 · Book"):
                 with gr.Row():
@@ -1631,6 +1785,37 @@ def build_ui() -> gr.Blocks:
                         qs_asap = gr.Button("Start as soon as possible, any time")
                 q_timer = gr.Timer(10)
 
+            with gr.Tab("6 · Corrections"):
+                gr.Markdown("Find clips of this book, hear them, and remake single ones: say a name differently, or change the emotion of a "
+                            "line the emotion reader got wrong. Remaking uses the GPU, so a book being made is paused (use the button at the top) "
+                            "and carries on by itself afterwards. To remake **every** clip with a name after changing the lexicon, search for the "
+                            "name to see them, then press “Rebuild the audiobook”: only the clips whose words changed are made again.")
+                with gr.Row():
+                    c_query = gr.Textbox(label="Words in the text (a name, a phrase)", scale=3)
+                    c_chapter = gr.Number(label="Chapter (0 = all)", value=0, precision=0, scale=1)
+                    c_speaker = gr.Textbox(label="Speaker contains", scale=2)
+                with gr.Row():
+                    c_flagged = gr.Checkbox(label="Only clips the quality check flagged"); c_corrected = gr.Checkbox(label="Only clips I corrected")
+                    c_find = gr.Button("Find clips", variant="primary")
+                c_msg = gr.Markdown()
+                c_tbl = gr.Dataframe(value=pd.DataFrame([], columns=CORR_HEADERS), headers=CORR_HEADERS, interactive=False, wrap=True,
+                                     label="Clips (click one)")
+                c_files, c_file, c_take_path = gr.State([]), gr.State(""), gr.State("")
+                c_info = gr.Markdown()
+                with gr.Row():
+                    c_old = gr.Audio(label="This clip now", type="filepath", interactive=False)
+                    c_new = gr.Audio(label="New take", type="filepath", interactive=False)
+                c_orig = gr.Textbox(label="Original text of the passage", interactive=False)
+                c_text = gr.Textbox(label="Text to speak (change a spelling or respelling here)", lines=3)
+                with gr.Row():
+                    c_exag = gr.Slider(0.0, 1.5, value=0.5, step=0.05, label="Emotion (exaggeration)")
+                    c_cfg = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="Pace / adherence (cfg weight)")
+                    c_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = keep as is)")
+                with gr.Row():
+                    c_make = gr.Button("🎙 Make a new take", variant="primary"); c_use = gr.Button("✅ Use this take")
+                    c_back = gr.Button("↩ Back to the original"); c_rebuild = gr.Button("Rebuild the audiobook")
+                c_out = gr.Markdown()
+
             with gr.Tab("✨ Assistant"):
                 gr.Markdown("Ask Claude to set up this book — “give the women different voices”, “make the narration calmer”, "
                             "“fix how Morlock is said”. Claude works on a **copy** of the settings; you see exactly what would change "
@@ -1841,6 +2026,13 @@ def build_ui() -> gr.Blocks:
         q_timer.tick(speed_text, project, speed_md)
         gen_inputs = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
         q_runner.click(queue_toggle_runner, None, QMSG)
+        gpu_take_btn.click(gpu_take, None, gpu_md); gpu_give_btn.click(gpu_give, None, gpu_md); gpu_timer.tick(gpu_tick, None, gpu_md)
+        c_find.click(corr_find, [project, c_query, c_chapter, c_speaker, c_flagged, c_corrected], [c_tbl, c_files, c_msg])
+        c_tbl.select(corr_pick, [project, c_files], [c_old, c_orig, c_text, c_exag, c_cfg, c_seed, c_file, c_info, c_new, c_out])
+        c_make.click(corr_take, [project, c_file, c_text, c_exag, c_cfg, c_seed], [c_new, c_take_path, c_out]).then(gpu_banner, None, gpu_md)
+        c_use.click(corr_use, [project, c_file, c_text, c_exag, c_cfg, c_seed, c_take_path], [c_out, c_file])
+        c_back.click(corr_revert, [project, c_file], c_out)
+        c_rebuild.click(corr_rebuild, project, c_out)
         q_ntfy_save.click(alerts_save, [q_ntfy, q_clean], q_alert_msg)
         q_clean.change(alerts_save, [q_ntfy, q_clean], q_alert_msg)
         q_ntfy_test.click(alerts_test, q_ntfy, q_alert_msg)

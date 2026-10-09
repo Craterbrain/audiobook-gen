@@ -76,6 +76,32 @@ def lexicon_mode(ename: str, cfg: dict) -> str:
     return cfg.get("text_lexicon", "respell")
 
 
+def clip_key(chunk: str, voice: dict, ename: str) -> str:
+    """The name of a clip's file: from what it says, who says it (with every setting) and which engine."""
+    return hashlib.sha1(json.dumps([chunk, voice, ename]).encode()).hexdigest()[:16]
+
+
+def load_overrides(work: Path) -> dict:
+    """Your corrections, by "segment id:chunk number": {"text": spoken text, "voice": {settings to change}}."""
+    try:
+        return json.loads((Path(work) / "clip_overrides.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def unload_engines() -> None:
+    """Free the models this process holds (and the GPU memory with them), so the queue can have the GPU back."""
+    import gc
+    _ENGINES.clear()
+    gc.collect()
+    try:
+        import torch
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.empty_cache()
+    except Exception:
+        pass
+
+
 def get_engine(name: str, device_pref: str = "auto", slot: int = 0, precision: str = "float16"):
     key = (name, device_pref, slot)
     if key not in _ENGINES:  # lazy: only load what the config needs
@@ -105,7 +131,8 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
     device, precision = cfg.get("device", "auto"), cfg.get("f5_precision", "float16")
 
     plan, todo, total = [], [], 0   # plan: (seg, [clip file names]); todo: clips still to make
-    meta = {}                       # clip file -> what it should say and who says it (the quality check reads this)
+    meta = {}                       # clip file -> what it should say and who says it (the quality check and the Corrections tab read this)
+    overrides = load_overrides(work)
     lex = {}
     raw = [chunk_text(normalize(seg["text"]), cfg.get("max_chunk_chars", 300)) for seg in segs]
     feel = None   # per-chunk emotion settings (cfg "emotion: true"), for engines that take them
@@ -122,12 +149,16 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
         for ci, chunk in enumerate(lex[ename].substitute(c) for c in raw[si]):
             if feel and ename == "chatterbox":
                 voice = {**voice, **feel[si][ci]}
-            key = hashlib.sha1(json.dumps([chunk, voice, ename]).encode()).hexdigest()[:16]
+            ov = overrides.get(f"{seg['id']}:{ci}") or {}
+            spoken = ov.get("text") or chunk
+            vv = {**voice, **ov["voice"]} if ov.get("voice") else voice          # a correction changes this clip only
+            key = clip_key(spoken, vv, ename)
             files.append(f"{key}.wav")
-            meta[f"{key}.wav"] = {"text": chunk, "speaker": seg["speaker"], "engine": ename, "voice": voice}
+            meta[f"{key}.wav"] = {"text": spoken, "speaker": seg["speaker"], "engine": ename, "voice": vv, "key": f"{seg['id']}:{ci}",
+                                  "orig": raw[si][ci], "chapter": seg["chapter"], "seg": seg["id"], "ci": ci}
             total += 1
             if not (clips / f"{key}.wav").exists():
-                todo.append((seg["speaker"], chunk, voice, ename, clips / f"{key}.wav"))
+                todo.append((seg["speaker"], spoken, vv, ename, clips / f"{key}.wav"))
         plan.append((seg, files))
 
     (work / "clips_meta.json").write_text(json.dumps(meta, ensure_ascii=False))

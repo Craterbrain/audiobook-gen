@@ -1033,3 +1033,78 @@ def test_ntfy_commands_answer_with_queue_state(tmp_path, monkeypatch):
     jq.update(a["id"], status="done", finished="2026-10-09 11:00", send_to="dev", sent="2026-10-09 11:05")
     assert "✓ First" in jq.answer("done", now) and "sent" in jq.answer("done", now)
     assert "Send one word" in jq.answer("help", now)
+
+
+def test_corrections_find_remake_and_keep_the_new_take(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    from audiobook_gen import corrections as corr, synth
+
+    made = []
+    class Fake:
+        sample_rate = 24000
+        def synth(self, text, voice):
+            made.append((text, voice.get("seed")))
+            return np.full(2400, 0.1, np.float32)
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Fake())
+    segs = [{"id": f"001-{i:05d}", "chapter": 1 + i // 3, "speaker": "Narrator", "kind": "narration",
+             "text": t, "para_start": True} for i, t in enumerate(["Vicksburg fell.", "Grant rode on.", "Vicksburg again.", "The end."])]
+    (tmp_path / "segments.json").write_text(json.dumps(segs))
+    cfg = {"voices": {}, "default_voice": {"engine": "kokoro", "voice": "bm_george"}, "workers": {"kokoro": 1}}
+    list(synth.synthesize_iter(tmp_path, cfg))
+    assert len(made) == 4
+    hits = corr.search(tmp_path, "vicksburg")
+    assert [h["orig"] for h in hits] == ["Vicksburg fell.", "Vicksburg again."] and hits[0]["key"] == "001-00000:0"
+    assert [h["chapter"] for h in corr.search(tmp_path, chapter=2)] == [2]
+    # remake one clip with other words and a seed, accept it
+    clip = hits[0]
+    take = corr.make_take(tmp_path, clip, "Vicks-burg fell.", {"seed": 7}, Fake())
+    assert take.exists() and made[-1] == ("Vicks-burg fell.", 7)
+    name = corr.accept(tmp_path, clip, "Vicks-burg fell.", {"seed": 7}, take)
+    assert (tmp_path / "clips" / name).exists() and json.loads((tmp_path / "clips.json").read_text())["001-00000"] == [name]
+    assert corr.search(tmp_path, "vicks-burg")[0]["corrected"]
+    # the next synth run plans exactly that file for the clip: nothing is made again
+    made.clear()
+    list(synth.synthesize_iter(tmp_path, cfg))
+    assert not made and json.loads((tmp_path / "clips.json").read_text())["001-00000"] == [name]
+    # a different correction elsewhere does not leak into the neighbours
+    other = corr.search(tmp_path, "grant")[0]
+    assert other["voice"].get("seed") is None
+    # going back to the original
+    assert corr.revert(tmp_path, corr.search(tmp_path, "vicks-burg")[0])
+    list(synth.synthesize_iter(tmp_path, cfg))
+    assert not made and json.loads((tmp_path / "clips.json").read_text())["001-00000"] != [name]
+
+
+def test_the_app_asks_before_taking_the_gpu_from_a_running_book(tmp_path, monkeypatch):
+    import pytest
+    from audiobook_gen import gui
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "GUI_LOCK", tmp_path / "queue" / "gui_lock")
+    job = jq.add(str(work), "Busy book", out=str(tmp_path / "x.m4b"))
+    jq.update(job["id"], status="running", note="making the speech")
+    with pytest.raises(gui.gr.Error) as e:
+        gui._need_gpu_real()
+    assert "Busy book" in str(e.value) and "Pause the book" in str(e.value)
+    # once the user pauses the book (takes the lease) the app can go on, and the queue waits for it
+    monkeypatch.setattr(jq, "_synth_running", lambda: False)
+    assert "You have the GPU" in gui.gpu_take()
+    gui._need_gpu_real()
+    assert "(you are using the GPU there)" in jq.foreign_synthesis()
+    gui.gpu_give()
+    assert jq.lease_holder() == ""
+
+
+def test_a_running_book_is_paused_when_the_app_takes_the_gpu(tmp_path, monkeypatch):
+    import sys, time
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "GUI_LOCK", tmp_path / "queue" / "gui_lock")
+    job = jq.add(str(work), "Long book", out=str(tmp_path / "x.m4b"))
+    class R(jq.Runner):
+        synth_cmd = lambda self, j: [sys.executable, "-c", "import time; time.sleep(60)"]
+    (tmp_path / "queue").mkdir(exist_ok=True)
+    import threading
+    threading.Timer(1.0, lambda: (tmp_path / "queue" / "gui_lock").write_text(f"{__import__('os').getpid()} the app")).start()
+    R(poll=0.1, stall=60, grace=60, foreign=lambda: "").step()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["status"] == "queued" and "paused while you use the GPU" in j["note"] and j.get("restarts", 0) == 0
