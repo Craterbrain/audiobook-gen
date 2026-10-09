@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "what": "Respellings for Chatterbox: used only where plain spelling scored under 0.70 when spoken in two NASB phrases and transcribed to phonemes",
+  "what": "Respellings for Chatterbox: used only where plain spelling scored under 0.70 when spoken in two Bible phrases and transcribed to phonemes",
   "method": "see audiobook_gen/respell_check.py",
   "threshold": 0.7,
   "names_tested": 395,

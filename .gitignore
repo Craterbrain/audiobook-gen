@@ -23,9 +23,9 @@ compare_*/
 *.safetensors
 *.ckpt
 
-# --- copyrighted Bible texts and scrapes of them (the NASB is under copyright; bring your own copy)
-nasb*.txt
-NEW*AMERICAN*.json
+# --- copyrighted Bible texts and scrapes of them (bring your own copy)
+/bible_text*.txt
+/bible_source*.json
 
 # --- reference data that is downloaded again on demand
 data/pronunciation_cache.json
@@ -40,7 +40,7 @@ samples/macbeth_raw.txt
 
 # --- experiment configs from working sessions (config.yaml and the named examples are kept)
 config.mc5_*.yaml
-config.nasb_*.yaml
+config.bible_*.yaml
 
 *.log
 nohup.out

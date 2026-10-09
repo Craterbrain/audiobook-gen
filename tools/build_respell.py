@@ -1,4 +1,4 @@
-import json, random, re, time
+import json, random, re, sys, time
 from pathlib import Path
 from audiobook_gen import synth, respell_check as rc, respell_rules as rr
 from audiobook_gen.voices import resolve
@@ -9,7 +9,7 @@ top = [n for n, _ in sorted(d.items(), key=lambda x: -x[1]['count'])[:N]]
 opt = {**rr.OPTIONS, **json.load(open('data/respell_options.json'))}
 hand = {}
 for f in sorted(Path('data').glob('bible_respell_claude_*.txt')): hand.update(_read_pairs(f))
-verses = [re.sub(r'^.*?\d+:\d+\s+', '', l).replace('*', '') for l in open('nasb1995.txt', encoding='utf-8').read().splitlines() if re.search(r'\d+:\d+\s', l)]
+verses = [re.sub(r'^.*?\d+:\d+\s+', '', l).replace('*', '') for l in open(sys.argv[1] if len(sys.argv) > 1 else 'bible_text.txt', encoding='utf-8').read().splitlines() if re.search(r'\d+:\d+\s', l)]
 def frames(name, count=2):
     rx = re.compile(r'\b' + re.escape(name) + r'\b'); order = list(range(len(verses))); random.Random(name).shuffle(order); out = []
     for i in order:
@@ -43,7 +43,7 @@ for n in low:
     s, text, src = max(options)
     if src != "plain":
         entries[n] = {"respell": text, "score": round(s, 2), "plain_score": round(sp[n], 2), "source": src}
-meta = {"what": "Respellings for Chatterbox: used only where plain spelling scored under 0.70 when spoken in two NASB phrases and transcribed to phonemes",
+meta = {"what": "Respellings for Chatterbox: used only where plain spelling scored under 0.70 when spoken in two Bible phrases and transcribed to phonemes",
         "method": "see audiobook_gen/respell_check.py", "threshold": THRESH, "names_tested": len(names), "built": time.strftime("%Y-%m-%d"),
         "license": "CC BY-SA 4.0 (derived from Wiktionary/WikiPron IPA)"}
 Path('data/bible_respell.json').write_text(json.dumps({"_meta": meta, "entries": entries}, ensure_ascii=False, indent=1))

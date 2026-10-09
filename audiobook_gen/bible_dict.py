@@ -107,11 +107,11 @@ def _norm(w: str) -> str:
     return re.sub(r"[^a-z]", "", w.lower())
 
 
-def build(nasb_path: str, out: Path = OUT, progress=print, offline: bool = False) -> dict:
-    """nasb_path: one verse-per-line Bible text, or several joined with commas (e.g. NASB and KJV). Names are the union;
+def build(bible_path: str, out: Path = OUT, progress=print, offline: bool = False) -> dict:
+    """bible_path: one verse-per-line Bible text, or several joined with commas (e.g. two translations). Names are the union;
     each entry keeps its count in every text."""
     t0 = time.time()
-    paths = [x for x in str(nasb_path).split(",") if x]
+    paths = [x for x in str(bible_path).split(",") if x]
     names: dict[str, dict] = {}
     for path in paths:
         label = Path(path).stem

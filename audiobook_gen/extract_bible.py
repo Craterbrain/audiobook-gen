@@ -1,4 +1,4 @@
-"""Extract books from a verse-per-line NASB text file into chapters.json.
+"""Extract books from a verse-per-line Bible text file into chapters.json.
 
 Format: `Book Chapter:Verse text` one line per verse.
 Chapters become paragraphs; verse numbers are stripped (no "1:1" spoken).
@@ -24,16 +24,16 @@ def _parse(path: str) -> dict[str, dict[int, dict[int, str]]]:
 
 
 def _clean(text: str) -> str:
-    """Strip NASB editorial marks: asterisks (Gr. verb form), brackets for implied words,
+    """Strip editorial marks: asterisks (Gr. verb form), brackets for implied words,
     and footnote-style parenthetical references like (cf. Jn 3:16)."""
     text = text.replace("*", "")
     text = re.sub(r"\[([^\]]*)\]", r"\1", text)   # keep implied words, lose brackets
     return text.strip()
 
 
-def extract(nasb_path: str, book: str, work_dir: str, verses_per_para: int = 5) -> None:
+def extract(bible_path: str, book: str, work_dir: str, verses_per_para: int = 5) -> None:
     """Write chapters.json (and chapters.full.json) to work_dir for one book."""
-    books = _parse(nasb_path)
+    books = _parse(bible_path)
     data = books.get(book)
     if not data:
         raise ValueError(f"Book '{book}' not found. Available: {sorted(books)}")
@@ -60,6 +60,6 @@ def extract(nasb_path: str, book: str, work_dir: str, verses_per_para: int = 5) 
     p = Path(work_dir) / "chapters.json"
     p.write_text(json.dumps(chapters, indent=2, ensure_ascii=False))
     (Path(work_dir) / "chapters.full.json").write_text(
-        json.dumps({"book": book, "source": "NASB1995", "chapters": chapters}, indent=2, ensure_ascii=False)
+        json.dumps({"book": book, "source": "bible text", "chapters": chapters}, indent=2, ensure_ascii=False)
     )
-    print(f"[extract_nasb] {book}: {len(chapters)} chapters -> {p}")
+    print(f"[extract_bible] {book}: {len(chapters)} chapters -> {p}")

@@ -119,10 +119,10 @@ Kokoro has no audio encoder, so a voice pack is *searched*: start from the stock
 
 **Looking up real IPA.** `python -m audiobook_gen lookup x --work work/<book> --config <cfg> [--lang fr] [--bible] [--offline] [--wikis lotr]` (or *Look up IPA online* in the Lexicon tab) fills empty IPA from, in order: the Bible dictionary and Ford's 1900 scripture-names guide (with `--bible`), Wiktionary's `{{IPA}}` templates, ipa-dict (MIT), WikiPron, then any Fandom wikis you name. `--offline` skips the network. Entries you typed are never touched; online answers and misses are cached in `data/pronunciation_cache.json`. Chatterbox and Qwen3 read the IPA directly (`text_lexicon: rawipa`).
 
-**Bible IPA dictionary.** `python -m audiobook_gen bible-dict nasb1995.txt` builds `data/bible_ipa.json`: every capitalised name and place in a verse-per-line Bible text (3,152 for the NASB), each with `ipa`, `source`, `count` and first reference. Hand-written readings live in `data/bible_ipa_claude_*.txt` (Claude's, unreviewed) and `data/bible_ipa_user.txt` (yours, wins over everything); both are plain `Name|IPA` lines, and `bible-dict apply` re-applies them in a moment.
+**Bible IPA dictionary.** `python -m audiobook_gen bible-dict bible_text.txt` builds `data/bible_ipa.json`: every capitalised name and place in a verse-per-line Bible text (about 3,150 in the text I used), each with `ipa`, `source`, `count` and first reference. Hand-written readings live in `data/bible_ipa_claude_*.txt` (Claude's, unreviewed) and `data/bible_ipa_user.txt` (yours, wins over everything); both are plain `Name|IPA` lines, and `bible-dict apply` re-applies them in a moment.
 
 ## Licenses and third-party data
-The code is released under the [MIT License](LICENSE). The bundled Bible IPA dictionary contains Wiktionary-derived data and is CC BY-SA 4.0; see [NOTICE.md](NOTICE.md) for that and for model licenses. Your books, recordings and cloned voices stay on your machine (they are git-ignored); the NASB text is not included.
+The code is released under the [MIT License](LICENSE). The bundled Bible IPA dictionary contains Wiktionary-derived data and is CC BY-SA 4.0; see [NOTICE.md](NOTICE.md) for that and for model licenses. Your books, recordings and cloned voices stay on your machine (they are git-ignored); no Bible text is included.
 
 ## Queue, schedule and assistant
 - **Generate tab** adds the book to the queue; set a start time, or tick *Only run overnight* (for example 23:00–06:30), before pressing it.

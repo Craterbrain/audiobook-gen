@@ -298,7 +298,7 @@ def test_interface_builds_with_every_engine_option():
 def test_placeholder_cover_has_large_readable_title(tmp_path):
     from PIL import Image
     from audiobook_gen.assemble import make_cover
-    p = make_cover(tmp_path / "c.jpg", "Genesis", "NASB 1995")
+    p = make_cover(tmp_path / "c.jpg", "Genesis", "Test author")
     im = Image.open(p).convert("L")
     assert im.size == (1400, 1400)
     mid = im.crop((200, 480, 1200, 720))                 # where a one-word title is set
