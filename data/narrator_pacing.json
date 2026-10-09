@@ -2,95 +2,95 @@
  "about": "Pauses between spoken units measured on one professional narrator (about 90 minutes of audio matched to the book text). Numbers only. Refit with tools/fit_pacing.py.",
  "kinds": {
   "sentence_narration": {
-   "n": 344,
-   "short_share": 0.032,
-   "median_ms": 710,
+   "n": 452,
+   "short_share": 0.038,
+   "median_ms": 700,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 6.5609,
-   "sigma": 0.186,
-   "lo_ms": 499,
+   "mu": 6.5455,
+   "sigma": 0.1961,
+   "lo_ms": 470,
    "hi_ms": 960
   },
   "sentence_dialogue": {
-   "n": 173,
-   "short_share": 0.22,
+   "n": 229,
+   "short_share": 0.21,
    "median_ms": 550,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 6.1868,
-   "sigma": 0.6069,
+   "mu": 6.2035,
+   "sigma": 0.5741,
    "lo_ms": 110,
-   "hi_ms": 900
+   "hi_ms": 896
   },
   "paragraph": {
-   "n": 407,
-   "short_share": 0.015,
-   "median_ms": 760,
+   "n": 536,
+   "short_share": 0.019,
+   "median_ms": 750,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 6.6184,
-   "sigma": 0.2381,
-   "lo_ms": 450,
-   "hi_ms": 1140
+   "mu": 6.6058,
+   "sigma": 0.2608,
+   "lo_ms": 430,
+   "hi_ms": 1132
   },
   "comma_narration": {
-   "n": 422,
-   "short_share": 0.396,
-   "median_ms": 315,
+   "n": 582,
+   "short_share": 0.412,
+   "median_ms": 290,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 6.1764,
-   "sigma": 0.5129,
-   "lo_ms": 130,
-   "hi_ms": 884
+   "mu": 6.1758,
+   "sigma": 0.4876,
+   "lo_ms": 132,
+   "hi_ms": 868
   },
   "comma_dialogue": {
-   "n": 193,
-   "short_share": 0.528,
-   "median_ms": 70,
+   "n": 243,
+   "short_share": 0.543,
+   "median_ms": 60,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 6.0093,
-   "sigma": 0.5274,
-   "lo_ms": 110,
-   "hi_ms": 739
+   "mu": 5.9938,
+   "sigma": 0.5323,
+   "lo_ms": 113,
+   "hi_ms": 730
   },
   "before_tag": {
-   "n": 166,
-   "short_share": 0.837,
+   "n": 229,
+   "short_share": 0.83,
    "median_ms": 0,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 4.887,
-   "sigma": 0.2515,
+   "mu": 4.9105,
+   "sigma": 0.2825,
    "lo_ms": 100,
    "hi_ms": 220
   },
   "speaker_change": {
-   "n": 75,
-   "short_share": 0.04,
-   "median_ms": 720,
+   "n": 112,
+   "short_share": 0.036,
+   "median_ms": 695,
    "short_range_ms": [
     20,
     100
    ],
-   "mu": 6.5426,
-   "sigma": 0.2973,
-   "lo_ms": 391,
-   "hi_ms": 1079
+   "mu": 6.4848,
+   "sigma": 0.3757,
+   "lo_ms": 243,
+   "hi_ms": 1078
   }
  }
 }
