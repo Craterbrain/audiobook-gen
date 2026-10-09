@@ -1,12 +1,15 @@
 """The 'Ask Claude' helper: runs Claude Code headless (`claude -p`) in a scratch copy of a project's settings.
-It may edit only config.yaml and lexicon.json there. The app shows the diff and copies the files back only when the
-person accepts, after validating them. It cannot run commands, browse the web, or start a generation."""
+It may edit only config.yaml and lexicon.json there, and make a cover with the one command it is given (./cover: search free
+pictures on Wikimedia Commons, download one, lay out the cover). The app shows the changes and copies them back only when the
+person accepts, after validating them. It cannot run other commands, browse the web, or start a generation."""
 import difflib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -54,11 +57,27 @@ def _reference(project: Path, scratch: Path) -> None:
                                    f"# Saved clone voices (library: <name>, with engine chatterbox, f5 or qwen3)\n{clones}\n")
 
 
+COVER_FILES = ("cover.jpg", "cover.json")
+
+
+def _write_cover_tool(scratch: Path) -> None:
+    """The one command the assistant may run: ./cover search | fetch | make (see covers.py). It works inside the scratch folder."""
+    root = Path(__file__).resolve().parent.parent
+    tool = scratch / "cover"
+    tool.write_text(f'#!/bin/bash\ncd "$(dirname "$0")"\nPYTHONPATH={root} exec {sys.executable} -m audiobook_gen.covers "$@"\n')
+    tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+
+
 def prepare(project: Path, fresh: bool = False) -> Path:
     """Scratch folder with the editable files, reference notes and the guide. Pending edits are kept unless fresh."""
     project = Path(project)
     scratch = scratch_dir(project)
     scratch.mkdir(parents=True, exist_ok=True)
+    if fresh:
+        for name in COVER_FILES:
+            (scratch / name).unlink(missing_ok=True)
+        shutil.rmtree(scratch / "pictures", ignore_errors=True)
+    _write_cover_tool(scratch)
     src_cfg = project / "config.yaml"
     for name in EDITABLE:
         src = src_cfg if name == "config.yaml" and src_cfg.exists() else (project / name if name != "config.yaml" else Path(__file__).resolve().parent.parent / "config.yaml")
@@ -97,6 +116,16 @@ def diff(project: Path) -> dict[str, str]:
             if d:
                 out[name] = d
     return out
+
+
+def cover_proposal(project: Path) -> tuple[Path, str] | None:
+    """(cover picture, credit line) if the assistant made a cover that differs from the project's current one."""
+    scratch = scratch_dir(project)
+    new, cur = scratch / "cover.jpg", Path(project) / "cover_custom.jpg"
+    if not new.exists() or (cur.exists() and cur.read_bytes() == new.read_bytes()):
+        return None
+    credit = (scratch / "pictures" / "credit.txt")
+    return new, (credit.read_text().strip() if credit.exists() else "")
 
 
 def validate(project: Path) -> list[str]:
@@ -138,6 +167,14 @@ def validate(project: Path) -> list[str]:
     for r, g in (cfg.get("genders") or {}).items():
         if g not in ("male", "female", "unknown"):
             problems.append(f"gender of {r} must be male, female or unknown")
+    prop = cover_proposal(project)
+    if prop:
+        try:
+            from PIL import Image
+            if min(Image.open(prop[0]).size) < 600:
+                problems.append("the proposed cover picture is too small")
+        except Exception:
+            problems.append("the proposed cover is not a readable image")
     if (scratch / "lexicon.json").exists():
         try:
             lex = json.loads((scratch / "lexicon.json").read_text())
@@ -151,8 +188,8 @@ def validate(project: Path) -> list[str]:
 def apply(project: Path) -> str:
     """Copy the accepted files into the project (originals are kept in assistant/backup-<time>/)."""
     project = Path(project)
-    changes = diff(project)
-    if not changes:
+    changes, cover = diff(project), cover_proposal(project)
+    if not changes and not cover:
         return "Nothing to apply."
     problems = validate(project)
     if problems:
@@ -164,7 +201,14 @@ def apply(project: Path) -> str:
         if old.exists():
             shutil.copy(old, backup / name)
         shutil.copy(scratch_dir(project) / name, old)
-    return f"Applied changes to {', '.join(changes)}. The previous version is kept in assistant/{backup.name}/."
+    done = list(changes)
+    if cover:
+        if (project / "cover_custom.jpg").exists():
+            shutil.copy(project / "cover_custom.jpg", backup / "cover_custom.jpg")
+        shutil.copy(cover[0], project / "cover_custom.jpg")
+        (project / "cover_credit.txt").write_text(cover[1] + "\n")
+        done.append("the cover")
+    return f"Applied changes to {', '.join(done)}. The previous version is kept in assistant/{backup.name}/."
 
 
 def discard(project: Path) -> str:
@@ -180,8 +224,8 @@ def ask(project: Path, message: str, session: str | None = None, timeout: int = 
                 "error": "Claude Code is not installed (the `claude` command was not found)."}
     scratch = prepare(project)
     cmd = [exe, "-p", message, "--output-format", "json", "--permission-mode", "acceptEdits",
-           "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep",
-           "--disallowedTools", "Bash", "WebFetch", "WebSearch", "Task", "--max-turns", "20"]
+           "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep", "Bash(./cover:*)",      # the only command: the cover tool
+           "--disallowedTools", "WebFetch", "WebSearch", "Task", "--max-turns", "25"]
     if session:
         cmd += ["--resume", session]
     try:

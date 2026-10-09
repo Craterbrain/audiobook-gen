@@ -23,6 +23,7 @@ from . import sync as synclib
 from . import voicepack as vpk
 from . import voices as vlib
 from . import respell_search as rs
+from . import covers as covers_mod
 from .synth import get_engine, resolve_voice, synthesize_iter
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1203,6 +1204,71 @@ def queue_remove(picked):
     return (f"Removed {n} book(s) from the list." + (f" {left} is being made right now: pause or cancel it first." if left else "")), *queue_refresh([])
 
 
+# ---------- Cover ----------
+COVER_LAYOUTS = {"Picture window — for people (portrait, group)": "framed", "Full background — for scenery": "full",
+                 "Plain — no picture": "plain"}
+
+
+def _cover_dir(project) -> Path:
+    return (Path(project) if project else ROOT / "work" / "_covers") / "cover_src"
+
+
+def cover_search(query):
+    from . import covers
+    if not (query or "").strip():
+        raise gr.Error("Type what to look for, e.g. “Civil War battle painting” or “Frederick Douglass portrait”.")
+    try:
+        hits = covers.search(query.strip(), 12)
+    except Exception as e:
+        raise gr.Error(f"Could not reach Wikimedia Commons: {e}")
+    gallery = [(h["thumb"], f"{h['title'][:48]} — {h['artist'][:28]} {h['date']}".strip(" —")) for h in hits if h["thumb"]]
+    return hits, gallery, (f"{len(hits)} free-to-use pictures (public domain or CC0). Click one to use it." if hits
+                           else "No free-licence pictures found — try other words.")
+
+
+def cover_pick(project, hits, evt: gr.SelectData):
+    from . import covers
+    h = hits[evt.index]
+    try:
+        path, credit = covers.fetch(h["file"], _cover_dir(project))
+    except Exception as e:
+        raise gr.Error(str(e))
+    return str(path), credit, f"Using “{h['title']}” ({h['licence']}). Adjust the look below, then **Use this cover**."
+
+
+def cover_render(project, title, author, upload, picked, layout_label, colour_name, fx, fy, zoom):
+    from . import covers
+    layout = COVER_LAYOUTS.get(layout_label, "framed")
+    picture = upload or picked or None
+    if layout != "plain" and not picture:
+        raise gr.Error("Add a picture first: upload one, or search for one.")
+    out = (Path(project) if project else ROOT / "work" / "_covers") / "cover_preview.jpg"
+    try:
+        return str(covers.render({"title": title or "Untitled", "author": author or "", "layout": layout, "picture": picture,
+                                  "color": colour_name or "black", "focus": [fx, fy], "zoom": zoom}, out))
+    except Exception as e:
+        raise gr.Error(str(e))
+
+
+def cover_refresh(project, title, author, upload, picked, layout_label, colour_name, fx, fy, zoom):
+    """Redraw the preview when a control changes; before a picture is chosen, quietly do nothing."""
+    if COVER_LAYOUTS.get(layout_label, "framed") != "plain" and not (upload or picked):
+        return gr.skip()
+    return cover_render(project, title, author, upload, picked, layout_label, colour_name, fx, fy, zoom)
+
+
+def cover_use(project, preview, credit, upload):
+    from . import jobqueue
+    work = _wd(project)
+    if not preview:
+        raise gr.Error("Make a preview first.")
+    dest = work / "cover_custom.jpg"
+    shutil.copy(preview, dest)
+    (work / "cover_credit.txt").write_text((credit if not upload else "your own picture") + "\n")
+    n = jobqueue.set_cover(str(work), str(dest))
+    return str(dest), f"This is now the book’s cover" + (f", and {n} queued job(s) will use it." if n else ". It is used when you generate.")
+
+
 # ---------- Assistant ----------
 def assistant_ask(project, message, history, session, spent):
     from . import assistant
@@ -1217,23 +1283,36 @@ def assistant_ask(project, message, history, session, spent):
         history.append({"role": "assistant", "content": r["reply"] or "(no reply)"})
     spent = float(spent or 0) + r["cost"]
     diffs = assistant.diff(work)
+    prop = assistant.cover_proposal(work)
     shown = "\n\n".join(f"**{n}**\n```diff\n{d[:6000]}{'…' if len(d) > 6000 else ''}\n```" for n, d in diffs.items())
-    problems = assistant.validate(work) if diffs else []
+    problems = assistant.validate(work) if (diffs or prop) else []
+    pending = bool(diffs) or bool(prop)
     note = (f"⚠️ These changes can’t be applied yet: {'; '.join(problems)}" if problems else
-            "Review the changes below, then **Apply** them or **Discard** them." if diffs else "No changes proposed.")
+            "Review the changes below, then **Apply** them or **Discard** them." if pending else "No changes proposed.")
+    if prop and prop[1]:
+        shown = (shown + "\n\n" if shown else "") + f"**Cover picture credit:** {prop[1]}"
     return (history, r["session"] or "", spent, f"Claude usage this session: about ${spent:.2f}", note, shown or "_Nothing to show._",
-            gr.update(interactive=bool(diffs) and not problems), gr.update(interactive=bool(diffs)), "")
+            gr.update(interactive=pending and not problems), gr.update(interactive=pending), "",
+            gr.update(value=str(prop[0]) if prop else None, visible=bool(prop)))
 
 
 def assistant_apply(project):
-    from . import assistant
-    msg = assistant.apply(_wd(project))
-    return msg, "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False)
+    from . import assistant, jobqueue
+    work = _wd(project)
+    had_cover = assistant.cover_proposal(work) is not None
+    msg = assistant.apply(work)
+    new_cover = gr.skip()
+    if had_cover and (work / "cover_custom.jpg").exists() and msg.startswith("Applied"):
+        new_cover = str(work / "cover_custom.jpg")
+        n = jobqueue.set_cover(str(work), new_cover)
+        msg += f" The new cover is used for {n} queued job(s) and when you generate." if n else " The new cover is used when you generate."
+    return msg, "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False), gr.update(value=None, visible=False), new_cover
 
 
 def assistant_discard(project):
     from . import assistant
-    return assistant.discard(_wd(project)), "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False)
+    return (assistant.discard(_wd(project)), "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False),
+            gr.update(value=None, visible=False))
 
 
 # The Clone tab is a workshop rather than a step in the book flow, so its button is set apart from the numbered tabs.
@@ -1524,10 +1603,41 @@ def build_ui() -> gr.Blocks:
                 a_cost = gr.Markdown()
                 a_note = gr.Markdown()
                 a_diff = gr.Markdown("_Nothing to show._")
+                a_cover = gr.Image(label="Proposed cover", type="filepath", height=300, interactive=False, visible=False)
                 with gr.Row():
                     a_apply = gr.Button("Apply these changes", variant="primary", interactive=False)
                     a_discard = gr.Button("Discard", interactive=False)
                 a_session, a_spent = gr.State(""), gr.State(0.0)
+
+            with gr.Tab("🎨 Cover"):
+                gr.Markdown("Make the cover. Pick a picture, choose how it is laid out, and press **Use this cover**. "
+                            "Uses the title and author from the Book tab. Searches only pictures that are free to use "
+                            "(public domain or CC0) on Wikimedia Commons, and avoids book covers. For people, the picture sits like a "
+                            "window on a book-cloth colour; for scenery, it fills the background.")
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        gr.Markdown("### 1 · Picture")
+                        cv_upload = gr.Image(label="Use your own picture (optional)", type="filepath", height=140)
+                        with gr.Row():
+                            cv_query = gr.Textbox(label="…or search free pictures", scale=4,
+                                                  placeholder="e.g. Civil War painting, Frederick Douglass portrait, Martian landscape")
+                            cv_search = gr.Button("Search", scale=1)
+                        cv_status = gr.Markdown()
+                        cv_gallery = gr.Gallery(label="Results (click one)", columns=4, height=260, object_fit="contain", allow_preview=False)
+                        gr.Markdown("### 2 · Look")
+                        cv_layout = gr.Radio(list(COVER_LAYOUTS), value=list(COVER_LAYOUTS)[0], label="Layout")
+                        cv_colour = gr.Dropdown(list(covers_mod.CLOTH), value="navy", label="Cloth colour (picture-window layout)")
+                        with gr.Row():
+                            cv_fx = gr.Slider(0, 1, 0.5, step=0.05, label="Focus left ↔ right (full background)")
+                            cv_fy = gr.Slider(0, 1, 0.5, step=0.05, label="Focus up ↕ down (full background)")
+                            cv_zoom = gr.Slider(0.8, 2.5, 1.0, step=0.05, label="Zoom (full background)")
+                        cv_make = gr.Button("Update preview", variant="primary")
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 3 · Preview")
+                        cv_preview = gr.Image(label="Cover preview", type="filepath", height=420, interactive=False)
+                        cv_use = gr.Button("Use this cover", variant="primary")
+                        cv_msg = gr.Markdown()
+                cv_hits, cv_pic, cv_credit = gr.State([]), gr.State(""), gr.State("")
 
             with gr.Tab("🎙 Clone", elem_id="clone-tab"):
                 gr.Markdown("Clone a voice from a short clean clip (5–12 s, one speaker, no music), compare the takes, then save it. "
@@ -1706,14 +1816,23 @@ def build_ui() -> gr.Blocks:
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs)              # and open the book that is being made
         q_timer.tick(queue_refresh, q_pick, QOUT)
+        cv_search.click(cover_search, cv_query, [cv_hits, cv_gallery, cv_status])
+        cv_query.submit(cover_search, cv_query, [cv_hits, cv_gallery, cv_status])
+        cv_look = [project, title, author, cv_upload, cv_pic, cv_layout, cv_colour, cv_fx, cv_fy, cv_zoom]
+        cv_gallery.select(cover_pick, [project, cv_hits], [cv_pic, cv_credit, cv_status]).then(cover_render, cv_look, cv_preview)
+        cv_make.click(cover_render, cv_look, cv_preview)
+        cv_upload.upload(cover_render, cv_look, cv_preview)
+        cv_layout.change(cover_refresh, cv_look, cv_preview)
+        cv_colour.change(cover_refresh, cv_look, cv_preview)
+        cv_use.click(cover_use, [project, cv_preview, cv_credit, cv_upload], [cover, cv_msg])
         a_go.click(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
-                   [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
+                   [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
-                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in])
-        a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard]).then(
+                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
+        a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover]).then(
             gen_settings, project, [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group])
-        a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard])
+        a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
                           [ab_clips, ab_dd, ab_status])

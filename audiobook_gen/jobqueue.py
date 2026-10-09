@@ -175,6 +175,21 @@ def move(ids: list[str], where: str) -> None:
     _locked(go)
 
 
+def set_cover(work: str, cover: str) -> int:
+    """Use this cover for every not-yet-finished job of the book in `work`."""
+    w = str(Path(work).resolve())
+    n = []
+
+    def go():
+        jobs = load()
+        for j in jobs:
+            if j["work"] == w and j["status"] not in ("done", "failed", "cancelled"):
+                j["cover"] = str(cover); n.append(1)
+        _write(jobs)
+    _locked(go)
+    return len(n)
+
+
 def set_schedule(ids: list[str], not_before: str = "", window: str = "") -> int:
     """Give the jobs a new start time and daily window ("" and "" = as soon as possible, any time)."""
     if not_before:

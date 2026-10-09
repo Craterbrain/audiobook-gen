@@ -473,7 +473,10 @@ def test_assistant_runs_claude_in_the_scratch_folder_only(tmp_path, monkeypatch)
     r = assistant.ask(p, "make it spooky")
     assert r["reply"] == "done" and r["session"] == "s1" and r["cost"] == 0.05
     args = (assistant.scratch_dir(p) / "args.txt").read_text()
-    assert "--disallowedTools Bash" in args and "make it spooky" in args       # no shell access
+    assert "make it spooky" in args
+    allowed, _, blocked = args.partition("--disallowedTools")
+    assert "Bash(./cover:*)" in allowed and allowed.count("Bash") == 1         # the cover tool is the only command it may run
+    assert "WebFetch" in blocked and "WebSearch" in blocked and "Bash" not in blocked
     assert (assistant.scratch_dir(p) / "where.txt").read_text().strip().endswith("proj/assistant")
 
 
@@ -761,3 +764,65 @@ def test_framed_cover_takes_a_book_cloth_colour(tmp_path):
     ys = [y for y in range(300, 1250) if not near(im.getpixel((700, y)))]       # the picture's top and bottom (column through its centre)
     xs = [x for x in range(150, 1250) if not near(im.getpixel((x, (ys[0] + ys[-1]) // 2)))]                      # and its left edge
     assert im.getpixel((xs[0] + 6, ys[0] + 6)) is not None and near(im.getpixel((xs[0] + 6, ys[0] + 6)))        # the oval's corner shows the colour, not black
+
+
+def test_assistant_cover_proposal_is_validated_and_applied(tmp_path):
+    from PIL import Image
+    from audiobook_gen import assistant
+    p = _assistant_project(tmp_path)
+    scratch = assistant.prepare(p)
+    tool = scratch / "cover"
+    assert tool.exists() and tool.stat().st_mode & 0o100 and "audiobook_gen.covers" in tool.read_text()      # the one command, runnable
+    assert assistant.cover_proposal(p) is None
+    Image.new("RGB", (300, 300), (9, 9, 9)).save(scratch / "cover.jpg")                                      # too small to be a cover
+    assert any("too small" in x for x in assistant.validate(p)) and assistant.apply(p).startswith("Not applied")
+    Image.new("RGB", (1400, 1400), (30, 60, 90)).save(scratch / "cover.jpg")
+    (scratch / "pictures").mkdir(); (scratch / "pictures" / "credit.txt").write_text("A Painting, A. Painter, 1850. https://example.org (Public domain)\n")
+    assert assistant.validate(p) == [] and "the cover" in assistant.apply(p)
+    assert (p / "cover_custom.jpg").exists() and "A. Painter" in (p / "cover_credit.txt").read_text()
+    assert assistant.cover_proposal(p) is None                                                               # applied: nothing pending
+    assert "discarded" in assistant.discard(p) and not (scratch / "cover.jpg").exists()
+
+
+def test_cover_tab_flow(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from PIL import Image
+    from audiobook_gen import gui, covers, jobqueue as jq
+    jq_, work = _queue_env(tmp_path, monkeypatch)
+    pic = tmp_path / "art.jpg"; Image.new("RGB", (1600, 1000), (120, 90, 60)).save(pic)
+    hit = {"file": "File:Art.jpg", "title": "Art", "width": 1600, "height": 1000, "licence": "Public domain", "artist": "A. Painter",
+           "date": "1850", "thumb": "http://example/thumb.jpg", "page": "http://example/p"}
+    monkeypatch.setattr(covers, "search", lambda q, n=8: [hit])
+    monkeypatch.setattr(covers, "fetch", lambda f, folder, width=2400: (pic, "Art, A. Painter, 1850 (Public domain)"))
+    hits, gallery, status = gui.cover_search("old painting")
+    assert hits == [hit] and gallery[0][0] == "http://example/thumb.jpg" and "free-to-use" in status
+    path, credit, msg = gui.cover_pick(str(work), hits, SimpleNamespace(index=0))
+    assert path == str(pic) and "Public domain" in msg
+    layout = list(gui.COVER_LAYOUTS)
+    prev = gui.cover_render(str(work), "Some Title", "An Author", None, path, layout[0], "forest green", 0.5, 0.5, 1.0)
+    assert Image.open(prev).size == (1400, 1400)
+    assert Image.open(gui.cover_render(str(work), "Some Title", "An Author", None, path, layout[1], "navy", 0.3, 0.4, 1.2, )).size == (1400, 1400)
+    import pytest
+    with pytest.raises(Exception):
+        gui.cover_render(str(work), "T", "A", None, "", layout[0], "navy", 0.5, 0.5, 1.0)             # a picture is needed
+    assert gui.cover_refresh(str(work), "T", "A", None, "", layout[0], "navy", 0.5, 0.5, 1.0) == gui.gr.skip()   # but the pickers stay quiet
+    job = jq_.add(str(work), "Book")
+    dest, note = gui.cover_use(str(work), prev, credit, None)
+    assert Path(dest).exists() and "1 queued job" in note and jq_.load()[0]["cover"] == dest
+    assert "A. Painter" in (work / "cover_credit.txt").read_text()
+
+
+def test_assistant_ask_returns_a_proposed_cover(tmp_path, monkeypatch):
+    import stat, sys
+    from audiobook_gen import assistant, gui
+    p = _assistant_project(tmp_path)
+    fake = tmp_path / "fakeclaude"
+    fake.write_text(f"#!/bin/bash\n{sys.executable} -c \"from PIL import Image; Image.new('RGB',(1400,1400),(40,70,50)).save('cover.jpg')\"\n"
+                    "echo '{\"result\":\"Made a green cover.\",\"session_id\":\"s2\",\"total_cost_usd\":0.1,\"is_error\":false}'\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("AUDIOBOOK_CLAUDE", str(fake))
+    out = gui.assistant_ask(str(p), "make me a cover", [], "", 0.0)
+    assert out[-1]["visible"] is True and out[-1]["value"].endswith("assistant/cover.jpg")        # the preview is shown
+    assert out[6]["interactive"] is True                                                           # and it can be applied
+    res = gui.assistant_apply(str(p))
+    assert res[0].startswith("Applied") and res[5].endswith("cover_custom.jpg")                    # the Book tab gets the new cover

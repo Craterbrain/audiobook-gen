@@ -8,7 +8,7 @@ applies it only if they accept:
 - `lexicon.json` — how names and hard words are pronounced
 
 Read-only context lives in `reference/`: `book.md` (title, chapters), `cast.md` (characters with line counts, genders and
-sample lines), `voices.md` (every voice you may assign). You cannot run commands, start generation, or see audio.
+sample lines), `voices.md` (every voice you may assign). You cannot start generation or hear audio, and the only command you may run is `./cover` (see Covers below).
 Be brief. Say what you changed and why in a few sentences. If a request is unclear or you would be guessing, say so and
 ask, rather than changing things.
 
@@ -43,3 +43,21 @@ A list of entries: `{"term": "Weena", "ipa": "ˈwiːnə", "respell": "", "kind":
   voices. Keep every other field.
 - Only change entries the person asks about or that are clearly wrong. Do not delete entries.
 - Keep the file valid JSON.
+
+## Covers
+You can make a cover. The only command you may run is `./cover` in this folder; it searches Wikimedia Commons (public domain and
+CC0 pictures only), downloads one, and lays out the cover. Steps:
+1. `./cover search "words about the scene or person" 8` lists free pictures: `File:name | size | licence | artist | date`.
+2. `./cover fetch "File:name.jpg" --to pictures` saves it as `pictures/<name>.jpg` and its credit in `pictures/credit.txt`.
+3. Write `cover.json`, then `./cover make cover.json --out cover.jpg`, then **look at `cover.jpg`** (Read it) and adjust until it is good.
+```json
+{"title": "The Time Machine", "author": "H. G. Wells", "layout": "full", "picture": "pictures/x.jpg", "focus": [0.4, 0.5], "zoom": 1.0}
+{"title": "Up from Slavery", "author": "Booker T. Washington", "layout": "framed", "picture": "pictures/y.jpg", "color": "dark green"}
+```
+- Use the book's real title and author (see `reference/book.md`).
+- `framed` sets the whole picture like a window under the title, on a book-cloth colour: use it when the picture is about **people**
+  (a portrait, a group). `full` fills the cover behind the title: use it for **scenery** and moody paintings. `plain` has no picture.
+- Colours: navy, oxblood red, forest green, dark green, burgundy, brick red, deep olive, chocolate brown, slate blue, dark teal,
+  ocean blue, charcoal, black (or "#rrggbb"). `focus` [x, y] (0 to 1) and `zoom` (1 or more) choose which part of a picture fills a `full` cover.
+- Choose a picture that really fits the book's story or setting: a painting or old photograph, not a modern snapshot. Never use a
+  publisher's book cover. Tell the person which picture you chose and why, with its credit line.
