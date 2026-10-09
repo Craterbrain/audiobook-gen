@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 QUEUE = ROOT / "work" / "queue"
 JOBS = QUEUE / "jobs.json"
@@ -400,12 +402,38 @@ class Runner:
             pass
         return ""
 
+    def _tick(self, job: dict, seconds: float) -> None:
+        """Add time a stage spent running to the job's active time (waiting for its window or the GPU is not counted)."""
+        cur = next((j for j in load() if j["id"] == job["id"]), None)
+        if cur is not None:
+            update(job["id"], active=round(float(cur.get("active", 0)) + max(0.0, seconds), 1))
+
+    def _record(self, job: dict) -> None:
+        """A finished book teaches the time estimate: its characters per engine against its active time."""
+        try:
+            from .runstats import record_job
+            from .synth import resolve_voice
+            cfg = yaml.safe_load(Path(job["config"]).read_text()) or {}
+            only = set(job.get("chapters") or [])
+            chars: dict[str, int] = {}
+            for sg in json.loads((Path(job["work"]) / "segments.json").read_text()):
+                if only and sg["chapter"] not in only:
+                    continue
+                e = resolve_voice(sg["speaker"], cfg)["engine"]
+                chars[e] = chars.get(e, 0) + len(sg["text"])
+            cur = next((j for j in load() if j["id"] == job["id"]), job)
+            record_job(job["id"], chars, float(cur.get("active", 0)))
+        except Exception:
+            pass
+
     def _watch(self, job: dict, proc: subprocess.Popen, stage: str) -> str:
         """Watch one stage. Returns "ok", "failed", "stalled", "window" (closed), or "cancelled"."""
-        started = time.time()
+        started = last_tick = time.time()
         while True:
             time.sleep(self.poll)
             self._beat()
+            self._tick(job, time.time() - last_tick)
+            last_tick = time.time()
             code = proc.poll()
             cur = next((j for j in load() if j["id"] == job["id"]), None)
             if cur is None or cur["status"] in ("cancelled", "held"):
@@ -482,6 +510,8 @@ class Runner:
         done = Path(job["out"]).exists() and Path(job["out"]).stat().st_size > 0
         update(job["id"], status="done" if done else "failed", finished=time.strftime(FMT),
                note="" if done else "the audiobook file was not created", progress="finished" if done else "")
+        if done:
+            self._record(job)
 
     def step(self) -> bool:
         """One scheduling decision. Returns True if a job ran."""

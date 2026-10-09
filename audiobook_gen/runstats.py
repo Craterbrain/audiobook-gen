@@ -31,14 +31,41 @@ def record(run_id: str, engine: str, workers: int, chars: int, seconds: float) -
         pass
 
 
-def averages() -> dict[str, dict]:
-    """{engine: {"cps": chars per second, "runs": n, "chars": total}} over runs long enough to count."""
+def record_job(job_id: str, chars: dict[str, int], seconds: float) -> None:
+    """A whole finished book: its characters per engine and the active time from the queue starting it to the audiobook
+    being built (restarts and start-up included, waiting outside the window not). The seconds are shared between engines
+    by how long each engine's characters take at its synth speed, so a mixed-voice book still gives each engine a speed."""
+    chars = {e: n for e, n in chars.items() if n > 0}
+    if not chars or seconds < MIN_SECONDS:
+        return
+    synth = {e: a["cps"] for e, a in averages(jobs=False).items()}
+    weight = {e: n / synth.get(e, 20.0) for e, n in chars.items()}
+    total = sum(weight.values())
+    runs = [r for r in _load() if not (r.get("id") == job_id and r.get("kind") == "job")]
+    for e, n in chars.items():
+        runs.append({"id": job_id, "kind": "job", "engine": e, "workers": 0, "chars": int(n),
+                     "seconds": round(seconds * weight[e] / total, 1), "date": time.strftime("%Y-%m-%d %H:%M")})
+    try:
+        PATH.parent.mkdir(exist_ok=True)
+        PATH.write_text(json.dumps(runs[-KEEP:], indent=1))
+    except OSError:
+        pass
+
+
+def averages(jobs: bool = True) -> dict[str, dict]:
+    """{engine: {"cps": chars per second, "runs": n, "chars": total, "whole": bool}}.
+    Whole-book timings (everything from start to the finished file) are used for an engine once it has any; until then
+    the speech-only speed of its synth runs."""
     acc: dict[str, list] = {}
+    whole: dict[str, list] = {}
     for r in _load():
         if r["seconds"] >= MIN_SECONDS:
-            a = acc.setdefault(r["engine"], [0, 0.0, 0])
+            a = (whole if r.get("kind") == "job" else acc).setdefault(r["engine"], [0, 0.0, 0])
             a[0] += r["chars"]; a[1] += r["seconds"]; a[2] += 1
-    return {e: {"cps": c / s, "runs": n, "chars": c} for e, (c, s, n) in acc.items() if s}
+    out = {e: {"cps": c / s, "runs": n, "chars": c, "whole": False} for e, (c, s, n) in acc.items() if s}
+    if jobs:
+        out.update({e: {"cps": c / s, "runs": n, "chars": c, "whole": True} for e, (c, s, n) in whole.items() if s})
+    return out
 
 
 def clock(seconds: float) -> str:

@@ -884,7 +884,7 @@ def speed_text(project=None) -> str:
     avg = averages()
     if not avg:
         return "**Speed** — no runs recorded yet. After a few runs this shows the average speed of each engine and how long this book should take."
-    parts = [f"{ENGINE_NAMES.get(e, e)} {a['cps']:.1f} characters/s ({a['runs']} run{'s' if a['runs'] != 1 else ''})"
+    parts = [f"{ENGINE_NAMES.get(e, e)} {a['cps']:.1f} characters/s ({a['runs']} {'whole book' if a['whole'] else 'run'}{'s' if a['runs'] != 1 else ''})"
              for e, a in sorted(avg.items())]
     text = "**Speed, running average** — " + " · ".join(parts)
     try:
@@ -896,7 +896,7 @@ def speed_text(project=None) -> str:
             per[e] = per.get(e, 0) + len(sg["text"])
         if per and all(e in avg for e in per):
             secs = sum(n / avg[e]["cps"] for e, n in per.items())
-            text += f"\n\n**This book:** {sum(per.values()):,} characters, about {clock(secs)} from scratch (clips already made are skipped)."
+            text += f"\n\n**This book:** {sum(per.values()):,} characters, about {clock(secs)} from scratch, start to finished file (clips already made are skipped)."
     except Exception:
         pass
     return text

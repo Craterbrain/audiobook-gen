@@ -826,3 +826,30 @@ def test_assistant_ask_returns_a_proposed_cover(tmp_path, monkeypatch):
     assert out[6]["interactive"] is True                                                           # and it can be applied
     res = gui.assistant_apply(str(p))
     assert res[0].startswith("Applied") and res[5].endswith("cover_custom.jpg")                    # the Book tab gets the new cover
+
+
+def test_whole_book_time_feeds_the_estimate(tmp_path, monkeypatch):
+    from audiobook_gen import runstats
+    monkeypatch.setattr(runstats, "PATH", tmp_path / "run_stats.json")
+    runstats.record("r1", "chatterbox", 1, 2000, 100)                      # speech only: 20 chars/s
+    assert round(runstats.averages()["chatterbox"]["cps"]) == 20 and not runstats.averages()["chatterbox"]["whole"]
+    runstats.record_job("j1", {"chatterbox": 1800}, 100)                   # whole book incl. assembly: 18 chars/s
+    a = runstats.averages()["chatterbox"]
+    assert round(a["cps"]) == 18 and a["whole"]
+    runstats.record_job("j2", {"chatterbox": 1000, "kokoro": 1000}, 50)    # mixed book shares its time between engines
+    assert set(runstats.averages()) == {"chatterbox", "kokoro"}
+    runstats.record_job("j3", {"chatterbox": 100}, 5)                      # too short to count
+    assert runstats.averages()["chatterbox"]["runs"] == 2
+
+
+def test_wait_for_does_not_match_itself(tmp_path):
+    import subprocess, sys
+    script = tmp_path / "some_unique_job.py"
+    script.write_text("import time; time.sleep(30)")
+    waiter = [sys.executable, "tools/wait_for.py", "script", "some_unique_job.py", "--every", "0.2", "--timeout", "2"]
+    assert subprocess.run(waiter).returncode == 0            # nothing running: its own command line must not count
+    p = subprocess.Popen([sys.executable, str(script)])
+    try:
+        assert subprocess.run(waiter).returncode == 2        # really running: waits, then times out
+    finally:
+        p.kill()
