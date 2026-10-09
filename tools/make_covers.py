@@ -20,6 +20,7 @@ COVERS = {
     "up_from_slavery_an_autobiography": ("tuskegee_a", (0.5, 0.5), 1.0, "Roof construction by students at Tuskegee Institute", "Frances Benjamin Johnston", "c. 1902", "Roof construction by students at Tuskegee Institute.jpg"),
     "twelve_years_a_slave_narrative_of_solomo": ("twelve", (0.5, 0.48), 1.2, "A Cotton Plantation on the Mississippi", "Currier & Ives", "1884", "A cotton plantation on the Mississippi LCCN91722891.tif"),
     "anabasis": ("anabasis", (0.42, 0.5), 1.0, "Episode from the Retreat of the Ten Thousand", "Adrien Guignet", "1843", "Épisode de la retraite des Dix Mille - Adrien Guignet - Musée du Louvre Peintures DL 1972 1.jpg"),
+    "personal_memoirs_of_u_s_grant_complete": ("grant_nast", (0.5, 0.5), 1.0, "General Robert E. Lee surrenders at Appomattox Court House, 1865", "Thomas Nast", "c. 1895", "General Robert E. Lee surrenders at Appomattox Court House 1865.jpg"),
     "twenty_thousand_leagues_under_the_sea": ("leagues", (0.5, 0.4), 1.0, "The giant squid attacks the Nautilus (1870 illustration)", "Alphonse de Neuville and Édouard Riou", "1870", "20000 squid Nautilus viewbay.jpg"),
 }
 TITLES = {   # slug -> (title on the cover, title in the file's tags)
@@ -32,9 +33,10 @@ TITLES = {   # slug -> (title on the cover, title in the file's tags)
     "up_from_slavery_an_autobiography": ("Up from Slavery", "Up from Slavery: An Autobiography"),
     "twelve_years_a_slave_narrative_of_solomo": ("Twelve Years a Slave", "Twelve Years a Slave"),
     "anabasis": ("Anabasis", "Anabasis"),
+    "personal_memoirs_of_u_s_grant_complete": ("Personal Memoirs of U. S. Grant", "Personal Memoirs of U. S. Grant"),
     "twenty_thousand_leagues_under_the_sea": ("Twenty Thousand Leagues Under the Sea", "Twenty Thousand Leagues Under the Sea"),
 }
-PORTRAITS = {"narrative_of_the_life_of_frederick_dougl"}
+PORTRAITS = {"narrative_of_the_life_of_frederick_dougl", "personal_memoirs_of_u_s_grant_complete"}
 out_dir = ROOT / "books" / "covers"
 credits = ["# Cover art credits", "", "Backgrounds are public-domain works from Wikimedia Commons (licence shown on each file page).", ""]
 for slug in open(ROOT / "books" / "queue.txt").read().split():

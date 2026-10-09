@@ -938,14 +938,18 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
 
 
 def generate_queued(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-                    emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when="", window_on=False, w_start="23:00", w_stop="06:30"):
+                    emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when="", window_on=False, w_start="23:00", w_stop="06:30",
+                    send=False, device=""):
     """The Generate button: add the book to the queue to start as soon as the GPU is free. The queue runner makes it, watches it,
     and keeps going if this app is closed."""
+    if send and not device:
+        raise gr.Error("Choose which phone to send it to (or untick “Send the finished audiobook to my phone”).")
     vram = gpu_vram_gib()
     warn = (f" ⚠️ Two Chatterbox workers need about 16 GB of GPU memory and this card has {vram:.0f} GB; if it stalls, turn that off."
             if chatterbox_workers(cb_workers) > 1 and vram and vram < 16 else "")
     msg, *_ = queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-                        emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop)
+                        emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop,
+                        device if send else "")
     return msg + " Follow it on the **Queue** tab; the finished file appears here." + warn
 
 
@@ -982,7 +986,25 @@ def gen_panel(project, shown):
 
 
 # ---------- Queue ----------
-QUEUE_HEADERS = ["#", "Book", "Status", "Progress", "Starts", "Window", "Note", "id"]
+QUEUE_HEADERS = ["#", "Book", "Status", "Progress", "Starts", "Window", "Phone", "Note", "id"]
+
+
+def device_choices() -> list[tuple[str, str]]:
+    """Paired KDE Connect devices for the dropdown, with whether each can be reached right now."""
+    from . import jobqueue
+    return [(f"{d['name']} — {'ready now' if d['reachable'] else 'not reachable right now'}", d["id"]) for d in jobqueue.kde_devices()]
+
+
+def device_default(choices=None) -> str:
+    from . import jobqueue
+    ids = [v for _, v in (choices if choices is not None else device_choices())]
+    want = jobqueue.default_device()
+    return want if want in ids else (ids[0] if ids else "")
+
+
+def devices_refresh():
+    ch = device_choices()
+    return gr.update(choices=ch, value=device_default(ch))
 
 
 def queue_status() -> str:
@@ -1078,6 +1100,21 @@ def queue_reschedule(picked, when, window_on, w_start, w_stop):
             (f", only between {window}." if window else ", any time of day.")), *queue_refresh(picked)
 
 
+def queue_send(picked, device):
+    from . import jobqueue
+    if not device:
+        raise gr.Error("Choose a device on the Generate tab first (paired in KDE Connect).")
+    jobqueue.save_default_device(device)
+    n = jobqueue.set_send(_need(picked), device)
+    return f"{n} book(s) will be sent to your phone when done (finished ones are sent now, and again if your phone is out of reach).", *queue_refresh(picked)
+
+
+def queue_nosend(picked):
+    from . import jobqueue
+    n = jobqueue.set_send(_need(picked), "")
+    return f"{n} book(s) will not be sent to your phone.", *queue_refresh(picked)
+
+
 def queue_asap(picked):
     from . import jobqueue
     n = jobqueue.set_schedule(_need(picked), "", "")
@@ -1115,18 +1152,20 @@ def _parse_schedule(when, window_on, w_start, w_stop) -> tuple[str, str]:
 
 
 def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop):
+              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop, send_to=""):
     from . import jobqueue
     work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
                                           emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
     not_before, window = _parse_schedule(when, window_on, w_start, w_stop)
     all_chapters = {int(r["#"]) for _, r in chap_df.iterrows()}
     chapters = sorted(only) if only and only != all_chapters else None
-    jq_job = jobqueue.add(str(work), title or work.name, author or "", cover or "", "", "", chapters, not_before, window)
+    if send_to:
+        jobqueue.save_default_device(send_to)
+    jq_job = jobqueue.add(str(work), title or work.name, author or "", cover or "", "", "", chapters, not_before, window, send_to)
     jobqueue.ensure_supervisor()
     when_txt = f"from {not_before}" if not_before else "as soon as the GPU is free"
     return (f"Queued “{jq_job['title']}” — starts {when_txt}" + (f", only between {window}" if window else "") +
-            ". It is watched: if it stalls or crashes it is restarted."), *queue_refresh()
+            ". It is watched: if it stalls or crashes it is restarted." + (" It will be sent to your phone when it is done." if send_to else "")), *queue_refresh()
 
 
 def queue_open(picked):
@@ -1404,6 +1443,11 @@ def build_ui() -> gr.Blocks:
                     g_w1 = gr.Textbox("23:00", label="from", scale=1)
                     g_w2 = gr.Textbox("06:30", label="until", scale=1)
                 with gr.Row():
+                    g_send = gr.Checkbox(label="Send the finished audiobook to my phone (KDE Connect)", value=bool(device_choices()), scale=2,
+                                         info="Sent as soon as it is done; if your phone is out of reach it keeps trying.")
+                    g_dev = gr.Dropdown(choices=device_choices(), value=device_default(), label="Phone", scale=2, allow_custom_value=True)
+                    g_find = gr.Button("↻ Find devices", scale=1)
+                with gr.Row():
                     go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Cancel")
                 status4 = gr.Markdown()
                 with gr.Row():
@@ -1452,6 +1496,8 @@ def build_ui() -> gr.Blocks:
                     q_hold = gr.Button("⏸ Pause / save for later"); q_resume = gr.Button("▶️ Resume")
                     q_cancel = gr.Button("Cancel"); q_remove = gr.Button("Remove from list")
                     q_open = gr.Button("Open in the other tabs")
+                with gr.Row():
+                    q_send = gr.Button("📱 Send to my phone when done"); q_nosend = gr.Button("Don’t send to my phone")
                 with gr.Accordion("Change the schedule of the ticked books", open=False):
                     gr.Markdown("Switch one book or a whole batch to a new start time or overnight hours.")
                     with gr.Row():
@@ -1635,7 +1681,7 @@ def build_ui() -> gr.Blocks:
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
         QOUT = [q_state, q_tbl, q_now, q_runner, q_pick]
         QMSG = [q_msg] + QOUT
-        go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2],
+        go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2, g_send, g_dev],
                  status4).then(queue_refresh, q_pick, QOUT)
         stop.click(gen_stop, project, status4)
         gen_shown = gr.State("")
@@ -1645,6 +1691,9 @@ def build_ui() -> gr.Blocks:
         q_runner.click(queue_toggle_runner, None, QMSG)
         for btn, where in ((q_top, "top"), (q_up, "up"), (q_down, "down"), (q_bottom, "bottom")):
             btn.click(lambda picked, w=where: queue_move(picked, w), q_pick, QMSG)
+        g_find.click(devices_refresh, None, g_dev)
+        q_send.click(queue_send, [q_pick, g_dev], QMSG)
+        q_nosend.click(queue_nosend, q_pick, QMSG)
         q_hold.click(queue_hold, q_pick, QMSG)
         q_resume.click(queue_resume, q_pick, QMSG)
         q_cancel.click(queue_cancel, q_pick, QMSG)

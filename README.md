@@ -102,5 +102,7 @@ The code is released under the [MIT License](LICENSE). The bundled Bible IPA dic
   `python -m audiobook_gen.jobqueue add --work work/<book> --not-before "2026-10-09 23:00" --window 23:00-06:30`, then `list` or `cancel <id>`.
 - `./setup_queue_service.sh` installs the queue as a systemd user service so it starts at boot and is restarted if it ever
   dies (`--remove` uninstalls it). Without it, the app starts the queue whenever it opens.
+- **Send to your phone** — tick *Send the finished audiobook to my phone* on the Generate tab (or use the buttons on the Queue tab) and the
+  queue shares each finished book through KDE Connect, retrying every 5 minutes while the phone is out of reach.
 - **Assistant tab** — ask Claude (through your Claude Code login) to set up voices, pacing or pronunciations. It edits a copy,
   you review the diff, and nothing changes until you press Apply.

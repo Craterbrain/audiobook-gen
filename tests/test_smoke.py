@@ -675,3 +675,70 @@ def test_queue_tab_actions(tmp_path, monkeypatch):
     assert "as soon as the GPU is free" in gui.queue_asap([ids[0]])[0] and [j for j in jq.load() if j["id"] == ids[0]][0]["window"] == ""
     assert "Cancelled 1" in gui.queue_cancel([ids[1]])[0]
     assert "Removed 2" in gui.queue_remove([ids[1], ids[2]])[0] and titles() == ["One"]
+
+
+# ---------- sending to the phone ----------
+def test_kde_devices_are_read_from_kdeconnect(monkeypatch):
+    from audiobook_gen import jobqueue as jq
+    out = ("- Pixel 6a: phone-aaaa1111 on 10.0.0.21 via LAN (paired and reachable)\\n"
+           "- Pixel 8: phone-bbbb2222 on 10.0.0.22 via LAN (reachable)\\n"
+           "- ThinkPad: _cccc3333_ (paired)\\n4 devices found\\n").replace("\\n", "\n")
+    monkeypatch.setattr(jq.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": out, "returncode": 0})())
+    devs = jq.kde_devices()
+    assert [(d["name"], d["reachable"]) for d in devs] == [("Pixel 6a", True), ("ThinkPad", False)]       # unpaired Pixel 8 is left out
+
+
+def test_finished_book_is_sent_to_the_phone_and_retried_while_it_is_away(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    out = tmp_path / "book.m4b"; out.write_bytes(b"audio")
+    job = jq.add(str(work), "Sent book", out=str(out), send_to="phone1")
+    jq.update(job["id"], status="done")
+    reachable, shared = [False], []
+    def sender(device, path):
+        if not reachable[0]:
+            return False
+        shared.append((device, path)); return True
+    r = jq.Runner(poll=0.1, foreign=lambda: "", sender=sender, send_every=0)
+    r._deliver()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["sent"] == "" and "waiting for your phone" in j["note"] and not shared
+    assert jq.table()[0][5] == "waiting for the phone"
+    reachable[0] = True
+    r._deliver()
+    j = [x for x in jq.load() if x["id"] == job["id"]][0]
+    assert j["sent"] and shared == [("phone1", str(out))] and jq.table()[0][5].startswith("sent ")
+    r._deliver()
+    assert len(shared) == 1                                                      # once is enough
+    assert jq.set_send([job["id"]], "phone2") == 1 and [x for x in jq.load() if x["id"] == job["id"]][0]["sent"] == ""   # "send again" re-arms it
+
+
+def test_a_slow_send_never_blocks_the_queue(tmp_path, monkeypatch):
+    import time
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    out = tmp_path / "b.m4b"; out.write_bytes(b"x")
+    job = jq.add(str(work), "Big book", out=str(out), send_to="p"); jq.update(job["id"], status="done")
+    r = jq.Runner(poll=0.1, foreign=lambda: "", sender=lambda d, p: time.sleep(2) or True, send_every=0)
+    t0 = time.time()
+    r.step()                                                                      # starts the send on its own thread...
+    assert time.time() - t0 < 1.0 and jq.HEARTBEAT.exists()                       # ...and returns at once, heartbeat written
+    r._sender_thread.join(timeout=10)
+    assert [x for x in jq.load() if x["id"] == job["id"]][0]["sent"]
+
+
+def test_generate_tab_can_send_to_a_phone(tmp_path, monkeypatch):
+    import pandas as pd
+    from audiobook_gen import gui
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "SETTINGS", tmp_path / "queue" / "settings.json")
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    chap = pd.DataFrame([[True, 1, "One", 6]], columns=gui.CHAP_COLS)
+    args = (str(work), chap, "B", "A", "", 60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, False, "", False, "23:00", "06:30")
+    import pytest
+    with pytest.raises(Exception):
+        gui.generate_queued(*args, True, "")                                        # ticked but no device chosen
+    assert jq.load() == []
+    gui.generate_queued(*args, True, "phone-aaaa1111")
+    assert jq.load()[0]["send_to"] == "phone-aaaa1111" and jq.default_device() == "phone-aaaa1111"
+    assert len(jq.load()) == 1                                                       # the refused click queued nothing
+    assert "will not be sent" in gui.queue_nosend([jq.load()[0]["id"]])[0] and jq.load()[0]["send_to"] == ""
+    assert "will be sent" in gui.queue_send([jq.load()[0]["id"]], "dev2")[0] and jq.load()[0]["send_to"] == "dev2"

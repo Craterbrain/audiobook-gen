@@ -12,7 +12,9 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import signal
+import threading
 import subprocess
 import sys
 import time
@@ -29,6 +31,8 @@ RUNNER_PID = QUEUE / "runner.pid"
 JOB_PID = QUEUE / "job.pid"                     # the job's process group, so Stop can end it too
 STOPPED = QUEUE / "stopped"                      # you stopped the runner on purpose: the app must not restart it behind your back
 SERVICE = "audiobook-queue.service"
+SETTINGS = QUEUE / "settings.json"
+SEND_EVERY = 300                                 # seconds between tries while the phone is out of reach
 GUI_LOCK = QUEUE / "gui_generate.lock"          # reserved: anything in the app that holds the GPU for long writes its pid here and the queue waits
 
 STALL = 600           # seconds without a new clip before the job is restarted
@@ -74,7 +78,7 @@ def update(job_id: str, **fields) -> None:
 
 
 def add(work: str, title: str = "", author: str = "", cover: str = "", config: str = "", out: str = "",
-        chapters: list[int] | None = None, not_before: str = "", window: str = "") -> dict:
+        chapters: list[int] | None = None, not_before: str = "", window: str = "", send_to: str = "") -> dict:
     """Queue a generation. not_before: "YYYY-MM-DD HH:MM" local time or "". window: "23:00-06:30" or ""."""
     w = Path(work).resolve()
     if not (w / "segments.json").exists():
@@ -85,7 +89,7 @@ def add(work: str, title: str = "", author: str = "", cover: str = "", config: s
         _parse_window(window)
     job = {"id": uuid.uuid4().hex[:8], "title": title or w.name, "author": author, "cover": cover, "work": str(w),
            "config": config or str(w / "config.yaml"), "out": out or str(ROOT / "out" / f"{w.name}.m4b"),
-           "chapters": chapters or None, "not_before": not_before, "window": window, "status": "queued", "note": "",
+           "chapters": chapters or None, "not_before": not_before, "window": window, "send_to": send_to, "sent": "", "status": "queued", "note": "",
            "progress": "", "restarts": 0, "created": time.strftime(FMT), "started": "", "finished": ""}
 
     def go():
@@ -189,6 +193,63 @@ def set_schedule(ids: list[str], not_before: str = "", window: str = "") -> int:
     return len(n)
 
 
+# ---------- sending to a phone (KDE Connect) ----------
+def kde_devices() -> list[dict]:
+    """Paired devices from `kdeconnect-cli -l`: [{"id", "name", "reachable"}]. Empty if KDE Connect is not installed."""
+    try:
+        out = subprocess.run(["kdeconnect-cli", "-l"], capture_output=True, text=True, timeout=25).stdout
+    except Exception:
+        return []
+    devs = []
+    for line in out.splitlines():
+        m = re.match(r"^- (?P<name>.+?): (?P<id>\S+)(?: on \S+ via \S+)? \((?P<state>[^)]*)\)", line.strip())
+        if m and "paired" in m["state"] and "not paired" not in m["state"]:
+            devs.append({"id": m["id"], "name": m["name"], "reachable": "reachable" in m["state"] and "unreachable" not in m["state"]})
+    return devs
+
+
+def send_file(device: str, path: str) -> bool:
+    """Share a file to the device. False if the device is out of reach or the share failed (it is tried again later)."""
+    if not any(d["id"] == device and d["reachable"] for d in kde_devices()):
+        return False
+    try:
+        return subprocess.run(["kdeconnect-cli", "-d", device, "--share", str(path)], capture_output=True, timeout=900).returncode == 0
+    except Exception:
+        return False
+
+
+def default_device() -> str:
+    try:
+        return json.loads(SETTINGS.read_text()).get("device", "")
+    except Exception:
+        return ""
+
+
+def save_default_device(device: str) -> None:
+    try:
+        QUEUE.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps({"device": device}))
+    except OSError:
+        pass
+
+
+def set_send(ids: list[str], device: str) -> int:
+    """Send the finished book to this device ("" = stop sending). A finished book that was sent is sent again."""
+    n = []
+
+    def go():
+        jobs = load()
+        for j in jobs:
+            if j["id"] in ids and j["status"] != "cancelled":
+                j["send_to"] = device
+                if device:
+                    j["sent"], j["send_try"] = "", 0
+                n.append(1)
+        _write(jobs)
+    _locked(go)
+    return len(n)
+
+
 # ---------- scheduling ----------
 def _parse_window(text: str) -> tuple[int, int]:
     a, b = text.split("-")
@@ -279,8 +340,9 @@ def newest_clip(work: Path) -> float:
 
 class Runner:
     def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS,
-                 foreign=foreign_synthesis, now=datetime.now, retry_wait: float = 30):
+                 foreign=foreign_synthesis, now=datetime.now, retry_wait: float = 30, sender=send_file, send_every: float = SEND_EVERY):
         self.poll, self.stall, self.grace, self.max_restarts = poll, stall, grace, max_restarts
+        self.sender, self.send_every, self._sender_thread = sender, send_every, None
         self.foreign, self.now, self.retry_wait = foreign, now, retry_wait
 
     # commands (replaceable in tests)
@@ -352,6 +414,23 @@ class Runner:
                     _kill_group(proc)
                     return "stalled"
 
+    def _deliver(self) -> None:
+        """Send each finished book that has a device and has not been sent. Out of reach: try again in SEND_EVERY seconds."""
+        for j in load():
+            if (j["status"] == "done" and j.get("send_to") and not j.get("sent") and Path(j["out"]).exists()
+                    and time.time() - j.get("send_try", 0) >= self.send_every):
+                update(j["id"], send_try=time.time())
+                if self.sender(j["send_to"], j["out"]):
+                    update(j["id"], sent=time.strftime(FMT), note="sent to your phone")
+                else:
+                    update(j["id"], note="waiting for your phone to be reachable")
+
+    def deliver_pending(self) -> None:
+        """Run the sending on its own thread: a big file or an absent phone must never stop the heartbeat (or the queue)."""
+        if self._sender_thread is None or not self._sender_thread.is_alive():
+            self._sender_thread = threading.Thread(target=self._deliver, daemon=True)
+            self._sender_thread.start()
+
     def run_job(self, job: dict) -> None:
         fresh = next((j for j in load() if j["id"] == job["id"]), None)
         if fresh is None or fresh["status"] not in ACTIVE:              # held or cancelled in the instant before it started
@@ -392,6 +471,7 @@ class Runner:
     def step(self) -> bool:
         """One scheduling decision. Returns True if a job ran."""
         self._beat()
+        self.deliver_pending()
         for j in load():                                            # a job left "running" by a dead runner starts over
             if j["status"] == "running":
                 update(j["id"], status="queued", note="resuming after a restart")
@@ -553,7 +633,9 @@ def table(now: datetime | None = None) -> list[list]:
             when = next_start(j, now)
         elif j["status"] == "held":
             when = "when you resume it"
-        rows.append([j["title"][:40], j["status"], j.get("progress", ""), when, j.get("window") or "any time",
+        phone = ("" if not j.get("send_to") else f"sent {j['sent'][-5:]}" if j.get("sent") else
+                 "waiting for the phone" if j["status"] == "done" else "sends when done")
+        rows.append([j["title"][:40], j["status"], j.get("progress", ""), when, j.get("window") or "any time", phone,
                      j.get("note", ""), j["id"]])
     return rows
 
