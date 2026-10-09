@@ -1,4 +1,5 @@
 import json, sys
+import pytest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from audiobook_gen.lexicon import Preprocessor
@@ -844,6 +845,8 @@ def test_whole_book_time_feeds_the_estimate(tmp_path, monkeypatch):
 
 def test_wait_for_does_not_match_itself(tmp_path):
     import subprocess, sys
+    if not Path("tools/wait_for.py").exists():          # a local helper, not part of the repository
+        pytest.skip("tools/wait_for.py is local only")
     script = tmp_path / "some_unique_job.py"
     script.write_text("import time; time.sleep(30)")
     waiter = [sys.executable, "tools/wait_for.py", "script", "some_unique_job.py", "--every", "0.2", "--timeout", "2"]

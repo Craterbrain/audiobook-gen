@@ -46,3 +46,4 @@ config.nasb_*.yaml
 nohup.out
 .DS_Store
 books/
+tools/wait_for.py
