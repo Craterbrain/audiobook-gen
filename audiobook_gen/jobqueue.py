@@ -327,8 +327,8 @@ def notify_file(path: str, text: str = "", title: str = "Audiobook queue") -> bo
     try:
         data = Path(path).read_bytes()
         headers = {"Filename": Path(path).name, "Title": title.encode("ascii", "ignore").decode() or "Audiobook queue"}
-        if text:
-            headers["Message"] = text.encode("ascii", "ignore").decode()
+        if text:                      # a header holds one line only
+            headers["Message"] = " | ".join(l.strip() for l in text.encode("ascii", "ignore").decode().splitlines() if l.strip())[:300]
         req = urllib.request.Request(f"{NTFY_SERVER}/{topic}", data=data, headers=headers, method="PUT")
         return urllib.request.urlopen(req, timeout=120).status == 200
     except Exception:

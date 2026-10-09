@@ -1411,3 +1411,17 @@ def test_a_send_the_phone_never_fetched_counts_as_failed(monkeypatch):
     assert jq.send_file("dev", "/x", journal=lambda since: "kdeconnectd: CompositeUploadJob::timeoutTriggered() - no connection received", verify_seconds=0.2) is False
     monkeypatch.setattr(jq, "kde_devices", lambda: [{"id": "dev", "name": "Phone", "reachable": False}])
     assert jq.send_file("dev", "/x", journal=lambda since: "", verify_seconds=0.2) is False                         # out of reach
+
+
+def test_notify_file_accepts_a_multi_line_caption(tmp_path, monkeypatch):
+    from audiobook_gen import jobqueue as jq
+    seen = {}
+    class Resp:
+        status = 200
+    def fake_urlopen(req, timeout=0):
+        seen.update(req.headers); return Resp()
+    monkeypatch.setattr(jq.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("AUDIOBOOK_NTFY", "some-topic")
+    f = tmp_path / "x.mp3"; f.write_bytes(b"abc")
+    assert jq.notify_file(str(f), "line one\nline two\n3. three", "A title") is True
+    assert "\n" not in seen["Message"] and seen["Message"].startswith("line one | line two")
