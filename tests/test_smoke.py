@@ -371,7 +371,7 @@ def _queue_env(tmp_path, monkeypatch):
     monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue")
     monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
     monkeypatch.setattr(jq, "HEARTBEAT", tmp_path / "queue" / "heartbeat")
-    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED"):                      # never touch the real queue's files
+    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED", "SPEECH_LIMIT"):                      # never touch the real queue's files
         monkeypatch.setattr(jq, name, tmp_path / "queue" / name.lower())
     work = tmp_path / "book"; work.mkdir()
     (work / "segments.json").write_text("[]")
@@ -890,3 +890,13 @@ def test_queue_restarts_a_long_running_speech_process_without_counting_a_failure
     R(poll=0.1, recycle=0.5, stall=60, grace=60, retry_wait=0, foreign=lambda: "").step()
     j = [x for x in jq.load() if x["id"] == job["id"]][0]
     assert j["status"] == "done" and j.get("restarts", 0) == 0
+
+
+def test_speech_limit_is_learned_from_the_first_slowdown(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    assert jq.speech_limit() is None                                   # nothing learned: no scheduled restarts
+    assert jq.learn_speech_limit(2 * 3600) is None and jq.speech_limit() is None      # an early slowdown is not about uptime
+    assert jq.learn_speech_limit(4 * 3600 + 49 * 60) == 4 * 3600 + 44 * 60            # onset minus 5 minutes
+    assert jq.speech_limit() == 4 * 3600 + 44 * 60
+    assert jq.learn_speech_limit(5 * 3600) is None and jq.speech_limit() == 4 * 3600 + 44 * 60   # never raised
+    assert jq.learn_speech_limit(3 * 3600 + 32 * 60) == 3.5 * 3600                    # never below 3 h 30

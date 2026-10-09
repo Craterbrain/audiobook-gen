@@ -41,7 +41,9 @@ STALL = 600           # seconds without a new clip before the job is restarted
 START_GRACE = 900     # model loading and emotion analysis write no clips for a while
 MAX_RESTARTS = 6
 POLL = 20
-RECYCLE = 3 * 3600 + 45 * 60    # a fresh speech process every 3 h 45 min keeps the pace at its fastest (it slowed to a crawl after about 4 h 50 min, twice)
+MIN_RECYCLE = 3.5 * 3600     # the speech process is never recycled sooner than this
+RECYCLE_MARGIN = 300         # recycle this long before the uptime at which this machine's first slowdown began
+SPEECH_LIMIT = QUEUE / "speech_limit.json"   # learned on this machine: {"seconds": the longest a speech process should run}
 PACE_EVERY = 60       # seconds between pace checks / memory notes
 MEM_EVERY = 300
 ACTIVE = ("queued", "paused", "running")
@@ -358,6 +360,32 @@ def newest_clip(work: Path) -> float:
     return newest
 
 
+def speech_limit():
+    """How long a speech process may run before it is replaced, learned from this machine's first slowdown (None = not learned yet)."""
+    try:
+        return float(json.loads(SPEECH_LIMIT.read_text())["seconds"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def learn_speech_limit(onset: float) -> float | None:
+    """A speech process began to slow down `onset` seconds after it started. Recycle a little before that next time, but not
+    sooner than MIN_RECYCLE (an earlier slowdown is not about uptime, and the pace check handles it). Only ever lowers the limit."""
+    if onset < MIN_RECYCLE:
+        return None
+    new = max(MIN_RECYCLE, onset - RECYCLE_MARGIN)
+    old = speech_limit()
+    if old is not None and old <= new:
+        return None
+    try:
+        QUEUE.mkdir(parents=True, exist_ok=True)
+        SPEECH_LIMIT.write_text(json.dumps({"seconds": round(new), "learned": time.strftime("%Y-%m-%d %H:%M"),
+                                            "slowdown_began_after": round(onset)}))
+    except OSError:
+        return None
+    return new
+
+
 def clip_times(work: Path, since: float = 0.0) -> list[float]:
     """Modification times of the clips made since `since`."""
     out = []
@@ -407,7 +435,7 @@ def group_rss(pgid: int) -> float:
 
 
 class Runner:
-    def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS, recycle: float = RECYCLE,
+    def __init__(self, poll: float = POLL, stall: float = STALL, grace: float = START_GRACE, max_restarts: int = MAX_RESTARTS, recycle: float | None = None,
                  foreign=foreign_synthesis, now=datetime.now, retry_wait: float = 30, sender=send_file, send_every: float = SEND_EVERY):
         self.poll, self.stall, self.grace, self.max_restarts, self.recycle = poll, stall, grace, max_restarts, recycle
         self.sender, self.send_every, self._sender_thread = sender, send_every, None
@@ -511,10 +539,12 @@ class Runner:
                     return "window"
                 if time.time() - last_check >= PACE_EVERY:
                     last_check = time.time()
-                    if time.time() - started > self.recycle:
+                    limit = self.recycle if self.recycle is not None else speech_limit()
+                    if limit and time.time() - started > limit:
                         _kill_group(proc)
                         return "recycle"
                     if pace.slow(clip_times(Path(job["work"]), started), time.time()):
+                        learn_speech_limit(time.time() - started - Pace.WINDOW)
                         _kill_group(proc)
                         return "slow"
                 if time.time() - last_mem >= MEM_EVERY:
@@ -522,6 +552,7 @@ class Runner:
                     self._note_memory(job, proc, started)
                 last = max(newest_clip(Path(job["work"])), started)
                 if time.time() - started > self.grace and time.time() - last > self.stall:
+                    learn_speech_limit(last - started)
                     _kill_group(proc)
                     return "stalled"
                 if time.time() - started <= self.grace and time.time() - last > self.grace:
