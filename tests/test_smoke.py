@@ -1270,7 +1270,7 @@ def test_narrator_style_chooses_the_kind_from_speech_or_narration(tmp_path, monk
         sf.write(tmp_path / f"{n}.wav", np.full(sr, 0.1, np.float32), sr)
     asked = []
     monkeypatch.setattr(assemble, "draw_pause", lambda kind, key, table=None: asked.append(kind) or 100)
-    monkeypatch.setattr(assemble, "narrator_pacing", lambda: {"x": 1})
+    monkeypatch.setattr(assemble, "tables_for", lambda cfg: ({"x": 1}, {}, "test"))
     p = {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30}
     cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60}
     segs = [{"id": "s1", "text": "x", "kind": "dialogue", "para_start": True}, {"id": "s2", "text": "x", "kind": "narration", "para_start": False}]
@@ -1305,3 +1305,65 @@ def test_pauses_use_the_feeling_of_the_sentence_before(tmp_path):
     calm = assemble.build_chapter(seg, clips, tmp_path, cfg, meta, {"a.wav": 0.0})
     upset = assemble.build_chapter(seg, clips, tmp_path, cfg, meta, {"a.wav": 1.0})
     assert len(calm) > len(upset)                                    # the same drawn pause, shortened after an emotional sentence
+
+
+def _pacing_records(n=400, seed=3):
+    import random
+    rng = random.Random(seed)
+    recs = []
+    for i in range(n):
+        base = rng.choice(["period", "comma", "paragraph"])
+        in_quote = rng.random() < 0.4
+        feel = rng.random()
+        pause = (800 if base == "period" else 500 if base == "comma" else 900) * (0.6 if in_quote else 1.0) * (1 - 0.3 * feel) * rng.uniform(0.8, 1.2)
+        if base == "comma" and rng.random() < 0.4:
+            pause = rng.uniform(0, 80)
+        recs.append({"cls": base, "base": base, "pause": pause, "in_quote": in_quote, "words": rng.randint(4, 30), "feel": feel})
+    return recs
+
+
+def test_a_pacing_profile_is_fitted_saved_with_the_voice_and_used_by_its_books(tmp_path, monkeypatch):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import assemble, pacing, voices
+    monkeypatch.setattr(voices, "LIB", tmp_path / "library")
+    (tmp_path / "library" / "Slowpoke").mkdir(parents=True)
+    table = pacing.fit_table(_pacing_records())
+    assert {"sentence_narration", "comma_narration", "paragraph"} <= set(table["kinds"]) and table["emotion"]["sentence"]["coefficient"] < 0
+    table["records"] = 400
+    pacing.save_profile("Slowpoke", table, "book.m4b")
+    assert pacing.load_profile("Slowpoke")["records"] == 400
+    narrated_by = lambda name: {"voices": {"Narrator": {"engine": "chatterbox", "library": name}}}
+    assert pacing.tables_for(narrated_by("Slowpoke"))[2] == "Slowpoke"
+    assert pacing.tables_for(narrated_by("NoProfileVoice"))[2] == "default"           # voices without a profile use the default table
+    assert pacing.tables_for({"single_voice": {"enabled": True, "voice": {"library": "Slowpoke"}}})[2] == "Slowpoke"
+    # a book narrated by the voice is paced by its profile: here every sentence pause is about 3 s
+    slow = {"kinds": {"sentence_narration": {"n": 99, "short_share": 0.0, "median_ms": 3000, "mu": 8.0, "sigma": 0.01, "lo_ms": 2900, "hi_ms": 3100, "short_range_ms": [20, 100]}},
+            "emotion": {}}
+    pacing.save_profile("Slowpoke", {**slow, "records": 99}, "x")
+    sr = 24000
+    for n in "ab":
+        sf.write(tmp_path / f"{n}.wav", np.full(sr, 0.1, np.float32), sr)
+    p = {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30}
+    seg = [{"id": "s", "text": "x", "kind": "narration", "para_start": True}]
+    clips, meta = {"s": ["a.wav", "b.wav"]}, {"a.wav": {"text": "It ended.", "cut": "end"}, "b.wav": {"text": "Next."}}
+    slow_book = assemble.build_chapter(seg, clips, tmp_path, {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60, **narrated_by("Slowpoke")}, meta)
+    other = assemble.build_chapter(seg, clips, tmp_path, {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60, **narrated_by("Other")}, meta)
+    assert len(slow_book) - len(other) > sr * 1.5
+    assert pacing.remove_profile("Slowpoke") and pacing.load_profile("Slowpoke") is None
+
+
+def test_the_clone_tab_starts_and_reports_a_pacing_measurement(tmp_path, monkeypatch):
+    import pytest
+    from audiobook_gen import gui, pacing, voices
+    monkeypatch.setattr(voices, "LIB", tmp_path / "library")
+    (tmp_path / "library" / "V").mkdir(parents=True)
+    monkeypatch.setattr(pacing, "ROOT", tmp_path)
+    with pytest.raises(gui.gr.Error):
+        gui.pacing_start("V", str(tmp_path / "missing.m4b"), str(tmp_path / "missing.epub"), 4, 30)
+    with pytest.raises(gui.gr.Error):
+        gui.pacing_start("", "a", "b", 4, 30)
+    text, table = gui.pacing_status("V")
+    assert "no pacing profile" in text and len(table) == 0
+    pacing.save_profile("V", {**pacing.fit_table(_pacing_records()), "records": 400}, "x.m4b")
+    text, table = gui.pacing_status("V")
+    assert "has its own pacing profile" in text and len(table) >= 4

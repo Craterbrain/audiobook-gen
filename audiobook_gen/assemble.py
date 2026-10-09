@@ -49,6 +49,11 @@ _PACING = None
 MIN_PAUSE_MS = 40          # below this the join would overlap-crossfade the two clips instead of leaving a gap
 
 
+def tables_for(cfg: dict):
+    from .pacing import tables_for as _tables_for
+    return _tables_for(cfg)
+
+
 def narrator_pacing() -> dict:
     """The measured pause table (data/narrator_pacing.json): kind -> share of almost-no pauses and a log-normal fit of the rest."""
     global _PACING
@@ -137,9 +142,9 @@ def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, text
     the numbers in pacing_ms are used as they are. `texts` (clips_meta.json: file -> record) says how each chunk ended; `feel` (file -> 0-1)
     is how emotional the clip is, which shortens a sentence-end pause and lengthens a paragraph pause a little."""
     sr, p, xf = cfg["sample_rate"], cfg["pacing_ms"], cfg["crossfade_ms"]
-    table = narrator_pacing() if cfg.get("pacing_style", "narrator") == "narrator" else {}
+    table, coef, _ = tables_for(cfg) if cfg.get("pacing_style", "narrator") == "narrator" else ({}, {}, "fixed")     # the narrator voice's own profile, else the default
     out, prev, last = None, None, None
-    coefficients = narrator_emotion() if (feel and table) else {}
+    coefficients = coef if (feel and table) else {}
 
     def pick(kind: str, key: str, fixed: int) -> int:
         d = draw_pause(kind, key, table) if table else None
@@ -364,6 +369,8 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
     except (OSError, ValueError):
         texts = None
     sr = cfg["sample_rate"]
+    if cfg.get("pacing_style", "narrator") == "narrator":
+        print(f"[assemble] pacing: {tables_for(cfg)[2]}", flush=True)
     title, author = title or meta["title"], author or meta.get("author", "")
     (work / "chapters").mkdir(exist_ok=True)
 

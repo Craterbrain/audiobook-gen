@@ -661,6 +661,88 @@ def clone_delete(name):
     return gr.update(choices=vlib.list_voices(), value=None), f"Deleted **{name}**."
 
 
+# ---------- pacing profile of a narrator ----------
+def _pacing_state(voice):
+    from .pacing import ROOT as _R
+    f = _R / "work" / "pacing" / f"{voice}.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _pid_alive(voice) -> bool:
+    from .pacing import ROOT as _R
+    try:
+        pid = int((_R / "work" / "pacing" / f"{voice}.pid").read_text())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def pacing_table(voice):
+    from . import pacing
+    prof = pacing.load_profile(voice) if voice else None
+    rows = []
+    if prof:
+        for k, e in prof["kinds"].items():
+            rows.append([k.replace("_", " "), e["n"], f"{100 * e['short_share']:.0f}%", f"{round(__import__('math').exp(e['mu']))} ms" if "mu" in e else "—"])
+        for k, e in prof.get("emotion", {}).items():
+            rows.append([f"emotion on {k} pauses", e["n"], "", f"{e['coefficient']:+.2f} per unit of feeling"])
+    return pd.DataFrame(rows, columns=["boundary", "measured", "almost no pause", "typical otherwise"])
+
+
+def pacing_status(voice):
+    from . import pacing
+    if not voice:
+        return "Choose a saved voice.", pacing_table("")
+    st, prof = _pacing_state(voice), pacing.load_profile(voice)
+    live = _pid_alive(voice)
+    if live:
+        text = f"⏳ Measuring… {st.get('message', 'starting')} ({st.get('time', '')}). It runs on the CPU in the background; you can close this page."
+    elif st.get("state") == "running":
+        text = "⚠️ The measurement stopped before it finished; start it again."
+    elif st.get("state") == "failed":
+        text = f"❌ {st.get('message', 'failed')}"
+    elif prof:
+        text = (f"✅ **{voice}** has its own pacing profile: {prof.get('records', '?')} pauses measured from {prof.get('source') or 'an audiobook'} "
+                f"on {prof.get('measured', '?')}. Books narrated by this voice use it automatically.")
+    else:
+        text = f"**{voice}** has no pacing profile, so books narrated by it use the default one (measured on a different narrator)."
+    return text, pacing_table(voice)
+
+
+def pacing_start(voice, m4b, epub, windows, minutes):
+    import subprocess
+    import sys as _sys
+    from . import pacing
+    if not voice:
+        raise gr.Error("Choose a saved voice to keep the profile with.")
+    for label, path in (("audiobook", m4b), ("ebook", epub)):
+        if not path or not Path(str(path).strip()).exists():
+            raise gr.Error(f"The {label} file was not found: type its full path.")
+    if _pid_alive(voice):
+        raise gr.Error("A measurement for this voice is already running.")
+    d = pacing.ROOT / "work" / "pacing"
+    d.mkdir(parents=True, exist_ok=True)
+    log = open(d / f"{voice}.log", "ab")
+    proc = subprocess.Popen([_sys.executable, "-m", "audiobook_gen", "pacing", "x", "--m4b", str(m4b).strip(), "--epub", str(epub).strip(),
+                             "--voice", voice, "--windows", str(int(windows)), "--minutes", str(float(minutes))],
+                            cwd=pacing.ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    (d / f"{voice}.pid").write_text(str(proc.pid))
+    (d / f"{voice}.json").write_text(json.dumps({"state": "running", "message": "starting", "time": time.strftime("%H:%M:%S")}))
+    return pacing_status(voice)
+
+
+def pacing_remove(voice):
+    from . import pacing
+    if not voice:
+        raise gr.Error("Choose a saved voice.")
+    pacing.remove_profile(voice)
+    return pacing_status(voice)
+
+
 def clone_roles(project):
     return gr.update(choices=_roles(_segs(project)))
 
@@ -1971,6 +2053,22 @@ def build_ui() -> gr.Blocks:
                         c_compare = gr.Button("Compare engines")
                         with gr.Row():
                             cmp_f5 = gr.Audio(label="F5-TTS"); cmp_cb = gr.Audio(label="Chatterbox"); cmp_qw = gr.Audio(label="Qwen3-TTS")
+                with gr.Accordion("Pacing: measure this narrator's pauses from their audiobook", open=False):
+                    gr.Markdown("Where a voice pauses (after sentences, commas, paragraphs, inside speech) is a large part of how it sounds. Give the "
+                                "recording the voice was made from and its ebook; the pauses are measured, matched to the text, and saved with the "
+                                "voice. Books narrated by that voice then use its own pacing; voices without a profile use the default.")
+                    with gr.Row():
+                        pc_voice = gr.Dropdown(label="Saved voice", choices=vlib.list_voices(), scale=2)
+                        pc_m4b = gr.Textbox(label="Audiobook file (.m4b), full path", scale=3)
+                        pc_epub = gr.Textbox(label="Its ebook (.epub), full path", scale=3)
+                    with gr.Row():
+                        pc_windows = gr.Number(value=4, precision=0, label="Stretches to measure (spread through the book)", scale=2)
+                        pc_minutes = gr.Number(value=30, label="Minutes per stretch (about 2.4 min of CPU per min)", scale=2)
+                        pc_start = gr.Button("Measure this narrator", variant="primary", scale=1)
+                        pc_remove = gr.Button("Remove the profile", scale=1)
+                    pc_status = gr.Markdown()
+                    pc_tbl = gr.Dataframe(value=pacing_table(""), interactive=False, wrap=True)
+                    pc_timer = gr.Timer(5)
                 gr.Markdown("### Extra")
                 with gr.Accordion("Make a Kokoro voice from a recording (a voice pack that works natively in Kokoro)", open=False):
                     gr.Markdown("Kokoro can't clone from audio by itself, so this *searches* for a Kokoro voice whose speech scores as "
@@ -2113,6 +2211,11 @@ def build_ui() -> gr.Blocks:
         c_load.click(clone_load, lib_dd, [c_audio, c_text, c_name, c_notes] + sliders + [c_exag, c_cfgw, c_status])
         c_del.click(clone_delete, lib_dd, [lib_dd, c_status])
         c_roles.click(clone_roles, project, lib_role)
+        lib_dd.change(lambda: gr.update(choices=vlib.list_voices()), None, pc_voice)          # a voice just saved or deleted shows up here too
+        pc_start.click(pacing_start, [pc_voice, pc_m4b, pc_epub, pc_windows, pc_minutes], [pc_status, pc_tbl])
+        pc_remove.click(pacing_remove, pc_voice, [pc_status, pc_tbl])
+        pc_voice.change(pacing_status, pc_voice, [pc_status, pc_tbl])
+        pc_timer.tick(pacing_status, pc_voice, [pc_status, pc_tbl])
         c_assign.click(clone_assign, [project, lib_dd, lib_role, lib_engine], c_status)
         c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_qw, c_status])
     return ui

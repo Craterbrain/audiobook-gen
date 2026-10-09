@@ -1,5 +1,6 @@
 """python -m audiobook_gen {extract,parse,lexicon,synth,assemble,run} ..."""
 import argparse
+import time
 import json
 import re
 from pathlib import Path
@@ -33,7 +34,7 @@ def _printer():
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="audiobook_gen")
-    p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "rank", "synth", "qc", "refine", "assemble", "run"])
+    p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "rank", "synth", "qc", "refine", "pacing", "assemble", "run"])
     p.add_argument("input", help=".epub or .txt")
     p.add_argument("--work", help="working dir (default work/<name>)")
     p.add_argument("--config", default=ROOT / "config.yaml")
@@ -54,6 +55,9 @@ def main(argv=None):
     p.add_argument("--llm-model", default="local")
     p.add_argument("--cover"); p.add_argument("--title"); p.add_argument("--author")
     p.add_argument("--out", help="output .m4b path")
+    p.add_argument("--m4b", help="pacing: the audiobook to measure"); p.add_argument("--epub", help="pacing: its ebook")
+    p.add_argument("--voice", help="pacing: the saved voice to keep the profile with")
+    p.add_argument("--windows", type=int, default=4); p.add_argument("--minutes", type=float, default=30); p.add_argument("--threads", type=int, default=6)
     a = p.parse_args(argv)
 
     cfg, work = _cfg(a.config), _work(a)
@@ -126,6 +130,24 @@ def main(argv=None):
         elif step == "synth":
             from .synth import synthesize
             synthesize(work, cfg, only)
+        elif step == "pacing":
+            from . import pacing
+            if not (a.m4b and a.epub and a.voice):
+                raise SystemExit("pacing needs --m4b, --epub and --voice")
+            state = ROOT / "work" / "pacing" / f"{a.voice}.json"
+            state.parent.mkdir(parents=True, exist_ok=True)
+
+            def say(msg: str, st: str = "running"):
+                print(msg, flush=True)
+                state.write_text(json.dumps({"state": st, "message": msg, "time": time.strftime("%H:%M:%S")}))
+            try:
+                say("starting")
+                table = pacing.measure_profile(a.m4b, a.epub, a.windows, a.minutes, a.threads, say)
+                pacing.save_profile(a.voice, table, f"{Path(a.m4b).name}")
+                say(f"done: {table['records']} pauses measured; profile saved with the voice “{a.voice}”", "done")
+            except Exception as e:
+                say(f"failed: {e}", "failed")
+                raise
         elif step == "refine":
             from . import jobqueue, refine
             jobqueue.lease_take("the language pass")             # a book being made steps aside while the model is on the GPU
