@@ -1221,7 +1221,7 @@ def test_a_chunk_cut_mid_phrase_is_not_followed_by_a_sentence_pause(tmp_path):
     sr = 24000
     for n in "ab":
         sf.write(tmp_path / f"{n}.wav", np.full(sr, 0.1, np.float32), sr)
-    cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60}
+    cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60, "pacing_style": "fixed"}
     seg = [{"id": "s", "text": "x", "kind": "narration", "para_start": True}]
     clips = {"s": ["a.wav", "b.wav"]}
     cut = build_chapter(seg, clips, tmp_path, cfg, {"a.wav": {"text": "longitude one hundred and one", "cut": "space"}, "b.wav": {"text": "degrees west."}})
@@ -1244,3 +1244,40 @@ def test_a_finished_book_is_sent_while_the_next_one_is_being_made(tmp_path, monk
     r = R(poll=0.2, foreign=lambda: "", sender=lambda d, p: sent.append(p) or True, send_every=1.0)
     r.step()                                   # makes "Running"; delivery of "Finished" must happen during it, not only before it
     assert sent and [j for j in jq.load() if j["id"] == a["id"]][0]["sent"]
+
+
+def test_narrator_style_pauses_follow_the_measured_spread():
+    import numpy as np
+    from audiobook_gen.assemble import draw_pause, narrator_pacing
+    table = narrator_pacing()
+    assert {"sentence_narration", "sentence_dialogue", "paragraph", "comma_narration", "comma_dialogue", "before_tag", "speaker_change"} <= set(table)
+    draw = lambda kind, n=3000: np.array([draw_pause(kind, f"clip{i}.wav", table) for i in range(n)])
+    narr, dial = draw("sentence_narration"), draw("sentence_dialogue")
+    assert 640 <= np.median(narr) <= 780 and np.median(dial) < np.median(narr) - 80          # speech sentences are paused shorter
+    assert (draw("comma_dialogue") < 100).mean() > (draw("comma_narration") < 100).mean() > 0.2    # many commas get almost no pause
+    assert np.median(draw("before_tag")) < 100                                                      # a quote runs straight into its tag
+    assert 650 <= np.median(draw("paragraph")) <= 850
+    assert all(x >= 40 for x in draw("before_tag", 500))                                            # never so short it would crossfade
+    assert draw_pause("sentence_narration", "a.wav", table) == draw_pause("sentence_narration", "a.wav", table)      # same clip, same pause
+    assert draw_pause("no_such_kind", "a.wav", table) is None
+
+
+def test_narrator_style_chooses_the_kind_from_speech_or_narration(tmp_path, monkeypatch):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import assemble
+    sr = 24000
+    for n in "abc":
+        sf.write(tmp_path / f"{n}.wav", np.full(sr, 0.1, np.float32), sr)
+    asked = []
+    monkeypatch.setattr(assemble, "draw_pause", lambda kind, key, table=None: asked.append(kind) or 100)
+    monkeypatch.setattr(assemble, "narrator_pacing", lambda: {"x": 1})
+    p = {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30}
+    cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 60}
+    segs = [{"id": "s1", "text": "x", "kind": "dialogue", "para_start": True}, {"id": "s2", "text": "x", "kind": "narration", "para_start": False}]
+    meta = {"a.wav": {"text": "Hello.", "cut": "end"}, "b.wav": {"text": "x"}, "c.wav": {"text": "y"}}
+    assemble.build_chapter(segs[:1] + [{**segs[0], "id": "s3"}], {"s1": ["a.wav", "b.wav"], "s3": ["c.wav"]}, tmp_path, cfg, meta)
+    assert asked == ["sentence_dialogue", "paragraph"]                       # a join inside speech, then a new paragraph
+    asked.clear()
+    meta["a.wav"] = {"text": "Hello,", "cut": "end"}
+    assemble.build_chapter([segs[0], segs[1]], {"s1": ["a.wav"], "s2": ["b.wav"]}, tmp_path, cfg, meta)
+    assert asked == ["before_tag"]                                           # speech running into its narration tag

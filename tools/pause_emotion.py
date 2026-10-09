@@ -19,11 +19,13 @@ CACHE = ROOT / "work" / "_m4b_cache"
 SENT = re.compile(r"(?<=[.!?…])[\"”’')\]]*\s+")
 
 
-def words_for(m4b: str, start: float, end: float, threads: int) -> list:
+def words_for(m4b: str, start: float, end: float, threads: int, cached_only: bool = False) -> list | None:
     key = hashlib.sha1(f"{m4b}|{start:.0f}|{end:.0f}".encode()).hexdigest()[:12]
     f = CACHE / f"asr_{key}.json"
     if f.exists():
         return json.loads(f.read_text())
+    if cached_only:
+        return None
     import soundfile as sf
     import torch
     from transformers import pipeline
@@ -39,11 +41,13 @@ def words_for(m4b: str, start: float, end: float, threads: int) -> list:
     return words
 
 
-def window_records(m4b: str, idx: dict, start: float, end: float, threads: int) -> list[dict]:
+def window_records(m4b: str, idx: dict, start: float, end: float, threads: int, cached_only: bool = False) -> list[dict]:
     """One record per matched word boundary: its pause (ms), the book's separator, the sentence before and after, and whether it is speech."""
     import soundfile as sf
     from audiobook_gen import m4b as m4blib, sync
-    words = words_for(m4b, start, end, threads)
+    words = words_for(m4b, start, end, threads, cached_only)
+    if words is None:
+        return []
     wav = m4blib.extract_wav(m4b, start, end, 16000, CACHE / "pe_tmp.wav")
     audio, sr = sf.read(wav, dtype="float32")
     wav.unlink(missing_ok=True)
@@ -122,6 +126,7 @@ def main() -> None:
     ap.add_argument("--m4b", required=True); ap.add_argument("--epub", required=True)
     ap.add_argument("--windows", type=int, default=4); ap.add_argument("--minutes", type=float, default=30)
     ap.add_argument("--threads", type=int, default=6)
+    ap.add_argument("--cached-only", action="store_true", help="use only stretches whose transcript is already cached")
     ap.add_argument("--out", default=str(ROOT / "work" / "pause_emotion.json"))
     a = ap.parse_args()
     from audiobook_gen import emotion, m4b as m4blib, sync
@@ -134,7 +139,7 @@ def main() -> None:
         start = ch["start"] + 60
         end = min(ch["end"], start + a.minutes * 60)
         print(f"window: chapter {ch['index']} {(end - start) / 60:.0f} min", flush=True)
-        recs += window_records(a.m4b, idx, start, end, a.threads)
+        recs += window_records(a.m4b, idx, start, end, a.threads, a.cached_only)
         print(f"  records so far: {len(recs)}", flush=True)
     print("labelling the sentences with the emotion classifier...", flush=True)
     P = emotion.probabilities([r["before"][:600] or "." for r in recs])

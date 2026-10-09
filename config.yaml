@@ -14,6 +14,8 @@ voices:
   Jews:             {engine: kokoro, voice: bm_daniel}
   # Zero-shot clone example (uncomment after adding files to voices/):
   # Jesus: {engine: f5, ref_audio: voices/jesus.wav, ref_text: "transcript of the clip"}
+# pacing_style: narrator draws every pause from a measured narrator's spread (data/narrator_pacing.json); fixed uses the numbers below as they are
+pacing_style: narrator
 pacing_ms:
   sentence: 350
   split: 30          # after a chunk cut mid-phrase (very long sentences)

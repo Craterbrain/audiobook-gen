@@ -1,0 +1,96 @@
+{
+ "about": "Pauses between spoken units measured on one professional narrator (about 90 minutes of audio matched to the book text). Numbers only. Refit with tools/fit_pacing.py.",
+ "kinds": {
+  "sentence_narration": {
+   "n": 344,
+   "short_share": 0.032,
+   "median_ms": 710,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 6.5609,
+   "sigma": 0.186,
+   "lo_ms": 499,
+   "hi_ms": 960
+  },
+  "sentence_dialogue": {
+   "n": 173,
+   "short_share": 0.22,
+   "median_ms": 550,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 6.1868,
+   "sigma": 0.6069,
+   "lo_ms": 110,
+   "hi_ms": 900
+  },
+  "paragraph": {
+   "n": 407,
+   "short_share": 0.015,
+   "median_ms": 760,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 6.6184,
+   "sigma": 0.2381,
+   "lo_ms": 450,
+   "hi_ms": 1140
+  },
+  "comma_narration": {
+   "n": 422,
+   "short_share": 0.396,
+   "median_ms": 315,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 6.1764,
+   "sigma": 0.5129,
+   "lo_ms": 130,
+   "hi_ms": 884
+  },
+  "comma_dialogue": {
+   "n": 193,
+   "short_share": 0.528,
+   "median_ms": 70,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 6.0093,
+   "sigma": 0.5274,
+   "lo_ms": 110,
+   "hi_ms": 739
+  },
+  "before_tag": {
+   "n": 166,
+   "short_share": 0.837,
+   "median_ms": 0,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 4.887,
+   "sigma": 0.2515,
+   "lo_ms": 100,
+   "hi_ms": 220
+  },
+  "speaker_change": {
+   "n": 75,
+   "short_share": 0.04,
+   "median_ms": 720,
+   "short_range_ms": [
+    20,
+    100
+   ],
+   "mu": 6.5426,
+   "sigma": 0.2973,
+   "lo_ms": 391,
+   "hi_ms": 1079
+  }
+ }
+}

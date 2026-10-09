@@ -44,39 +44,87 @@ def join(a: np.ndarray, b: np.ndarray, sr: int, pause_ms: int, xfade_ms: int) ->
     return np.concatenate([a[:-n], mid, b[n:]])
 
 
+PACING_FILE = Path(__file__).resolve().parent.parent / "data" / "narrator_pacing.json"
+_PACING = None
+MIN_PAUSE_MS = 40          # below this the join would overlap-crossfade the two clips instead of leaving a gap
+
+
+def narrator_pacing() -> dict:
+    """The measured pause table (data/narrator_pacing.json): kind -> share of almost-no pauses and a log-normal fit of the rest."""
+    global _PACING
+    if _PACING is None:
+        try:
+            _PACING = json.loads(PACING_FILE.read_text())["kinds"]
+        except (OSError, ValueError, KeyError):
+            _PACING = {}
+    return _PACING
+
+
+def draw_pause(kind: str, key: str, table: dict | None = None) -> int | None:
+    """One pause (ms) for a boundary of this kind, drawn from the narrator's measured spread. The draw is seeded by `key` (the clip
+    that follows), so rebuilding a book gives the same pauses. None if the table has nothing for this kind."""
+    import math
+    import random
+    import zlib
+    e = (table if table is not None else narrator_pacing()).get(kind)
+    if not e:
+        return None
+    rng = random.Random(zlib.crc32(f"{key}|{kind}".encode()))
+    if "mu" not in e or rng.random() < e["short_share"]:
+        return max(MIN_PAUSE_MS, int(rng.uniform(*e["short_range_ms"])))
+    z = max(-2.0, min(2.0, rng.gauss(0, 1)))
+    return max(MIN_PAUSE_MS, int(min(e["hi_ms"], max(e["lo_ms"], math.exp(e["mu"] + e["sigma"] * z)))))
+
+
+def chunk_join(prev: dict | str | None, p: dict) -> tuple[str, int]:
+    """How the chunk before ended -- "end" (a finished sentence), "comma" (a long sentence cut at a comma or dash) or "space" (cut
+    mid-phrase) -- and the fixed pause for it. The splitter's record ("cut" in clips_meta.json) says it exactly; without it the
+    ending of the text decides."""
+    kind = prev.get("cut") if isinstance(prev, dict) else None
+    if kind not in ("end", "comma", "space"):
+        t = ((prev.get("text") if isinstance(prev, dict) else prev) or "").rstrip().rstrip("\"”’')]")
+        kind = "end" if (not t or t.endswith((".", "!", "?", "…"))) else "comma" if t.endswith((",", ";", ":", "—", "–", "-")) else "space"
+    return kind, {"end": p["sentence"], "comma": p.get("continuation", 140), "space": p.get("split", 30)}[kind]
+
+
 def chunk_pause(prev: dict | str | None, p: dict) -> int:
-    """The pause after a chunk. `prev` is its record from clips_meta.json: how the splitter ended it ("cut") says it exactly. A chunk
-    that ended a sentence gets the sentence pause; one cut at a comma or dash a short one; one cut in the middle of a phrase (a very long
-    sentence) hardly any, so it does not sound like a stop. Without the record the ending of its text decides."""
-    if isinstance(prev, dict) and prev.get("cut"):
-        return {"end": p["sentence"], "comma": p.get("continuation", 140), "space": p.get("split", 30)}.get(prev["cut"], p["sentence"])
-    t = ((prev.get("text") if isinstance(prev, dict) else prev) or "").rstrip().rstrip("\"”’')]")
-    if not t or t.endswith((".", "!", "?", "…")):
-        return p["sentence"]
-    if t.endswith((",", ";", ":", "—", "–", "-")):
-        return p.get("continuation", 140)
-    return p.get("split", 30)
+    return chunk_join(prev, p)[1]
 
 
 def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, texts: dict | None = None) -> np.ndarray:
-    """Chunks within a segment get a pause that depends on how the chunk before ended (when clips_meta.json is known, `texts`:
-    file -> its record), else the sentence pause; segments get paragraph / speaker-change pauses."""
+    """Join a chapter's clips. With pacing_style "narrator" (the default) every pause is drawn from a measured narrator's spread for that
+    kind of boundary (sentence end in narration or in speech, comma, before a dialogue tag, paragraph, change of speaker); with "fixed"
+    the numbers in pacing_ms are used as they are. `texts` (clips_meta.json: file -> record) says how each chunk ended."""
     sr, p, xf = cfg["sample_rate"], cfg["pacing_ms"], cfg["crossfade_ms"]
+    table = narrator_pacing() if cfg.get("pacing_style", "narrator") == "narrator" else {}
     out, prev = None, None
+
+    def pick(kind: str, key: str, fixed: int) -> int:
+        d = draw_pause(kind, key, table) if table else None
+        return fixed if d is None else d
     for seg in segs:
+        speech = "dialogue" if seg.get("kind") == "dialogue" else "narration"
         for ci, f in enumerate(clips.get(seg["id"], [])):
             a = _load(clip_dir / f, sr)
             if out is None:
                 out = np.concatenate([np.zeros(int(sr * p["chapter_start"] / 1000), np.float32), a])
                 continue
             if ci:
-                pause = chunk_pause((texts or {}).get(clips[seg["id"]][ci - 1], ""), p) if texts else p["sentence"]
+                if texts:
+                    cut, fixed = chunk_join(texts.get(clips[seg["id"]][ci - 1], ""), p)
+                    pause = fixed if cut == "space" else pick(f"{'sentence' if cut == 'end' else 'comma'}_{speech}", f, fixed)
+                else:
+                    pause = p["sentence"]
             elif prev and prev["text"].rstrip().endswith((",", ";", ":", "—", "–", "-")):
-                pause = p.get("continuation", 140)    # the sentence carries on: "Upon my word," / cried the old man,
+                after_quote = prev.get("kind") == "dialogue" and seg.get("kind") == "narration"
+                pause = pick("before_tag" if after_quote else f"comma_{'dialogue' if prev.get('kind') == 'dialogue' else 'narration'}",
+                             f, p.get("continuation", 140))
             elif prev and prev.get("kind") == "dialogue" and seg.get("kind") == "narration" and len(seg["text"]) < 90:
-                pause = p.get("tag", 120)             # a quote followed by its tag: "In an hour?" / inquired Danglars
+                pause = pick("before_tag", f, p.get("tag", 120))      # a quote followed by its tag: "In an hour?" / inquired Danglars
+            elif seg.get("para_start"):
+                pause = pick("paragraph", f, p["paragraph"])
             else:
-                pause = p["paragraph"] if seg.get("para_start") else p["speaker_change"]
+                pause = pick("speaker_change", f, p["speaker_change"])
             out = join(out, a, sr, pause, xf)
         prev = seg
     return out if out is not None else np.zeros(sr, np.float32)
