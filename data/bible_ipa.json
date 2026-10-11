@@ -7,14 +7,15 @@
    "ford1900": "S. V. R. Ford, Pronouncing Vocabulary of Scripture Proper Names (1900), public domain; stress and syllables from the book, vowels from rules (approximate)",
    "claude": "written by Claude from conventional American English readings; unreviewed, check by ear",
    "alias": "same name spelled solid or hyphenated in another text; shares its pronunciation",
-   "guess": "espeak via misaki; unreviewed"
+   "guess": "espeak via misaki; unreviewed",
+   "user": "typed by you; overrides everything"
   },
   "counts": {
    "claude": 3244,
    "wiktionary": 360,
    "alias": 160,
-   "user": 8,
-   "ipa-dict": 249,
+   "user": 9,
+   "ipa-dict": 248,
    "wikipron": 39
   },
   "names": 4060,
@@ -8650,8 +8651,8 @@
    }
   },
   "Cephas": {
-   "ipa": "ˈsɛfəz",
-   "source": "ipa-dict:en_US",
+   "ipa": "ˈsiːfəs",
+   "source": "user",
    "count": 15,
    "first": "John 1:42",
    "texts": {

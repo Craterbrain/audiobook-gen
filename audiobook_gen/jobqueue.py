@@ -36,6 +36,7 @@ STOPPED = QUEUE / "stopped"                      # you stopped the runner on pur
 SERVICE = "audiobook-queue.service"
 SETTINGS = QUEUE / "settings.json"
 SEND_EVERY = 120                                 # seconds between tries while the phone is out of reach
+ACTIVITY = QUEUE / "gpu_activity.json"           # what a process other than a book being made is doing with the GPU, for the `current` reply
 GUI_LOCK = QUEUE / "gui_generate.lock"          # reserved: anything in the app that holds the GPU for long writes its pid here and the queue waits
 
 STALL = 600           # seconds without a new clip before the job is restarted
@@ -354,7 +355,7 @@ def wait_for_reply(since: float, timeout: float = 3600, every: float = 5.0) -> s
                     seen.add(m.get("id"))
                     text = (m.get("message") or "").strip()
                     cmd = text.lower().strip(".!?")
-                    if m.get("title") or m.get("attachment") or not text or cmd in COMMANDS or cmd in ("status", "finished") or re.fullmatch(r"now\s+#?\d+", cmd):
+                    if m.get("title") or m.get("attachment") or not text or cmd in COMMANDS or cmd in ("status", "finished") or re.fullmatch(r"now\s+#?\d+", cmd) or SEND_RE.fullmatch(cmd) or parse_respell(text) or parse_good(text):
                         continue
                     if m.get("time", 0) > since:
                         return text
@@ -501,6 +502,61 @@ def lease_idle() -> float:
 def lease_give_back() -> None:
     if lease_mine():
         GUI_LOCK.unlink(missing_ok=True)
+    activity_clear()
+
+
+def activity_set(what: str, book: str = "", detail: str = "") -> None:
+    """This process is working on the GPU outside of making a book (the name check, text preparation, ...): say what, for the `current` reply."""
+    try:
+        QUEUE.mkdir(parents=True, exist_ok=True)
+        ACTIVITY.write_text(json.dumps({"pid": os.getpid(), "what": what, "book": book, "detail": detail,
+                                        "since": time.strftime("%H:%M"), "at": time.time()}))
+    except OSError:
+        pass
+
+
+def activity_detail(detail: str) -> None:
+    """Update what this process is doing (a few words: 'judging clips 301/793'). Only if it set the activity itself."""
+    try:
+        cur = json.loads(ACTIVITY.read_text())
+        if cur.get("pid") == os.getpid():
+            cur.update(detail=detail, at=time.time())
+            ACTIVITY.write_text(json.dumps(cur))
+    except (OSError, ValueError):
+        pass
+
+
+def activity_clear() -> None:
+    try:
+        if json.loads(ACTIVITY.read_text()).get("pid") == os.getpid():
+            ACTIVITY.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
+def activity_get() -> dict:
+    """What another process is doing now ({} if nothing, or if the process is gone)."""
+    try:
+        cur = json.loads(ACTIVITY.read_text())
+        if _alive(int(cur["pid"])):
+            return cur
+        ACTIVITY.unlink(missing_ok=True)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return {}
+
+
+def gpu_hold_text() -> str:
+    """A line for the `current` reply when anything other than a book being made has the GPU: a lease (the app, the name check, text
+    preparation) and/or a process that says what it is doing. "" when nobody does."""
+    owner, act = lease_holder(), activity_get()
+    if not owner and not act:
+        return ""
+    who = act.get("what") or owner
+    on = f" on {act['book']}" if act.get("book") else ""
+    bits = (f" — {act['detail']}" if act.get("detail") else "") + (f" (since {act['since']})" if act.get("since") else "")
+    held = f" (the GPU is lent to {owner})" if owner and owner != who else ""
+    return f"🔒 {who[:1].upper() + who[1:]}{on} is using the GPU{bits}{held}."
 
 
 def _synth_running() -> bool:
@@ -654,7 +710,11 @@ class Runner:
         cmd = [sys.executable, "-m", "audiobook_gen", "qc", "x", "--work", job["work"], "--config", job["config"]]
         return cmd + (["--chapters", ",".join(map(str, job["chapters"]))] if job.get("chapters") else [])
 
+    def names_cmd(self, job: dict) -> list[str]:
+        return [sys.executable, "-m", "audiobook_gen", "names", "x", "--work", job["work"], "--config", job["config"]]
+
     def assemble_cmd(self, job: dict) -> list[str]:
+        job = next((j for j in load() if j["id"] == job["id"]), job)       # title, author and cover may have been changed while the clips were being made
         cmd = [sys.executable, "-m", "audiobook_gen", "assemble", "x", "--work", job["work"], "--config", job["config"],
                "--title", job["title"], "--author", job.get("author", ""), "--out", job["out"]]
         if job.get("cover"):
@@ -710,8 +770,6 @@ class Runner:
                 notify(f"Finished “{job['title']}”{qc}. {len(left)} more in the queue.", "Book finished", tags=["white_check_mark"])
             else:
                 notify(f"Finished “{job['title']}”{qc}. The queue is empty.", "Queue finished", tags=["tada"])
-            if not cur.get("send_to"):
-                self._cleanup(cur)
             return
         notify(f"“{job['title']}” failed: {cur.get('note', '')}", "Book failed", priority="high", tags=["x"])
         if streak >= FAIL_HALT:
@@ -721,14 +779,6 @@ class Runner:
                 pass
             notify(f"{streak} books in a row failed, so the queue paused itself. Open the app and press Resume once the cause is fixed.",
                    "Queue paused", priority="urgent", tags=["warning"])
-
-    def _cleanup(self, job: dict) -> None:
-        """If asked to (a setting), delete a finished and delivered book's clips and chapter files to free disk space."""
-        if not settings().get("clean_after_done"):
-            return
-        import shutil
-        for sub in ("clips", "chapters"):
-            shutil.rmtree(Path(job["work"]) / sub, ignore_errors=True)
 
     def _tick(self, job: dict, seconds: float) -> None:
         """Add time a stage spent running to the job's active time (waiting for its window or the GPU is not counted)."""
@@ -788,10 +838,10 @@ class Runner:
                 return "ok" if code == 0 else "failed"
             if stage != "synth":
                 idle = time.time() - stage_activity(job)
-                if idle > (QC_STALL if stage == "qc" else ASSEMBLE_STALL) * self.stall_scale:
+                if idle > (QC_STALL if stage in ("qc", "names") else ASSEMBLE_STALL) * self.stall_scale:
                     _kill_group(proc)
                     return "stalled"
-            if stage in ("synth", "qc") and lease_holder():                    # the app asked for the GPU: give it up, come back later
+            if stage in ("synth", "qc", "names") and lease_holder():                    # the app asked for the GPU: give it up, come back later
                 _kill_group(proc)
                 return "lease"
             if stage == "synth":
@@ -831,7 +881,6 @@ class Runner:
                 update(j["id"], send_try=time.time(), note="sending to your phone")
                 if self.sender(j["send_to"], j["out"]):
                     update(j["id"], sent=time.strftime(FMT), note="sent to your phone")
-                    self._cleanup(j)
                 else:
                     update(j["id"], note="waiting for your phone to be reachable (or to take the file); trying again")
 
@@ -841,14 +890,27 @@ class Runner:
             self._sender_thread = threading.Thread(target=self._deliver, daemon=True)
             self._sender_thread.start()
 
+    def _names_wanted(self, job: dict) -> bool:
+        """The name check is for Chatterbox books (it listens for the IPA of the names); config `name_check: false` turns it off."""
+        try:
+            cfg = yaml.safe_load(Path(job["config"]).read_text()) or {}
+        except Exception:
+            return False
+        if cfg.get("name_check", True) is False:
+            return False
+        meta = json.loads((Path(job["work"]) / "clips_meta.json").read_text())
+        return any(i.get("engine") == "chatterbox" for i in meta.values()) and (Path(job["work"]) / "lexicon.json").exists()
+
     def run_job(self, job: dict) -> None:
         fresh = next((j for j in load() if j["id"] == job["id"]), None)
         if fresh is None or fresh["status"] not in ACTIVE:              # held or cancelled in the instant before it started
             return
         update(job["id"], status="running", started=job.get("started") or time.strftime(FMT), note="")
-        for stage, cmd in (("synth", self.synth_cmd(job)), ("qc", self.qc_cmd(job)), ("assemble", self.assemble_cmd(job))):
-            if stage == "qc" and not (Path(job["work"]) / "clips_meta.json").exists():
+        for stage, cmd in (("synth", self.synth_cmd(job)), ("qc", self.qc_cmd(job)), ("names", self.names_cmd(job)), ("assemble", self.assemble_cmd(job))):
+            if stage in ("qc", "names") and not (Path(job["work"]) / "clips_meta.json").exists():
                 continue                                           # made before the checker existed: nothing to check against
+            if stage == "names" and not self._names_wanted(job):
+                continue
             while True:
                 cur = next((j for j in load() if j["id"] == job["id"]), job)
                 if cur["status"] in ("cancelled", "held"):
@@ -856,7 +918,7 @@ class Runner:
                 if stage == "synth" and not in_window(job.get("window", ""), self.now()):
                     update(job["id"], status="paused", note="waiting for its daily window")
                     return
-                update(job["id"], note={"synth": "making the speech", "qc": "checking the clips", "assemble": "building the audiobook"}[stage])
+                update(job["id"], note={"synth": "making the speech", "qc": "checking the clips", "names": "checking how names are pronounced", "assemble": "building the audiobook"}[stage])
                 proc = self._spawn(cmd, job)
                 result = self._watch(job, proc, stage)
                 if result == "ok":
@@ -874,8 +936,9 @@ class Runner:
                 if result == "window":
                     update(job["id"], status="paused", note="paused: outside its daily window (finished clips are kept)")
                     return
-                if stage == "qc":                                # a safeguard must never stop the book: build it anyway
-                    update(job["id"], qc="the check could not finish; see the log", note="quality check skipped")
+                if stage in ("qc", "names"):                     # a safeguard must never stop the book: build it anyway
+                    update(job["id"], note=f"{'quality' if stage == 'qc' else 'name'} check skipped",
+                           **({"qc": "the check could not finish; see the log"} if stage == "qc" else {}))
                     break
                 if result in ("recycle", "slow"):                # a planned fresh start, not a failure: finished clips are kept
                     update(job["id"], note=("restarted the speech process to keep it fast" if result == "recycle"
@@ -936,8 +999,79 @@ class Runner:
 
 # ---------- questions over ntfy ----------
 COMMANDS = {"current": "what is being made now", "queue": "the waiting books and when each should be done",
-            "done": "the finished books", "now <number>": "start that book from `queue` right away", "stop": "stop the book being made",
+            "done": "the finished books, numbered", "send <number or name>": "send a finished book from `done` to your phone", "good <name>": "leave a name out of the name check (it sounds right)", "respell <name> <spelling>": "suggest a spelling for a name (also Name|spelling); the name check tries it", "now <number>": "start that book from `queue` right away", "stop": "stop the book being made",
             "help": "this list"}
+
+
+SEND_RE = re.compile(r"send(?:\s+(.*))?")
+_RESPELL_LINE = re.compile(r"^\s*(?:respell\s+)?([^\s|=→>:]+?)\s*(\||=|→|->|:|\s)\s*([^\s|=→>:]+)\s*$", re.I)
+
+
+def parse_respell(text: str) -> list[tuple[str, str]]:
+    """Respelling suggestions in a message: `respell Achaia Uhkiah`, `Achaia|Uhkiah`, `Achaia = Uhkiah` or `Achaia → Uhkiah`, one per line.
+    A line without the word `respell` needs a separator (| = → ->) so that ordinary messages are never mistaken for one."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _RESPELL_LINE.match(line)
+        if not m:
+            return []
+        has_word = bool(re.match(r"\s*respell\s", line, re.I))
+        if has_word or m.group(2).strip():
+            out.append((m.group(1), m.group(3)))
+        else:
+            return []
+    return out
+
+
+def finished_list() -> list[dict]:
+    """The books the `done` reply shows, in its numbering: the latest twelve finished or failed, the newest first (number 1)."""
+    done = [j for j in load() if j["status"] in ("done", "failed")]
+    done.sort(key=lambda j: j.get("finished") or "", reverse=True)                  # stable: the same finish time keeps the queue's order
+    return done[:12]
+
+
+def send_book(arg: str, spawn=None) -> str:
+    """`send <number or name>`: share a finished book from the `done` list to the phone. `arg` is a number from `done`, several numbers
+    ("1 3"), or part of a title. Answers at once; the sending runs on its own thread and a second message says how it went."""
+    arg = (arg or "").strip().strip("#")
+    books = finished_list()
+    if not arg:
+        return "Send `send <number>` with a number from `done`, or part of the title."
+    if re.fullmatch(r"#?\d+(?:[\s,]+#?\d+)*", arg):
+        picks = []
+        for n in re.findall(r"\d+", arg):
+            if not 1 <= int(n) <= len(books):
+                return f"There is no number {n}; send `done` to see the list."
+            picks.append(books[int(n) - 1])
+    else:
+        picks = [j for j in books if arg.lower() in j["title"].lower()]
+        if len(picks) > 1:
+            return "More than one book matches: " + "; ".join(f"“{j['title'][:40]}”" for j in picks) + ". Use its number from `done`."
+        if not picks:
+            return f"No finished book matches “{arg}”; send `done` to see the list."
+    out = []
+    for j in picks:
+        if j["status"] != "done" or not Path(j["out"]).exists():
+            return f"“{j['title']}” has no finished file to send ({j.get('note') or j['status']})."
+        device = j.get("send_to") or default_device()
+        if not device:
+            return "No phone is set up to send to; choose one in the app's queue tab first."
+        out.append((j, device))
+    (spawn or _spawn)(lambda: [_send_one(j, d) for j, d in out])
+    return "Sending " + ", ".join(f"“{j['title'][:40]}”" for j, _ in out) + " to your phone; I will message you when it arrives."
+
+
+def _spawn(fn) -> None:
+    threading.Thread(target=fn, daemon=True).start()
+
+
+def _send_one(job: dict, device: str) -> None:
+    ok = send_file(device, job["out"])
+    if ok:
+        update(job["id"], sent=time.strftime(FMT), note="sent to your phone")
+    notify(f"Sent “{job['title'][:40]}” to your phone." if ok else
+           f"Could not send “{job['title'][:40]}”: the phone is out of reach or did not take the file. Send the command again when it is nearby.",
+           "Audiobook queue", desktop=False)
 
 
 def _when(t) -> str:
@@ -980,14 +1114,56 @@ def stop_active() -> str:
             "Resume it in the app, or send `now <number>`.")
 
 
+_GOOD_RE = re.compile(r"^\s*(?:known\s+good|good)\s+(\S+?)\s*[.!]?\s*$", re.I)
+
+
+def parse_good(text: str) -> str:
+    """`good Derbe` or `known good Derbe`: the name, if some book's lexicon has it (so a message like "good morning" is not taken for one)."""
+    m = _GOOD_RE.match(text or "")
+    if not m:
+        return ""
+    name = m.group(1)
+    for path in (ROOT / "work").glob("*/lexicon.json"):
+        try:
+            for e in json.loads(path.read_text()):
+                if str(e.get("term", "")).lower() == name.lower():
+                    return e["term"]
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def add_respell_suggestions(pairs: list[tuple[str, str]]) -> str:
+    """Save your suggested spellings; the next name check speaks them and adopts one if it sounds clearly better."""
+    from . import namecheck
+    added, kept = [], []
+    for name, spelling in pairs:
+        (added if namecheck.add_hint(name, spelling) else kept).append(f"{name} → {spelling}")
+        namecheck.reopen(name)
+    return ((f"Saved {len(added)} respell suggestion(s): " + "; ".join(added) + ". ") if added else "") + \
+           ((f"Already had: {'; '.join(kept)}. ") if kept else "") + \
+           "The next name check speaks each one, scores it against the name's IPA and uses it if it clearly beats the current spelling."
+
+
 def answer(text: str, now: datetime | None = None) -> str | None:
     """The reply to a message sent to the ntfy topic, or None if it is not one of the commands (other messages are ignored)."""
+    suggestions = parse_respell(text)
+    if suggestions:
+        return add_respell_suggestions(suggestions)
+    good = parse_good(text)
+    if good:
+        from . import namecheck
+        books = namecheck.mark_good_everywhere(good)
+        return f"Marked {good} as known good in {len(books)} book(s): the name check leaves it out from now on. (A respell suggestion for it puts it back.)"
     cmd = (text or "").strip().lower().strip(".!?")
     start = re.fullmatch(r"now\s+#?(\d+)", cmd)
     if start:
         return start_now(int(start.group(1)))
     if cmd == "stop":
         return stop_active()
+    sd = SEND_RE.fullmatch(cmd)
+    if sd:
+        return send_book(sd.group(1) or "")
     if cmd not in COMMANDS and cmd not in ("status", "finished"):
         return None
     cmd = {"status": "current", "finished": "done"}.get(cmd, cmd)
@@ -999,17 +1175,20 @@ def answer(text: str, now: datetime | None = None) -> str | None:
     if cmd == "current":
         r = now_running()
         why = halted()
+        hold = gpu_hold_text()
+        hold = f"\n{hold}" if hold else ""
         if r:
             end = est["ends"].get(r["id"])
             return (f"Making “{r['title']}”: {r['pct']}% ({r['done']:,} of {r['total']:,} clips)" if r["total"] else f"Making “{r['title']}”: {r['note'] or 'starting'}") \
-                + (f"\nExpected done {_when(end)}" if end else "") + (f"\nStep: {r['note']}" if r["note"] and r["total"] else "") + (f"\n⚠ {why}" if why else "")
+                + (f"\nExpected done {_when(end)}" if end else "") + (f"\nStep: {r['note']}" if r["note"] and r["total"] else "") + (f"\n⚠ {why}" if why else "") + hold
         if why:
-            return f"The queue paused itself: {why}"
+            return f"The queue paused itself: {why}" + hold
         nxt = [j for j in jobs if j["status"] in ("queued", "paused")]
         if nxt:
             j = min(nxt, key=lambda x: next_start(x, now))
-            return f"Nothing is being made right now. Next: “{j['title']}” at {next_start(j, now)}."
-        return "Nothing is being made and nothing is waiting."
+            waiting = f" ({j['note']})" if hold and j.get("note", "").startswith("waiting") else ""
+            return f"Nothing is being made right now. Next: “{j['title']}” at {next_start(j, now)}{waiting}." + hold
+        return ("Nothing is being made and nothing is waiting." if not hold else "No book is being made.") + hold
     if cmd == "queue":
         lines = []
         for i, j in enumerate([j for j in jobs if j["status"] in ACTIVE or j["status"] == "held"], 1):
@@ -1019,12 +1198,12 @@ def answer(text: str, now: datetime | None = None) -> str | None:
         if not lines:
             return "The queue is empty."
         return "\n".join(lines) + (f"\nAll finished about {_when(est['all'])}." + (" (~ = rough: a voice engine has no measured speed yet)" if est["rough"] else "") if est["all"] else "")
-    done = [j for j in jobs if j["status"] in ("done", "failed")]
+    done = finished_list()
     if not done:
         return "Nothing has finished yet."
-    return "\n".join(f"{'✓' if j['status'] == 'done' else '✗'} {j['title'][:38]} — {j.get('finished', '')}"
+    return "\n".join(f"{i}. {'✓' if j['status'] == 'done' else '✗'} {j['title'][:38]} — {j.get('finished', '')}"
                      + (f", {('sent' if j.get('sent') else 'not sent yet') if j.get('send_to') else 'not sent'}" if j["status"] == "done" else f" ({j.get('note', '')[:40]})")
-                     for j in done[-12:])
+                     for i, j in enumerate(done, 1))
 
 
 def listen_ntfy() -> None:

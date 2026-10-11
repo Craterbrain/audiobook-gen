@@ -153,3 +153,14 @@ The queue runner is built to be started and forgotten:
 
 - **Corrections tab.** Every clip of a book is listed with its text, speaker, engine and settings (`clips_meta.json`, written by each speech run). Search for a name or phrase, pick a clip, hear it, change the text or (Chatterbox) emotion, pace and seed, make a new take, and use it. A correction is stored by segment and chunk number in `clip_overrides.json`, so it survives lexicon edits and re-runs; the quality check leaves corrected clips alone. After changing the lexicon, search for the name to see the clips that will change, then press "Rebuild the audiobook": only clips whose words changed are made again.
 - **Borrowing the GPU.** Anything in the app that loads a model (remaking a clip, hearing a voice, finding genders) needs the GPU. If a book is being made, the app asks you to press "Pause the book and use the GPU" first: the book's speech process is stopped (finished clips are kept) and it carries on by itself a few minutes after you stop, or when you press "Give the GPU back to the queue". Reloading takes about 1½ minutes.
+
+
+## Text preparation, name check and extras
+
+* **Prepare** (Book tab, or `python -m audiobook_gen prep`): tick the steps a book needs (lines and speakers, lexicon, IPA, dialect words, language/delivery pass, optional AI speaker tie-break). Generation and the queue refuse a book that has not been prepared (`prep.json`).
+* **Text clean-up** (`textclean.py`, run on every extracted book): small-capital splits (`D OUGLASS`), ALL-CAPS names, stray spaces before punctuation, Gutenberg cruft. Footnotes are read as "Footnote one. …" (`extract._footnotes`).
+* **Spoken section titles, music, covers**: `titles.speak` in the config reads each title aloud; `music.json` in the work folder sets the opening (optionally after a preface), intermission ("bridge") before chosen chapters, and ending.
+* **Name check** (queue stage `names`, `python -m audiobook_gen names`; skip with `name_check: false`): a phoneme recogniser scores each name against its IPA; weak clips are retaken with new seeds, then respelled in staged batches (5, 10, 15) aimed at 80%. Names that already passed are skipped; your respell suggestions can arrive over ntfy. Originals are kept in `clips_before_name_check/`; clips are never deleted automatically.
+* **Dialect and apostrophe words** (`dialect.py`, `data/dialect_ipa*.json`): known sounds are added to the lexicon so the name check can judge them. `tools/dialect_baseline.py` measures whether rewriting them helps (needs a free GPU).
+* **EPUB without audio**: `python -m audiobook_gen epub x --work work/<book> [--out file.epub]`.
+* **ntfy commands**: `current` (including GPU holds), `done` (newest first, 1 = newest), `send <number|name>` (the book's file to the phone), plus the respell-suggestion replies.

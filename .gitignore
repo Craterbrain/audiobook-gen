@@ -47,3 +47,4 @@ nohup.out
 .DS_Store
 books/
 tools/wait_for.py
+*.ogg

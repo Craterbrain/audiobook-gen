@@ -58,9 +58,13 @@ def prepare(path: str, lang: str = "", single: bool = False, walter: bool = Fals
     else:
         cfg["single_voice"] = {"enabled": True, "voice": dict(narrator)}
     lex = build_lexicon(work, lang, None, book["title"], book["author"] or "", lambda f, d: None)
+    if walter:                                              # dialect words with a known sound join the lexicon, for the name check to judge
+        from audiobook_gen import dialect
+        dialect.apply(work)
+        lex = json.loads((work / "lexicon.json").read_text())
     r = {"found": 0, "asked": 0} if walter else fill_lexicon(lex, lang, [], lambda f, d: None, bible=False, offline=False)   # Chatterbox ignores IPA
     for e in lex:                       # Kokoro already reads ordinary words well; a wrong lookup does more harm than good
-        if e.get("kind") != "name" and e.get("source") != "user":
+        if e.get("kind") not in ("name", "dialect") and e.get("source") != "user":
             e["ipa"] = e["respell"] = ""
     (work / "lexicon.json").write_text(json.dumps(lex, indent=2, ensure_ascii=False))
     (work / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
@@ -76,6 +80,9 @@ def prepare(path: str, lang: str = "", single: bool = False, walter: bool = Fals
             jobqueue.lease_give_back()
         info["question_marks_added"] = len(rep["fixes"])
         (work / "prepared.json").write_text(json.dumps(info, indent=1, ensure_ascii=False))
+    from audiobook_gen import prep                         # the Generate tab and the queue ask for this record
+    prep.mark_done(work, ["segments", "lexicon"] + ([] if walter else ["ipa"]) + (["dialect"] if walter else []) + (["language"] if refine_text else []),
+                   source="prepare_books")
     print(f"[{slug}] {'multi-voice, ' + str(len(cast)) + ' characters' if dynamic else 'single narrator'}; lexicon {len(lex)} entries, IPA for {r['found']}/{r['asked']}", flush=True)
     return info
 

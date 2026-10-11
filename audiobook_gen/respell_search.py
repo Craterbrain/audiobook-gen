@@ -46,6 +46,13 @@ def ear():
     return _EAR
 
 
+def _processor():
+    if "p" not in _EAR:
+        from transformers import AutoProcessor
+        _EAR["p"] = AutoProcessor.from_pretrained(REC_MODEL)
+    return _EAR["p"]
+
+
 def free_ear() -> None:
     import gc
 
@@ -73,7 +80,7 @@ def recognize(audio: np.ndarray, sr: int) -> list[str]:
 
 def segment(ipa: str) -> list[str]:
     """IPA string -> phone tokens (longest match against the recognizer's own inventory); stress marks dropped."""
-    vocab = set(ear()["p"].tokenizer.get_vocab())
+    vocab = set(_processor().tokenizer.get_vocab())          # only the phone list is needed: no model on the GPU
     s = re.sub(r"[ˈˌ/‿]", "", ipa)
     out, i = [], 0
     while i < len(s):
@@ -112,9 +119,7 @@ def distance(heard: list[str], target: list[str]) -> float:
     return best / max(1, len(target))
 
 
-def candidates(ipa: str, word: str, limit: int = 60, seed: int = 0) -> list[str]:
-    """Spellings built from the IPA's syllables (every choice list is short, so we sample if it explodes)."""
-    phones = segment(ipa)
+def _slots(phones: list[str]) -> list[list[str]]:
     slots = []
     for p in phones:
         if p in VOWELS:
@@ -123,10 +128,46 @@ def candidates(ipa: str, word: str, limit: int = 60, seed: int = 0) -> list[str]
             slots.append(VOWELS[p.rstrip("ː")][:3])
         else:
             slots.append(CONS.get(p, [p])[:2])
-    combos = ["".join(c) for c in itertools.product(*slots)]
+    return slots
+
+
+def split_phones(phones: list[str], parts: list[str]) -> list[list[str]]:
+    """Share a whole name's phones among the parts of a hyphenated name, in proportion to their letters, moving each cut to the start of a
+    syllable (just before the consonant that comes before a vowel) when one is within two phones."""
+    n, total, acc, cuts = len(phones), sum(len(p) for p in parts) or 1, 0, []
+    isv = lambda ph: ph in VOWELS or ph.rstrip("ː") in VOWELS
+    for part in parts[:-1]:
+        acc += len(part)
+        k = max(1, min(n - 1, round(n * acc / total)))
+        near = [i for i in range(max(1, k - 2), min(n - 1, k + 2) + 1) if not isv(phones[i]) and i + 1 < n and isv(phones[i + 1])]
+        cuts.append(min(near, key=lambda i: abs(i - k)) if near else k)
+    edges = [0, *cuts, n]
+    return [phones[a:b] for a, b in zip(edges, edges[1:])]
+
+
+def candidates(ipa: str, word: str, limit: int = 60, seed: int = 0) -> list[str]:
+    """Spellings built from the IPA's syllables (every choice list is short, so we sample if it explodes). A hyphenated name
+    (Beer-sheba) or a name with an apostrophe inside (M'ling, O'Niel, d'Urville) is spelled part by part, the IPA shared among the
+    parts, and each combination is tried both joined by hyphens (they also steady the voice at the joins) and closed up into one
+    word. The plain spelling, apostrophe and all, is always the first candidate, so a respelling has to beat it."""
+    phones = segment(ipa)
     rng = random.Random(seed)
-    if len(combos) > limit:
-        combos = rng.sample(combos, limit)
+    parts = [x for x in re.split(r"[-'’]", word.lower()) if x]
+    if len(parts) > 1:
+        per = []
+        for part, ph in zip(parts, split_phones(phones, parts)):
+            combos = ["".join(c) for c in itertools.product(*_slots(ph))] if ph else []
+            if len(combos) > 6:
+                combos = rng.sample(combos, 6)
+            per.append(list(dict.fromkeys([part] + [c for c in combos if re.fullmatch(r"[a-z]+", c) and not re.search(r"(.)\1\1", c)])))
+        whole = [list(c) for c in itertools.product(*per)]
+        if len(whole) > limit // 2:
+            whole = rng.sample(whole, limit // 2)
+        out = ["-".join(parts)] + ["-".join(c) for c in whole] + ["".join(c) for c in whole]
+        return list(dict.fromkeys(c for c in out if re.fullmatch(r"[a-z]+(?:-[a-z]+)*", c)))
+    combos = ["".join(c) for c in itertools.product(*_slots(phones))]
+    if len(combos) > limit:                                      # a sample that keeps the most likely spellings first
+        combos = [combos[i] for i in sorted(rng.sample(range(len(combos)), limit))]
     out = [word.lower()] + [c for c in combos if c != word.lower()]
     # no consecutive triple letters, no leftover non-letters
     return list(dict.fromkeys(c for c in out if re.fullmatch(r"[a-z]+", c) and not re.search(r"(.)\1\1", c)))

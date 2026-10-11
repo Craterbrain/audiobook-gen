@@ -371,13 +371,15 @@ def _queue_env(tmp_path, monkeypatch):
     monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue")
     monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
     monkeypatch.setattr(jq, "HEARTBEAT", tmp_path / "queue" / "heartbeat")
-    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED", "SPEECH_LIMIT", "SETTINGS", "HALTED"):   # never touch the real queue's files
+    for name in ("RUNNER_PID", "JOB_PID", "SUPERVISOR_PID", "STOPPED", "SPEECH_LIMIT", "SETTINGS", "HALTED", "ACTIVITY", "GUI_LOCK"):   # never touch the real queue's files
         monkeypatch.setattr(jq, name, tmp_path / "queue" / name.lower())
     sent = []                                                                   # alerts are recorded, never sent
     monkeypatch.setattr(jq, "notify", lambda text, title="", **k: sent.append((title, text)) or True)
     jq.sent_alerts = sent
     work = tmp_path / "book"; work.mkdir()
     (work / "segments.json").write_text("[]")
+    from audiobook_gen import prep
+    prep.mark_done(work)                                                        # a prepared book: the queue tests are about the queue
     return jq, work
 
 
@@ -433,6 +435,8 @@ def _assistant_project(tmp_path):
     (p / "lexicon.json").write_text(json.dumps([{"term": "Weena", "ipa": "", "source": "auto"}]))
     (p / "segments.json").write_text(json.dumps([{"speaker": "Narrator", "kind": "narration", "text": "Hello.", "id": 1, "chapter": 1}]))
     (p / "chapters.json").write_text(json.dumps({"title": "T", "author": "A", "chapters": [{"index": 1, "title": "One", "text": "Hello."}]}))
+    from audiobook_gen import prep
+    prep.mark_done(p)
     return p
 
 
@@ -988,18 +992,18 @@ def test_the_queue_pauses_itself_after_repeated_failures_until_resumed(tmp_path,
     assert jq.halted() == "" and jq.settings()["fail_streak"] == 0
 
 
-def test_a_finished_book_can_free_its_disk_space(tmp_path, monkeypatch):
+def test_a_finished_book_keeps_its_clips(tmp_path, monkeypatch):
     import sys
     jq, work = _queue_env(tmp_path, monkeypatch)
     (work / "clips").mkdir(); (work / "clips" / "a.wav").write_text("x")
     out = tmp_path / "x.m4b"
     jq.add(str(work), "Tidy book", out=str(out))
-    jq.save_settings(clean_after_done=True)
+    jq.save_settings(clean_after_done=True)                       # an old setting must not delete anything any more
     class R(jq.Runner):
         synth_cmd = lambda self, j: [sys.executable, "-c", "print('[progress] 1/1')"]
         assemble_cmd = lambda self, j: [sys.executable, "-c", f"open({str(out)!r}, 'w').write('x')"]
     R(poll=0.1, foreign=lambda: "").step()
-    assert out.exists() and not (work / "clips").exists()
+    assert out.exists() and (work / "clips" / "a.wav").exists()
 
 
 def test_whole_queue_estimate_follows_the_windows(tmp_path, monkeypatch):
@@ -1450,3 +1454,714 @@ def test_wait_for_reply_skips_our_posts_and_the_command_words(monkeypatch):
     assert jq.wait_for_reply(now, timeout=2, every=0.01) == "Option 2"
     monkeypatch.setattr(jq.urllib.request, "urlopen", lambda *a, **k: io.StringIO(json.dumps(msgs[1])))
     assert jq.wait_for_reply(now, timeout=0.1, every=0.01) is None
+
+
+def test_paragraph_pause_scale_and_the_longer_gap_after_a_section_background(tmp_path):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import assemble
+    sr = 24000
+    sf.write(tmp_path / "a.wav", np.full(sr, 0.1, np.float32), sr)
+    p = {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30}
+    segs = [{"id": "s1", "text": "One.", "kind": "narration", "para_start": True},
+            {"id": "s2", "text": "Two.", "kind": "narration", "para_start": True}]
+    clips = {"s1": ["a.wav"], "s2": ["a.wav"]}
+
+    def pause(extra=None, mark=False):
+        cfg = {"sample_rate": sr, "pacing_ms": p, "crossfade_ms": 0, "pacing_style": "fixed", **(extra or {})}
+        two = [segs[0], {**segs[1], **({"section_break": True} if mark else {})}]
+        return len(assemble.build_chapter(two, clips, tmp_path, cfg)) / sr - 2.0
+    base = pause()
+    assert abs(pause({"pacing_paragraph_scale": 2.0}) - 2 * base) < 0.01                                             # twice as long
+    assert abs(pause({"pacing_paragraph_scale": 2.0, "pacing_section_gap_scale": 2.0}) - 2 * base) < 0.01           # no mark: no extra
+    assert abs(pause({"pacing_paragraph_scale": 2.0, "pacing_section_gap_scale": 2.0}, mark=True) - 4 * base) < 0.01   # marked: twice that again
+    assert abs(pause({"pacing_section_gap_s": 3.0}, mark=True) - 3.0) < 0.01                                          # a fixed gap in seconds at the break
+    assert abs(pause({"pacing_section_gap_s": 3.0}) - base) < 0.01                                                    # but not elsewhere
+
+
+def test_the_assemble_step_uses_the_cover_set_while_the_clips_were_being_made(monkeypatch):
+    from audiobook_gen import jobqueue
+    started = {"id": "j1", "title": "T", "author": "A", "work": "w", "config": "c", "out": "o", "cover": ""}
+    monkeypatch.setattr(jobqueue, "load", lambda: [{**started, "cover": "/covers/new.jpg", "title": "New title"}])
+    cmd = jobqueue.Runner.assemble_cmd(object.__new__(jobqueue.Runner), started)
+    assert cmd[cmd.index("--cover") + 1] == "/covers/new.jpg" and cmd[cmd.index("--title") + 1] == "New title"
+
+
+def _music_library(tmp_path, monkeypatch, seconds=40):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import music
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    t = np.arange(24000 * seconds) / 24000
+    sf.write(lib / "tone.wav", (0.3 * np.sin(2 * np.pi * 220 * t)).astype("float32"), 24000)
+    (lib / "index.json").write_text('[{"id": "tone", "title": "Tone", "artist": "x", "licence": "CC0", "seconds": %d, "file": "tone.wav", "credit": "Tone, x (CC0)"}]' % seconds)
+    monkeypatch.setattr(music, "LIB", lib)
+    monkeypatch.setattr(music, "INDEX", lib / "index.json")
+    return music
+
+
+def test_music_goes_before_the_first_chapter_at_recommended_bridges_and_after_the_last(tmp_path, monkeypatch):
+    import numpy as np
+    music = _music_library(tmp_path, monkeypatch)
+    sr = 24000
+    guess = [(1, "a", 1000.0), (2, "b", 1000.0), (3, "c", 1000.0), (4, "d", 1000.0), (5, "e", 1000.0)]
+    assert music.recommended(guess, 25) == [3, 5] or music.recommended(guess, 25) == [3]       # about every 25 min, never at the first chapter
+    plan = music.load_plan(tmp_path)
+    plan.update(enabled=True, interval_min=25)
+    plan["intro"].update(track="tone", seconds=10)
+    plan["bridge"].update(track="tone", seconds=5)
+    plan["outro"].update(track="tone", before=2, after=6, fade_out=3)
+    speech = (0.2 * np.random.default_rng(1).standard_normal(sr * 3)).astype("float32")
+    made = [1, 2, 3, 4, 5]
+    n = lambda ch: len(music.wrap(speech, ch, made, plan, guess, sr)) / sr
+    assert abs(n(1) - 13) < 0.1 and abs(n(2) - 3) < 0.1                                           # intro before 1; nothing before 2
+    bridged = music.bridge_before(plan, guess)
+    assert 3 in bridged and abs(n(3) - 8) < 0.1
+    assert abs(n(5) - (3 + 6 + (5 if 5 in bridged else 0))) < 0.1                               # the ending after the last
+    plan["chapters"] = {"2": "on", "3": "off"}                                                  # a person's own choices win
+    assert abs(n(2) - 8) < 0.1 and abs(n(3) - 3) < 0.1
+    plan["enabled"] = False
+    assert len(music.wrap(speech, 1, made, plan, guess, sr)) == len(speech)
+    assert music.credits({**plan, "intro": {"track": "tone"}}) == ["Tone, x (CC0)"]
+
+
+def test_music_is_set_against_the_speech_level_and_never_clips(tmp_path, monkeypatch):
+    import numpy as np
+    music = _music_library(tmp_path, monkeypatch)
+    sr = 24000
+    speech = (0.1 * np.random.default_rng(2).standard_normal(sr * 2)).astype("float32")
+    spec = {"track": "tone", "seconds": 8, "start": 0, "fade_in": 1, "fade_out": 2}
+    a = music.piece(spec, sr, music.speech_rms(speech), -6.0)
+    assert abs(a).max() <= 0.7001 and abs(a[:200]).max() < 0.05 and abs(a[-200:]).max() < 0.05      # faded at both ends
+    mid = a[sr * 2: sr * 5]
+    assert 0.4 < music.speech_rms(mid) / music.speech_rms(speech) < 0.6                            # about -6 dB under the speech
+    assert music.piece({"track": "missing"}, sr, 0.1, -4.0) is None
+
+
+def test_music_search_only_offers_free_recordings(monkeypatch):
+    from audiobook_gen import music, covers
+    pages = {"1": {"index": 1, "title": "File:Good piece.ogg", "imageinfo": [{"mime": "application/ogg", "duration": 120, "extmetadata": {"LicenseShortName": {"value": "CC0"}}}]},
+             "2": {"index": 2, "title": "File:Restricted.ogg", "imageinfo": [{"mime": "application/ogg", "duration": 120, "extmetadata": {"LicenseShortName": {"value": "CC BY-SA 4.0"}}}]},
+             "3": {"index": 3, "title": "File:Notes.mid", "imageinfo": [{"mime": "audio/midi", "duration": 120, "extmetadata": {"LicenseShortName": {"value": "Public domain"}}}]},
+             "4": {"index": 4, "title": "File:Snippet.ogg", "imageinfo": [{"mime": "application/ogg", "duration": 8, "extmetadata": {"LicenseShortName": {"value": "Public domain"}}}]}}
+    monkeypatch.setattr(covers, "_api", lambda **p: {"query": {"pages": pages}})
+    assert [h["file"] for h in music.search("x")] == ["File:Good piece.ogg"]
+
+
+def test_the_music_tab_saves_and_reloads_a_books_plan(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import gui
+    music = _music_library(tmp_path, monkeypatch)
+    work = tmp_path / "book"
+    work.mkdir()
+    (work / "chapters.json").write_text(json.dumps({"title": "T", "chapters": [{"index": i, "title": f"Part {i}", "text": "x" * 13050} for i in range(1, 8)]}))
+    out = gui.music_load(str(work))
+    assert out[0] is False and "7 sections" in out[13]                                       # nothing saved yet; the note counts the sections
+    rec = music.recommended(music.chapter_seconds(work), 25)
+    assert rec and 1 not in rec
+    msg, credits = gui.music_save(str(work), True, "tone", "tone", "tone", 20, 0, 8, 0, 30, 0, -4, 25, [rec[0], 6])
+    assert "Music is ON" in msg and credits == "Tone, x (CC0)"
+    plan = music.load_plan(work)
+    assert plan["enabled"] and plan["intro"]["track"] == "tone" and plan["chapters"].get("6") == "on"      # a tick the recommendation lacks is kept
+    again = gui.music_load(str(work))
+    assert again[0] is True and set(again[12]["value"]) >= {rec[0], 6}
+    assert gui.music_hear("intro", "tone", 6, 0, -4).endswith("music_preview_intro.wav")
+
+
+def test_the_layered_opening_puts_the_title_over_quiet_music_and_fades_out_behind_the_book(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    music = _music_library(tmp_path, monkeypatch, seconds=60)
+    sr = 24000
+    plan = music.load_plan(tmp_path)
+    plan.update(enabled=True, level_db=0.0)
+    plan["intro"].update(track="tone", title="The Gospel of John", lead=6, tail=6, fade=10, duck_db=-14, under_db=-9, fade_in=0.5)
+    title = (0.2 * np.sin(2 * np.pi * 440 * np.arange(sr * 4) / sr)).astype("float32")               # 4 s of "speech"
+    head, tail = music.opening(title, plan, sr)
+    assert abs(len(head) / sr - 16) < 0.05 and abs(len(tail) / sr - 10) < 0.3                       # lead + title + tail; then the fade
+    rms = lambda a: float(np.sqrt(np.mean(a ** 2)))
+    alone, under_title, after = head[sr * 2: sr * 5], head[sr * 7: sr * 9], head[sr * 12: sr * 15]
+    mix_only = head[: sr * 6]
+    assert rms(mix_only) > 0                                                                          # music before the title
+    assert rms(after) > 0.3 * rms(alone)                                                              # music alone again after it
+    assert abs(tail[-sr // 10:]).max() < 0.01 and rms(tail[: sr]) > rms(tail[-sr * 2: -sr])           # slowly out
+    assert abs(head[: sr // 50]).max() < 0.05                                                          # begins with a gentle fade-in
+    speech = (0.1 * np.random.default_rng(3).standard_normal(sr * 20)).astype("float32")
+    laid = music.apply_tail(speech, tail)
+    assert len(laid) == len(speech) and rms(laid[:sr * 3]) > rms(speech[:sr * 3]) and abs(laid.max()) <= 0.9801
+    assert len(music.apply_tail(speech, np.zeros(0, np.float32))) == len(speech)
+    # the Opening chapter is added once, read by the narrator, and can be taken away again
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T", "chapters": [{"index": 1, "title": "Part 1", "text": "x"}]}))
+    (tmp_path / "segments.json").write_text(json.dumps([{"speaker": "Narrator", "kind": "narration", "text": "x", "para_start": True, "chapter": 1, "id": "001-00000"}]))
+    music.add_opening(tmp_path, "The Gospel of John, a study edition.")
+    music.add_opening(tmp_path, "The Gospel of John, a study edition.")
+    meta, segs = json.loads((tmp_path / "chapters.json").read_text()), json.loads((tmp_path / "segments.json").read_text())
+    assert [c["title"] for c in meta["chapters"]] == ["Opening", "Part 1"] and meta["chapters"][0]["opening"] and len(segs) == 2 and segs[0]["chapter"] == 0
+    assert [c[0] for c in music.chapter_seconds(tmp_path)] == [1] and music.has_opening(tmp_path)           # the opening is not a section for bridges
+    music.add_opening(tmp_path, "")
+    assert not music.has_opening(tmp_path) and len(json.loads((tmp_path / "segments.json").read_text())) == 1
+    # an opening can also come after a chosen chapter (a preface), in both the chapter list and the segment order
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T", "chapters": [{"index": 1, "title": "Preface", "text": "x"}, {"index": 2, "title": "One", "text": "y"}]}))
+    (tmp_path / "segments.json").write_text(json.dumps([{"speaker": "Narrator", "kind": "narration", "text": t, "para_start": True, "chapter": c, "id": f"{c:03d}-00000"} for c, t in ((1, "x"), (2, "y"))]))
+    music.add_opening(tmp_path, "Title.\nBy Someone.", 2.8, after=1)
+    assert [c["title"] for c in json.loads((tmp_path / "chapters.json").read_text())["chapters"]] == ["Preface", "Opening", "One"]
+    assert [g["chapter"] for g in json.loads((tmp_path / "segments.json").read_text())] == [1, 0, 0, 2]
+
+
+def test_the_ending_fades_in_under_the_last_words_and_carries_on_after_them(tmp_path, monkeypatch):
+    import numpy as np
+    music = _music_library(tmp_path, monkeypatch, seconds=60)
+    sr = 24000
+    plan = music.load_plan(tmp_path)
+    plan.update(enabled=True, level_db=0.0)
+    plan["outro"].update(track="tone", before=20, after=9, fade_out=5, under_db=-11)
+    speech = np.clip(0.2 * np.random.default_rng(5).standard_normal(sr * 60), -0.6, 0.6).astype("float32")
+    out = music.ending(speech, plan, sr)
+    assert abs(len(out) / sr - 69) < 0.05                                                  # nine seconds longer
+    rms = lambda a: float(np.sqrt(np.mean(a ** 2)))
+    assert np.allclose(out[: sr * 30], speech[: sr * 30])                                  # untouched until 20 s before the end
+    diff = out[: len(speech)] - speech
+    early, late = rms(diff[sr * 41: sr * 44]), rms(diff[sr * 56: sr * 59])
+    assert 0 < early < late                                                                # fading in under the speech
+    tail = out[len(speech):]
+    assert 0.5 * rms(diff[sr * 58: sr * 60]) < rms(tail[: sr]) < 1.5 * rms(diff[sr * 58: sr * 60])     # still playing, turned down, for the first second: no gap
+    assert rms(tail[sr * 3: sr * 5]) > 2 * rms(tail[: sr])                                # then swells
+    assert abs(tail[-sr // 20:]).max() < 0.01 and abs(out).max() <= 0.9801                 # out at the very end, no clipping
+    plan["outro"]["track"] = ""
+    assert len(music.wrap(speech, 1, [1], plan, [(1, "a", 60.0)], sr)) == len(speech)     # no track, no change
+
+
+def test_a_dramatic_pause_after_the_title_is_set_per_segment_and_the_music_swells_into_it(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    import soundfile as sf
+    from audiobook_gen import assemble
+    music = _music_library(tmp_path, monkeypatch, seconds=60)
+    sr = 24000
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T", "chapters": [{"index": 1, "title": "Part 1", "text": "x"}]}))
+    (tmp_path / "segments.json").write_text(json.dumps([{"speaker": "Narrator", "kind": "narration", "text": "x", "para_start": True, "chapter": 1, "id": "001-00000"}]))
+    music.add_opening(tmp_path, "The Gospel of John, a study edition.\nA copyright-free collection of introductions.", pause_s=2.8)
+    segs = json.loads((tmp_path / "segments.json").read_text())
+    assert [g["id"] for g in segs[:3]] == ["000-00000", "000-00001", "001-00000"] and segs[1]["pause_ms"] == 2800 and "pause_ms" not in segs[0]
+    # build_chapter honours the set pause instead of drawing a paragraph pause
+    sf.write(tmp_path / "a.wav", np.full(sr, 0.1, np.float32), sr)
+    cfg = {"sample_rate": sr, "pacing_ms": {"sentence": 350, "paragraph": 700, "speaker_change": 250, "chapter_start": 0, "continuation": 140, "split": 30},
+           "crossfade_ms": 0, "pacing_style": "fixed"}
+    two = [{**g, "kind": "narration"} for g in segs[:2]]
+    out = assemble.build_chapter(two, {"000-00000": ["a.wav"], "000-00001": ["a.wav"]}, tmp_path, cfg)
+    assert abs(len(out) / sr - (2.0 + 2.8)) < 0.02
+    # the music turns up in that silence and down again for the second part
+    talk = np.concatenate([0.3 * np.sin(2 * np.pi * 300 * np.arange(sr * 3) / sr), np.zeros(int(sr * 2.8)), 0.3 * np.sin(2 * np.pi * 300 * np.arange(sr * 3) / sr)]).astype("float32")
+    assert len(music.long_silences(talk, sr)) == 1 and abs(music.long_silences(talk, sr)[0][0] - 3.0) < 0.2
+    plan = music.load_plan(tmp_path)
+    plan.update(enabled=True, level_db=0.0)
+    plan["intro"].update(track="tone", title="x", lead=4, tail=4, fade=6, duck_db=-18, under_db=-9)
+    head, _ = music.opening(talk, plan, sr)
+    music_only = np.zeros_like(head)
+    rms = lambda a: float(np.sqrt(np.mean(a ** 2)))
+    mixed = head.copy()
+    mixed[sr * 4: sr * 4 + len(talk)] -= talk                                                        # what is left is the music
+    during_words, in_the_pause = rms(mixed[sr * 5: sr * 6]), rms(mixed[sr * 4 + int(sr * 4.2): sr * 4 + int(sr * 5.2)])
+    assert in_the_pause > 2 * during_words                                                         # swells into the pause
+
+
+def test_section_titles_are_read_aloud_with_a_pause_and_can_be_taken_out_again(tmp_path):
+    import json
+    from audiobook_gen import titles
+    assert titles.spoken("Part 1: The Word Became Flesh") == "Part one. The Word Became Flesh."
+    assert titles.spoken("Part 48: Jesus Restores Peter") == "Part forty-eight. Jesus Restores Peter."
+    assert titles.spoken("The Epilogue") == "The Epilogue."
+    chapters = [{"index": 0, "title": "Opening", "text": "t", "opening": True}, {"index": 1, "title": "Part 1: A", "text": "x"}, {"index": 2, "title": "Part 2: B", "text": "y"}]
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T", "chapters": chapters}))
+    seg = lambda i, ch, t: {"speaker": "Narrator", "kind": "narration", "text": t, "para_start": True, "chapter": ch, "id": i}
+    (tmp_path / "segments.json").write_text(json.dumps([seg("000-00000", 0, "Title."), seg("001-00000", 1, "a"), seg("001-00001", 1, "b"), seg("002-00000", 2, "c")]))
+    assert titles.apply(tmp_path, True, 2.8) == 2 and titles.apply(tmp_path, True, 2.8) == 2                    # twice gives the same result
+    segs = json.loads((tmp_path / "segments.json").read_text())
+    assert [g["id"] for g in segs] == ["000-00000", "001-title", "001-00000", "001-00001", "002-title", "002-00000"]
+    assert segs[1]["text"] == "Part one. A." and segs[2]["pause_ms"] == 2800 and "pause_ms" not in segs[3] and "pause_ms" not in segs[0]
+    assert titles.apply(tmp_path, False, 2.8) == 0
+    segs = json.loads((tmp_path / "segments.json").read_text())
+    assert [g["id"] for g in segs] == ["000-00000", "001-00000", "001-00001", "002-00000"] and not any("pause_ms" in g for g in segs)
+
+
+def test_ntfy_send_command_shares_finished_books(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    a = jq.add(str(work), "First Book", out=str(tmp_path / "a.m4b")); b = jq.add(str(work), "Second Tale", out=str(tmp_path / "b.m4b"), send_to="dev")
+    (tmp_path / "a.m4b").write_bytes(b"x"); (tmp_path / "b.m4b").write_bytes(b"x")
+    jq.update(a["id"], status="done", finished="2026-10-09 11:00"); jq.update(b["id"], status="done", finished="2026-10-09 12:00", send_to="dev")
+    sent, said = [], []
+    monkeypatch.setattr(jq, "send_file", lambda dev, path, *a, **k: sent.append((dev, path)) or True)
+    monkeypatch.setattr(jq, "notify", lambda text, *a, **k: said.append(text) or True)
+    monkeypatch.setattr(jq, "_spawn", lambda fn: fn())                                  # run the sending at once
+    assert "1. ✓ Second Tale" in jq.answer("done") and "2. ✓ First Book" in jq.answer("done")      # the newest is number 1
+    assert "no number 5" in jq.answer("send 5") and "No finished book" in jq.answer("send nothing") and "number" in jq.answer("send")
+    assert "No phone" in jq.answer("send 2")                                             # First Book has no device and none is saved
+    jq.save_default_device("phone")
+    assert "Sending “First Book”" in jq.answer("Send 2!") and sent[-1] == ("phone", str(tmp_path / "a.m4b"))
+    assert "Sending “Second Tale”" in jq.answer("send tale") and sent[-1][0] == "dev" and said[-1].startswith("Sent “Second Tale”")
+    assert "Sending" in jq.answer("send 1 2") and len(sent) == 4 and jq.load()[0]["sent"]
+    monkeypatch.setattr(jq, "send_file", lambda *a, **k: False)
+    jq.answer("send 1"); assert "Could not send" in said[-1]
+    jq.update(b["id"], status="failed", note="boom")
+    assert "no finished file" in jq.answer("send 1")
+    assert "send <number or name>" in jq.answer("help")
+
+
+def test_footnotes_are_called_out_after_their_paragraph():
+    from bs4 import BeautifulSoup
+    from audiobook_gen import extract
+    # a note on the same page, with a link back (Project Gutenberg's usual markup)
+    page = BeautifulSoup('<body><p>Constans, who was “seen by the captain,”<a href="x.html#fn1" id="fnref1" class="pginternal"><sup>[1]</sup></a> '
+                         'luckily did not reach us.</p><p class="footnote"><a id="fn1"/> <a href="x.html#fnref1" class="pginternal">[1]</a> '
+                         '<i>Daily News</i> , March 17, 1887.</p><p>Next paragraph.</p></body>', "lxml")
+    assert extract._footnotes(page, {"x.html": page}) == 1
+    texts = [p.get_text(" ", strip=True) for p in page.find_all("p")]
+    assert texts == ["Constans, who was “seen by the captain,” luckily did not reach us.", "Footnote one. Daily News, March 17, 1887.", "Next paragraph."]
+    # the note on another page, its anchor an empty <a id> before the marker, and the leftover "FOOTNOTES:" heading removed
+    a = BeautifulSoup('<body><p>The act.<a id="FNanchor_2"/><a class="fnanchor pginternal" href="b.html#Footnote_2">[2]</a></p><p>Then more.</p></body>', "lxml")
+    b = BeautifulSoup('<body><div class="footnotes"><h3>FOOTNOTES:</h3><div class="footnote"><p><a id="Footnote_2"/><a href="a.html#FNanchor_2" class="pginternal">'
+                      '<span class="label">[2]</span></a> See Appendix B.</p></div></div></body>', "lxml")
+    assert extract._footnotes(a, {"a.html": a, "b.html": b}) == 1
+    assert [p.get_text(" ", strip=True) for p in a.find_all("p")] == ["The act.", "Footnote two. See Appendix B.", "Then more."]
+    assert "FOOTNOTES" not in b.get_text()
+    # an ordinary numbered link that is not a note is left alone
+    c = BeautifulSoup('<body><p>See <a href="#ch2">[2]</a> below.</p><p id="ch2">Chapter two text.</p></body>', "lxml")
+    assert extract._footnotes(c, {}) == 0 and "[2]" in c.get_text()
+
+
+def _name_env(tmp_path, monkeypatch, n_clips=1):
+    """A work folder with a name that has an IPA, clips that say it, and fake engines: the clip's first sample stands in for its seed."""
+    import json
+    import numpy as np
+    import soundfile as sf
+    from audiobook_gen import jobqueue, respell_check, synth
+    monkeypatch.setattr(jobqueue, "ACTIVITY", tmp_path / "activity.json")                # never touch the real queue's files
+    work = tmp_path / "w"; (work / "clips").mkdir(parents=True)
+    (work / "lexicon.json").write_text(json.dumps([{"term": "Zorbax", "kind": "name", "ipa": "zɔɹbæks", "source": "user", "count": 5}]))
+    meta = {}
+    for i in range(n_clips):
+        first = np.full(24000, 0.1, np.float32); first[0] = 0.1234
+        sf.write(work / "clips" / f"c{i}.wav", first, 24000)
+        meta[f"c{i}.wav"] = {"text": "He met Zorbax at the gate.", "engine": "chatterbox", "voice": {"seed": 1234}, "key": f"001-0000{i}:0"}
+    (work / "clips_meta.json").write_text(json.dumps(meta))
+    heard = {1234: "z ɔ b", 101: "z ɔ b", 202: "z ɔ ɹ b æ", 303: "z ɔ ɹ b æ k s"}      # scores 0.46, 0.46, 0.69, 1.0
+    monkeypatch.setattr(respell_check, "phonemes", lambda a, sr, timed=False: (heard.get(int(round(float(a[0]) * 1e4)), "h ɛ l oʊ"), [0.1 * k for k in range(len(heard.get(int(round(float(a[0]) * 1e4)), "h ɛ l oʊ").split()))]))
+    made = []
+
+    class Eng:
+        sample_rate = 24000
+        def synth(self, text, voice):
+            made.append(voice["seed"])
+            a = np.full(24000, 0.1, np.float32)
+            a[0] = voice["seed"] * 1e-4                                       # the first sample says which seed made it
+            return a
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Eng())
+    return work, made, heard
+
+
+def test_names_below_the_good_score_are_made_again_until_they_match(tmp_path, monkeypatch):
+    import soundfile as sf
+    from audiobook_gen import namecheck
+    work, made, heard = _name_env(tmp_path, monkeypatch)
+    stats = namecheck.pass_once(work, {})
+    s = stats["Zorbax"]
+    assert made == [101, 202, 303]                                           # stops at the first attempt that reaches the good score
+    assert s["first"][0] < namecheck.GOOD <= s["final"][0] and len(s["tries"]) == 4 and s["regenerated"] >= 1
+    assert abs(float(sf.read(work / "clips" / "c0.wav")[0][0]) - 0.0303) < 1e-4 and (work / "clips_before_name_check" / "c0.wav").exists()   # the best take stays in place
+    made.clear()
+    assert namecheck.pass_once(work, {})["Zorbax"]["first"][0] >= namecheck.GOOD and made == []        # a name that is right is left alone
+    # a name without an IPA from a real source is not judged at all
+    import json
+    (work / "lexicon.json").write_text(json.dumps([{"term": "Zorbax", "kind": "name", "ipa": "", "source": "auto", "count": 5}]))
+    assert namecheck.pass_once(work, {}) == {}
+
+
+def test_the_worse_a_name_sounds_the_sooner_a_respelling_is_due():
+    from audiobook_gen.namecheck import respell_due as due
+    assert due([0.25]) and not due([0.35]) and due([0.35, 0.38]) and not due([0.45, 0.44]) and due([0.45, 0.44, 0.46])
+    assert not due([0.55] * 3) and due([0.55] * 4) and not due([0.65] * 4) and due([0.65] * 5) and not due([0.8] * 9)
+    assert due([0.9, 0.2]) and not due([0.55] * 4, good=0.5)                   # bands above the good score do not count
+
+
+def test_a_name_that_keeps_failing_gets_a_checked_respelling(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import namecheck, respell_check, respell_search, synth
+    from audiobook_gen.lexicon import Preprocessor
+    work, made, heard = _name_env(tmp_path, monkeypatch, n_clips=3)
+    heard.update({1234: "z ɔ b", 101: "z ɔ b", 202: "z ɔ b", 303: "z ɔ b"})        # 0.46 every time: three takes under 50% make it due
+    monkeypatch.setattr(respell_search, "candidates", lambda ipa, word, limit=30, seed=0: ["zorbax", "zawrbaks"])
+    monkeypatch.setattr(respell_search, "free_ear", lambda: None)
+    monkeypatch.setattr(respell_check, "check", lambda items, voice, engine, progress=print, seed=1: [
+        {"name": "zorbax", "score": 0.1}, {"name": "zawrbaks", "score": 0.8}])
+    again = []
+    monkeypatch.setattr(synth, "synthesize", lambda work, cfg, only=None: again.append(1))
+    report = namecheck.run(work, {})
+    assert made == [101, 202]                                                  # the first take and two retries, then the respelling; the other clips wait
+    lex = json.loads((work / "lexicon.json").read_text())[0]
+    assert lex["respell"] == "zawrbaks" and lex["respell_src"] == "checked" and lex["respell_score"] == 0.8 and again
+    assert report["respelled"] == {"Zorbax": "zawrbaks"} and (work / "name_report.json").exists()
+    assert Preprocessor([lex], "verified").substitute("He met Zorbax.") == "He met Zawrbaks."        # Chatterbox uses it
+    assert Preprocessor([lex], "typed").substitute("He met Zorbax.") == "He met Zorbax."
+    # a name scoring under 30% gets the respelling at once, with no retries at all
+    work2, made2, heard2 = _name_env(tmp_path / "b", monkeypatch)
+    heard2.update({1234: "h ɛ l oʊ"})
+    namecheck.run(work2, {})
+    assert made2 == [] and json.loads((work2 / "lexicon.json").read_text())[0]["respell"] == "zawrbaks"
+    # a respelling you typed yourself is never replaced, and one that did not help is not tried twice
+    lex.update(respell="zor-bax", respell_src="user", source="user")
+    (work / "lexicon.json").write_text(json.dumps([lex]))
+    assert namecheck.run(work, {})["respelled"] == {}
+    work3, made3, heard3 = _name_env(tmp_path / "c", monkeypatch)
+    heard3.update({1234: "h ɛ l oʊ"})
+    monkeypatch.setattr(respell_check, "check", lambda items, voice, engine, progress=print, seed=1: [{"name": "zorbax", "score": 0.1}, {"name": "zawrbaks", "score": 0.15}])
+    assert namecheck.run(work3, {})["respelled"] == {} and "respell_tried" in json.loads((work3 / "lexicon.json").read_text())[0]
+
+
+def test_a_retry_with_a_runaway_delivery_is_never_swapped_in(tmp_path, monkeypatch):
+    import numpy as np
+    from audiobook_gen import namecheck, synth
+    work, made, heard = _name_env(tmp_path, monkeypatch)
+
+    class Loud:                                    # sounds perfect to the recogniser but is three times as loud and twice as long
+        sample_rate = 24000
+        def synth(self, text, voice):
+            a = np.full(48000, 0.3, np.float32)
+            a[0] = 0.0303
+            return a
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Loud())
+    s = namecheck.pass_once(work, {})["Zorbax"]
+    assert s["final"][0] < namecheck.GOOD and s["regenerated"] == 0
+
+
+def test_a_name_with_no_plain_candidates_does_not_stop_the_pass(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import namecheck, respell_search
+    work, made, heard = _name_env(tmp_path, monkeypatch)
+    heard[1234] = "h ɛ l oʊ"
+    monkeypatch.setattr(respell_search, "candidates", lambda ipa, word, limit=30, seed=0: [])
+    monkeypatch.setattr(respell_search, "free_ear", lambda: None)
+    report = namecheck.run(work, {})
+    assert report["respelled"] == {} and "respell_tried" in json.loads((work / "lexicon.json").read_text())[0]
+
+
+def test_a_hyphenated_name_is_spelled_part_by_part(monkeypatch):
+    from audiobook_gen import respell_search as rs
+    phones = ["b", "iː", "ɹ", "ʃ", "iː", "b", "ə"]                          # Beer-sheba
+    monkeypatch.setattr(rs, "segment", lambda ipa: phones)
+    assert rs.split_phones(phones, ["beer", "sheba"]) == [["b", "iː", "ɹ"], ["ʃ", "iː", "b", "ə"]]   # cut at the start of the second syllable
+    c = rs.candidates("biːɹʃibə", "Beer-sheba", 40)
+    assert c[0] == "beer-sheba" and any("-" in x for x in c) and any("-" not in x for x in c) and len(c) > 4
+    assert all(x.replace("-", "").isalpha() and x.islower() for x in c) and len(set(c)) == len(c)
+    assert "beersheba" in c or any(x.startswith("bee") and "sh" in x for x in c)
+    assert rs.candidates("biːɹ", "Beer", 10)[0] == "beer"                       # an ordinary name is unchanged
+
+
+def test_names_with_an_apostrophe_are_found_and_spelled_part_by_part(monkeypatch):
+    from audiobook_gen import lexicon, respell_search as rs
+    assert not lexicon._is_known("M’ling") and not lexicon._is_known("M'ling")          # a main character was being skipped as "known"
+    assert lexicon._is_known("don't") and lexicon._is_known("o'clock") and lexicon._is_known("goin'")
+    monkeypatch.setattr(rs, "segment", lambda ipa: ["m", "ə", "l", "ɪ", "ŋ"])
+    c = rs.candidates("məlɪŋ", "M’ling", 30)
+    assert c[0] == "m-ling" and any("-" in x for x in c) and any(x == "muhling" or x.startswith("m") and "-" not in x for x in c)
+    assert all(x.replace("-", "").isalpha() for x in c)
+
+
+def test_dialect_words_are_found_and_given_a_sound(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import dialect, namecheck
+    work = tmp_path / "w"; work.mkdir()
+    text = ("Mars' Epps said the days' work was done. He was goin' to the mill, an' they asked 'em what 'many' meant. "
+            "Don't you know it's six o'clock? M’ling came. 'Yes, I do,' she said. The cap'n was bilin' mad, jes' like Moxie'd said. "
+            "That mornin' he shouted fo' the zzz'n.")
+    (work / "chapters.json").write_text(json.dumps({"chapters": [{"index": 1, "title": "x", "text": text}]}))
+    found = {w["token"]: w for w in dialect.scan(work)}
+    assert {"goin'", "an'", "'em", "cap'n", "bilin'", "jes'", "fo'", "zzz'n"} <= set(found)
+    assert not any(t in found for t in ("mars'", "days'", "don't", "o'clock", "'many'", "m'ling", "moxie'd", "'yes"))     # possessives, contractions, names, quotes
+    assert found["goin'"]["ipa"] and found["goin'"]["ipa_src"] == "dialect-dict:claude" and found["zzz'n"]["ipa"] == ""
+    (work / "dialect_ipa.txt").write_text("zzz'n|zɪzən\n")                                                         # a reading for this book only
+    monkeypatch.setattr(dialect, "USER", tmp_path / "user.txt")
+    (tmp_path / "user.txt").write_text("goin'|ɡoʊən\n")                                                            # yours wins over the shipped list
+    assert dialect.scan(work)[0]["ipa_src"].startswith("dialect-dict")
+    lex = [{"term": "Moxie", "kind": "name", "source": "auto", "ipa": ""}]
+    (work / "lexicon.json").write_text(json.dumps(lex))
+    r = dialect.apply(work)
+    out = {e["term"]: e for e in json.loads((work / "lexicon.json").read_text())}
+    assert out["goin'"]["kind"] == "dialect" and out["goin'"]["ipa"] == "ɡoʊən" and out["goin'"]["ipa_src"] == "dialect-dict:user"
+    assert out["zzz'n"]["ipa_src"] == "dialect-dict:book" and "Moxie" in out and r["added"] >= 7
+    # the name check judges them like any name, and finds them in the spoken text
+    assert "dialect" in namecheck.KINDS and namecheck.pattern("goin'").search("He was goin' to town.") and not namecheck.pattern("goin'").search("goings")
+
+
+def test_the_name_check_renews_its_gpu_lease(tmp_path, monkeypatch):
+    import os, time
+    from audiobook_gen import jobqueue as jq, namecheck
+    monkeypatch.setattr(jq, "GUI_LOCK", tmp_path / "lock")
+    jq.GUI_LOCK.write_text(f"{os.getpid()} the name check")
+    os.utime(jq.GUI_LOCK, (time.time() - 3000, time.time() - 3000))                  # older than the half hour after which the queue forgets it
+    assert jq.lease_holder() == ""
+    jq.GUI_LOCK.write_text(f"{os.getpid()} the name check")
+    os.utime(jq.GUI_LOCK, (time.time() - 1700, time.time() - 1700))
+    namecheck.keep_gpu()
+    assert time.time() - jq.GUI_LOCK.stat().st_mtime < 5 and jq.lease_holder() == "the name check"
+
+
+def test_respellings_are_tried_in_rounds_of_five_ten_and_fifteen(tmp_path, monkeypatch):
+    from audiobook_gen import namecheck, respell_check, respell_search
+    work, made, heard = _name_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(respell_search, "candidates", lambda ipa, word, limit=30, seed=0: [f"zorb{i}" for i in range(limit)])
+    monkeypatch.setattr(respell_search, "free_ear", lambda: None)
+    entry = {"term": "Zorbax", "ipa": "zɔɹbæks"}
+    asked, win = [], {}
+    def fake(items, voice, engine, progress=print, seed=1):
+        asked.append(len(items))
+        return [{"name": n, "score": win.get(n, 0.2)} for n, *_ in items]
+    monkeypatch.setattr(respell_check, "check", fake)
+    r = namecheck.try_respell(work, {}, entry)                                  # nothing is good enough: 1 baseline + 5, 10, 15
+    assert asked == [1, 5, 10, 15] and r["tried"] == 30 and r["score"] == 0.2
+    asked.clear(); win["zorb2"] = 0.75                                         # 75% is not the 80% aimed for: the search goes on
+    assert namecheck.try_respell(work, {}, entry)["tried"] == 30 and asked == [1, 5, 10, 15]
+    asked.clear(); win["zorb2"] = 0.9                                          # 90% in the first five: stop there
+    r = namecheck.try_respell(work, {}, entry)
+    assert asked == [1, 5] and r["spelling"] == "zorb2" and r["tried"] == 5
+    asked.clear(); win.clear(); win["zorb7"] = 0.9                             # found in the second round
+    r = namecheck.try_respell(work, {}, entry)
+    assert asked == [1, 5, 10] and r["spelling"] == "zorb7"
+    asked.clear()
+    assert namecheck.try_respell(work, {}, entry, batches=(2, 3))["tried"] == 5 and asked == [1, 2, 3]       # the sizes can be set
+
+
+def test_a_book_cannot_be_generated_until_it_has_been_prepared(tmp_path, monkeypatch):
+    import json
+    import pandas as pd
+    import pytest
+    from audiobook_gen import gui, jobqueue as jq, prep
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    (work / "prep.json").unlink()                                                 # not prepared yet
+    (work / "chapters.json").write_text(json.dumps({"chapters": [{"index": 1, "title": "One", "text": "Hello."}]}))
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    chap = pd.DataFrame([[True, 1, "One", 6]], columns=gui.CHAP_COLS)
+    args = (str(work), chap, "B", "A", "", 60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, False)
+    with pytest.raises(Exception, match="not been prepared"):
+        gui.generate_queued(*args)
+    assert jq.load() == [] and not prep.status(work)["ready"] and "not prepared" in prep.describe(work)
+    ticked, status, note, go = gui.prep_state(str(work))
+    assert go["interactive"] is False and "Prepare" in note and set(ticked["value"]) >= {"segments", "lexicon"}
+    prep.mark_done(work, ["segments"])                                            # what the Prepare button records
+    gui.generate_queued(*args)
+    assert len(jq.load()) == 1 and "prepared" in prep.describe(work) and gui.prep_state(str(work))[3]["interactive"] is True
+    (work / "chapters.json").write_text(json.dumps({"chapters": [{"index": 1, "title": "Changed", "text": "Hello."}]}))
+    assert not prep.status(work)["ready"] and "chapters changed" in prep.status(work)["why"]       # new chapters, so prepare again
+    with pytest.raises(Exception, match="chapters changed"):
+        gui.generate_queued(*args)
+    (work / "prep.json").unlink()                                                 # a book the command-line tool prepared before this existed
+    (work / "prepared.json").write_text("{}")
+    assert prep.status(work)["ready"] and prep.status(work)["legacy"]
+
+
+def test_the_steps_are_listed_by_importance_and_the_ai_ones_are_marked(monkeypatch):
+    from audiobook_gen import prep
+    ids = [s["id"] for s in prep.STEPS]
+    assert ids[0] == "segments" and prep.BY_ID["segments"]["required"] and set(prep.default_selected()) >= {"segments", "lexicon", "ipa", "language"}
+    labels = dict((v, l) for l, v in prep.choices())
+    assert prep.AI in labels["language"] and prep.AI in labels["speaker_ai"]
+    assert all(prep.NO_AI in labels[i] for i in ("segments", "lexicon", "ipa", "dialect"))
+    assert "speaker_ai" not in prep.default_selected()
+
+
+def test_prepare_runs_only_the_ticked_steps_in_order_and_asks_for_the_gpu_only_for_ai(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import dialect, jobqueue, lexicon, prep, pronounce, refine, speakers
+    monkeypatch.setattr(jobqueue, "ACTIVITY", tmp_path / "activity.json")
+    work = tmp_path / "w"; work.mkdir()
+    (work / "chapters.json").write_text(json.dumps({"title": "T", "author": "A", "chapters": [{"index": 1, "title": "One", "text": "Hello."}]}))
+    (work / "lexicon.json").write_text("[]")
+    calls, lease = [], []
+    def fake_parse(*a, **k):
+        calls.append("segments")
+        (work / "segments.json").write_text("[1]")
+        return [1]
+    monkeypatch.setattr(speakers, "parse_book", fake_parse)
+    monkeypatch.setattr(lexicon, "build_lexicon", lambda *a, **k: calls.append("lexicon") or [])
+    monkeypatch.setattr(pronounce, "fill_lexicon", lambda *a, **k: calls.append("ipa") or {"found": 0, "asked": 0})
+    monkeypatch.setattr(dialect, "apply", lambda w: calls.append("dialect") or {"words": 0, "added": 0, "missing": 0})
+    monkeypatch.setattr(refine, "run", lambda *a, **k: calls.append("language") or {"fixes": []})
+    monkeypatch.setattr(jobqueue, "lease_take", lambda *a, **k: lease.append("take"))
+    monkeypatch.setattr(jobqueue, "lease_give_back", lambda: lease.append("back"))
+    r = prep.run(work, ["dialect", "lexicon"])                                    # no AI step: no lease
+    assert calls == ["segments", "lexicon", "dialect"] and lease == [] and r["ran"] == ["segments", "lexicon", "dialect"]
+    assert prep.status(work)["ready"] and json.loads((work / "prep.json").read_text())["steps"] == ["segments", "lexicon", "dialect"]
+    calls.clear()
+    prep.run(work, ["language", "ipa", "lexicon", "segments", "dialect"])
+    assert calls == ["segments", "lexicon", "ipa", "dialect", "language"] and lease == ["take", "back"]      # the same order whatever the ticking order
+    calls.clear(); lease.clear()
+    prep.run(work, [])                                                            # the required step is done even when nothing is ticked
+    assert calls == ["segments"]
+
+
+def test_current_status_names_whatever_else_holds_the_gpu(tmp_path, monkeypatch):
+    import os
+    from datetime import datetime
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    now = datetime.strptime("2026-10-09 12:00", jq.FMT)
+    assert jq.answer("current", now) == "Nothing is being made and nothing is waiting."                 # nobody has the GPU
+    a = jq.add(str(work), "Acts", out=str(tmp_path / "a.m4b"))
+    jq.update(a["id"], note="waiting: the name check (you are using the GPU)")
+    jq.activity_set("the name check", "nasb_genesis", "judging clip 301 of 793")                         # a respelling pass, no book running
+    jq.GUI_LOCK.write_text(f"{os.getpid()} the name check")
+    text = jq.answer("current", now)
+    assert "Nothing is being made right now. Next: “Acts”" in text and "waiting: waiting: the name check" not in text
+    assert "🔒 The name check on nasb_genesis is using the GPU — judging clip 301 of 793 (since " in text
+    jq.activity_detail("trying respellings for Joktan")
+    assert "trying respellings for Joktan" in jq.answer("current", now)
+    jq.update(a["id"], status="running", progress="50/100", note="making the speech")
+    both = jq.answer("current", now)
+    assert "Making “Acts”" in both and "🔒 The name check" in both                                       # alongside a running book too
+    jq.lease_give_back()
+    assert "🔒" not in jq.answer("current", now) and jq.activity_get() == {}                              # given back: the line goes away
+    jq.activity_set("text preparation", "w", "step 2 of 4")
+    assert "Text preparation on w is using the GPU — step 2 of 4" in jq.answer("current", now)
+    jq.activity_clear()
+    jq.ACTIVITY.write_text('{"pid": 999999999, "what": "gone"}')                                         # a process that died leaves nothing behind
+    assert jq.activity_get() == {} and "🔒" not in jq.answer("current", now)
+
+
+def test_your_suggested_spellings_are_tried_in_the_first_round(tmp_path, monkeypatch):
+    from audiobook_gen import namecheck, respell_check, respell_search
+    work, made, heard = _name_env(tmp_path, monkeypatch)
+    (work / "respell_hints.txt").write_text("Zorbax|Zawrbaks\n# a comment\nOther|nope\n")
+    monkeypatch.setattr(respell_search, "candidates", lambda ipa, word, limit=30, seed=0: [f"zorb{i}" for i in range(limit)])
+    monkeypatch.setattr(respell_search, "free_ear", lambda: None)
+    asked = []
+    def fake(items, voice, engine, progress=print, seed=1):
+        asked.append([i[1] for i in items])
+        return [{"name": n, "score": 0.9 if n == "zawrbaks" else 0.2} for n, *_ in items]
+    monkeypatch.setattr(respell_check, "check", fake)
+    r = namecheck.try_respell(work, {}, {"term": "Zorbax", "ipa": "zɔɹbæks"})
+    assert namecheck.hints("Zorbax", work) == ["Zawrbaks"] and namecheck.hints("Achaia") == ["Uhkiah"]       # the shipped list has Achaia
+    assert asked[1][:1] == ["Zawrbaks"] and len(asked[1]) == 6 and r["spelling"] == "zawrbaks" and len(asked) == 2     # yours first, with the five generated; 90% ends it
+
+
+def test_respell_suggestions_by_ntfy_are_saved_and_tested(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import namecheck, respell_check, synth
+    (tmp_path / "q").mkdir()
+    jq, _ = _queue_env(tmp_path / "q", monkeypatch)
+    monkeypatch.setattr(namecheck, "HINTS", tmp_path / "hints.txt")
+    monkeypatch.setattr(namecheck, "ROOT", tmp_path)                                  # never touch the real hint list or the real books
+    (tmp_path / "work" / "b").mkdir(parents=True)
+    (tmp_path / "work" / "b" / "lexicon.json").write_text(json.dumps([{"term": "Zorbax", "respell_tried": {"none": True}}]))
+    assert jq.parse_respell("respell Zorbax zawrbaks") == [("Zorbax", "zawrbaks")] and jq.parse_respell("just a message") == [] and jq.parse_respell("Zorbax zawrbaks") == []
+    reply = jq.answer("Zorbax|Zawrbaks")
+    assert "Saved 1 respell suggestion" in reply and "Zorbax → Zawrbaks" in reply
+    assert namecheck.hints("zorbax") == ["Zawrbaks"] and "respell_tried" not in json.loads((tmp_path / "work" / "b" / "lexicon.json").read_text())[0]
+    assert "Already had" in jq.answer("respell zorbax zawrbaks") and namecheck.hints("Zorbax") == ["Zawrbaks"]         # not added twice
+    assert "respell <name> <spelling>" in jq.answer("help")
+    # the name check speaks the suggestion, compares it with the spelling in use, and adopts it when it is clearly better
+    work, made, heard = _name_env(tmp_path / "n", monkeypatch)
+    monkeypatch.setattr(namecheck, "HINTS", tmp_path / "hints.txt")
+    scores = {"zorbax": 0.4, "zawrbaks": 0.85}
+    monkeypatch.setattr(respell_check, "check", lambda items, voice, engine, progress=print, seed=1: [{"name": n, "score": scores[n]} for n, *_ in items])
+    monkeypatch.setattr(synth, "synthesize", lambda *a, **k: None)
+    assert namecheck.test_hints(work, {}) == {"Zorbax": "zawrbaks"}
+    lex = json.loads((work / "lexicon.json").read_text())[0]
+    assert lex["respell"] == "zawrbaks" and lex["respell_src"] == "checked" and lex["respell_hint"] and lex["hints_tested"] == ["Zawrbaks"]
+    assert namecheck.test_hints(work, {}) == {}                                          # tested once, not again
+    scores.update(zawrbaks=0.45); lex["hints_tested"] = []; lex["respell_src"] = ""; lex["respell"] = ""
+    (work / "lexicon.json").write_text(json.dumps([lex]))
+    assert namecheck.test_hints(work, {}) == {}                                          # only slightly better: the spelling in use stays
+
+
+def test_a_guessed_foreign_ipa_is_never_what_a_name_is_judged_by(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import namecheck, pronounce
+    work = tmp_path / "w"; work.mkdir()
+    (work / "lexicon.json").write_text(json.dumps([
+        {"term": "Derbe", "kind": "name", "lang": "de", "ipa": "dˈɛɾbə", "source": "auto"},                  # a German guess with no source
+        {"term": "Paulus", "kind": "name", "lang": "nl", "ipa": "pˈʌʊls", "source": "auto", "ipa_src": ""},
+        {"term": "Kept", "kind": "name", "lang": "", "ipa": "kɛpt", "source": "auto"},                         # no language guess: left as it was
+        {"term": "Typed", "kind": "name", "lang": "de", "ipa": "taɪpt", "source": "user"}]))                   # typed by you: always trusted
+    monkeypatch.setattr(pronounce, "lookup", lambda terms, *a, **k: {"Derbe": {"ipa": "ˈdɜɹbi", "source": "bible-dict:claude"}} if "Derbe" in terms else {})
+    got = {e["term"]: e for e in namecheck.targets(work)}
+    assert got["Derbe"]["ipa"] == "ˈdɜɹbi" and got["Derbe"]["ipa_src"] == "bible-dict:claude"             # the dictionary's reading replaces the guess
+    assert "Paulus" not in got                                                                              # nothing better is known: not judged
+    assert got["Kept"]["ipa"] == "kɛpt" and got["Typed"]["ipa"] == "taɪpt"
+
+
+def test_names_known_to_be_good_are_left_out_of_the_name_check(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import namecheck
+    jq, _ = _queue_env((tmp_path / "q").__class__(tmp_path / "q") if (tmp_path / "q").mkdir() is None else tmp_path / "q", monkeypatch)
+    monkeypatch.setattr(namecheck, "ROOT", tmp_path); monkeypatch.setattr(jq, "ROOT", tmp_path)
+    work, made, heard = _name_env(tmp_path / "n", monkeypatch)
+    heard.update({1234: "z ɔ ɹ b æ k s"})                                          # the name sounds right (1.0)
+    assert namecheck.pass_once(work, {})["Zorbax"]["first"] == [1.0]
+    rep = namecheck.run(work, {})                                                   # a good name is recorded as good...
+    ok = json.loads((work / "lexicon.json").read_text())[0]["name_ok"]
+    assert ok["fp"] and not ok["manual"] and ok["score"] == 1.0
+    skipped = []
+    assert namecheck.pass_once(work, {}, skipped=skipped) == {} and skipped == ["Zorbax"]          # ...and left out next time
+    rep = namecheck.run(work, {})
+    assert rep["left_out_known_good"] == ["Zorbax"] and rep["names"] == 0
+    assert namecheck.pass_once(work, {}, skip_known=False)["Zorbax"]["clips"] == 1                    # unless asked to look again
+    # its clips changed (a new clip says the name): judged again
+    import soundfile as sf, numpy as np
+    meta = json.loads((work / "clips_meta.json").read_text())
+    meta["c9.wav"] = {**meta["c0.wav"], "key": "001-00009:0"}
+    sf.write(work / "clips" / "c9.wav", np.full(24000, 0.1, np.float32), 24000)
+    (work / "clips_meta.json").write_text(json.dumps(meta))
+    assert namecheck.pass_once(work, {})["Zorbax"]["clips"] == 2
+    # `good <name>` on ntfy: left out for good, whatever its clips do
+    (tmp_path / "work" / "b").mkdir(parents=True)
+    (tmp_path / "work" / "b" / "lexicon.json").write_text(json.dumps([{"term": "Derbe"}]))
+    assert jq.parse_good("good Derbe") == "Derbe" and jq.parse_good("known good derbe") == "Derbe" and jq.parse_good("good morning") == ""
+    assert "Marked Derbe as known good in 1 book" in jq.answer("good Derbe") and json.loads((tmp_path / "work" / "b" / "lexicon.json").read_text())[0]["name_ok"]["manual"]
+    assert namecheck.known_good({"name_ok": {"manual": True, "fp": "x"}}, "different") and not namecheck.known_good({}, "x")
+    assert "good <name>" in jq.answer("help")
+
+
+def test_book_text_is_cleaned_of_split_names_capitals_and_file_notes(tmp_path):
+    import json
+    from audiobook_gen import textclean as tc, titles
+    names = {"douglass"}
+    assert tc.fix_text("Mr. D OUGLASS and P ATRICK H ENRY , of old , said JOHN went.", names) == "Mr. Douglass and Patrick Henry, of old, said John went."
+    assert tc.fix_text("B OSTON , April 22, 1845.", names) == "Boston, April 22, 1845." and tc.fix_text("A PARODY", names) == "A Parody"
+    assert tc.fix_text("LETTER FROM WENDELL PHILLIPS, ESQ.", names) == "Letter from Wendell Phillips, Esq." and tc.fix_text("CHAPTER VII", names) == "Chapter VII"
+    assert tc.fix_text("He said “NO COMPROMISE WITH SLAVERY!” and left.", names) == "He said “No compromise with slavery!” and left."
+    assert tc.fix_text("The NASA team and the USA, I AM sure.", names) == "The NASA team and the USA, I AM sure."          # acronyms are left alone
+    assert tc.fix_text("Institution !” and it is .", names) == "Institution!” and it is."
+    assert tc.drop_cruft("Real text.\n\nNote from the original file: This electronic book is being\nreleased [Born 1929]\n\nContents\n\nMore.") == "Real text.\n\nMore."
+    # a work folder made before this existed: the title page goes, names and punctuation are put right, the title is not read twice
+    work = tmp_path / "w"; work.mkdir()
+    chapters = [{"index": 1, "title": "Narrative of the Life of FREDERICK DOUGLASS", "text": "Narrative of the Life of FREDERICK DOUGLASS\\n\\nNote from the original file: x\\n\\nContents".replace("\\\\n", "\\n")},
+                {"index": 2, "title": "PREFACE", "text": "PREFACE\n\nI met Frederick Douglass , of D OUGLASS fame."}]
+    (work / "chapters.json").write_text(json.dumps({"title": "T", "chapters": chapters}))
+    seg = lambda i, ch, t: {"speaker": "Narrator", "kind": "narration", "text": t, "para_start": True, "chapter": ch, "id": i}
+    (work / "segments.json").write_text(json.dumps([seg("001-00000", 1, "Narrative of the Life of FREDERICK DOUGLASS"), seg("001-00001", 1, "Note from the original file: x"),
+                                                    seg("001-00002", 1, "Contents"), seg("002-00000", 2, "PREFACE"), seg("002-00001", 2, "I met Frederick Douglass , of D OUGLASS fame.")]))
+    r = tc.clean_work(work)
+    assert r["dropped_chapters"] == [1] and r["dropped_segments"] == 2
+    segs = json.loads((work / "segments.json").read_text())
+    assert [g["text"] for g in segs] == ["Preface", "I met Frederick Douglass, of Douglass fame."]
+    assert titles.apply(work, True) == 1
+    segs = json.loads((work / "segments.json").read_text())
+    assert [g["text"] for g in segs] == ["Preface.", "I met Frederick Douglass, of Douglass fame."] and segs[1]["pause_ms"] == 2800   # read once, with the pause after it
+
+
+def test_done_lists_the_newest_book_first(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    for title, when in (("Old", "2026-10-09 08:00"), ("Newest", "2026-10-10 20:00"), ("Middle", "2026-10-10 09:00")):
+        j = jq.add(str(work), title, out=str(tmp_path / f"{title}.m4b"))
+        jq.update(j["id"], status="done", finished=when)
+    lines = jq.answer("done").splitlines()
+    assert [l.split(" — ")[0] for l in lines] == ["1. ✓ Newest", "2. ✓ Middle", "3. ✓ Old"]               # by when they finished, not the queue order
+    assert [j["title"] for j in jq.finished_list()] == ["Newest", "Middle", "Old"]
+
+
+def test_epub_from_a_work_folder(tmp_path):
+    import json, zipfile
+    from audiobook_gen.epubout import build
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T & Co", "author": "", "chapters": [
+        {"index": 0, "title": "Opening", "text": "Hello.", "opening": True}, {"index": 1, "title": "Part 1", "text": "One.\n\nTwo <b>."}]}))
+    out = build(tmp_path, tmp_path / "o.epub")
+    z = zipfile.ZipFile(out)
+    assert z.namelist()[0] == "mimetype" and z.testzip() is None
+    assert "Two &lt;b&gt;." in z.read("OEBPS/c002.xhtml").decode() and "<h1>Part 1</h1>" in z.read("OEBPS/c002.xhtml").decode()

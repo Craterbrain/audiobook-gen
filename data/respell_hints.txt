@@ -1,0 +1,44 @@
+# Name|spelling  -  spellings you think could work for a name. The name check speaks them in the first round and uses one only if it scores better.
+Achaia|Uhkiah
+Arodi|airuhdye
+Arodi|ehruhdie
+Birsha|burrshuh
+Birsha|berzhuh
+Eri|eereye
+Eri|eerye
+Ashteroth-karnaim|ashtuhrahth karnayuhm
+Haggi|hageye
+Haggi|haggye
+Irad|eyerad
+Irad|eyeradh
+Kedar|keeder
+Kedar|keyder
+Mibsam|mibsam
+Mibsam|mibsamm
+Shaveh-kiriathaim|shayveh keereeuhthayuhm
+Achbor|akbor
+Achbor|ahkbohr
+Aran|airun
+Aran|ehruhn
+Erech|eereck
+Erech|ehrek
+Jachin|jaykin
+Jachin|jaykinn
+Ashkenaz|ashkuhnaz
+Ashkenaz|ashkenazz
+Bethuel|bihthoouhl
+Bethuel|beethoouhl
+Nebaioth|nihbayahth
+Nebaioth|nehbayahth
+Hadad|hadad
+Hadad|hadud
+Machpelah|makpeeluh
+Machpelah|mackpeelah
+Rehoboth|rihhoebahth
+Rehoboth|reehoebahth
+Reuel|roouhl
+Reuel|rewuhl
+Gad|gadd
+Gad|gadh
+Talmud|talmood
+Talmud|talmuhd

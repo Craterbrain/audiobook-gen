@@ -117,6 +117,64 @@ def strip_gutenberg(chapters: list[dict]) -> list[dict]:
     return [{**c, "index": i + 1} for i, c in enumerate(out)]
 
 
+NOTE_LABEL = re.compile(r"\[?\s*(\d{1,3})\s*\]?\.?")
+
+
+def _footnotes(soup, pages: dict | None = None) -> int:
+    """Gutenberg-style notes: a numbered link in the text ("[1]") that points at a note, on this page or another one (`pages` maps file
+    names to their parsed pages). The marker is removed and the note is read right after the paragraph that cites it, called out as
+    "Footnote one. <note>". Returns how many notes were moved."""
+    from num2words import num2words
+    pages = pages or {}
+    moved = 0
+    for a in list(soup.find_all("a", href=True)):
+        if a.decomposed:                                          # already taken away with its note
+            continue
+        m = NOTE_LABEL.fullmatch(a.get_text(strip=True))
+        file, _, frag = a["href"].partition("#")
+        if not m or not frag or a.parent is None:
+            continue
+        page = pages.get(Path(file).name, soup) if file else soup
+        target = page.find(id=frag)
+        block = target.find_parent(["p", "div", "li"]) if target is not None else None
+        para = a.find_parent(["p", "div", "li"])
+        if block is None or block is para:
+            continue
+        prev = a.find_previous_sibling("a")
+        ids = {x for x in (a.get("id"), prev.get("id") if prev is not None and not prev.get_text(strip=True) else None) if x}
+        back = block.find("a", href=lambda h: bool(h) and h.partition("#")[2] in ids)                 # the note links back to this marker
+        text0 = block.get_text(" ", strip=True)
+        starts = NOTE_LABEL.match(text0) is not None and NOTE_LABEL.match(text0).group(1) == m.group(1)
+        if back is None and not starts:
+            continue                                            # a link to something else that happens to have a number
+        for x in block.find_all("a", href=True):                 # the "[1]" at the start of the note itself
+            if NOTE_LABEL.fullmatch(x.get_text(strip=True)):
+                x.decompose()
+                break
+        note = re.sub(r"\s+", " ", block.get_text(" ", strip=True))
+        note = re.sub(r"\s+([,.;:!?])", r"\1", note)
+        note = re.sub(r"^\[?\s*" + m.group(1) + r"\s*\]?\.?\s*", "", note).strip()
+        sup = a.find_parent("sup")
+        (sup or a).decompose()
+        if prev is not None and not prev.decomposed and not prev.get_text(strip=True):
+            prev.decompose()
+        block.decompose()
+        if note and para is not None:
+            new = soup.new_tag("p")
+            new.string = f"Footnote {num2words(int(m.group(1)))}. {note}"
+            after = para
+            while after.next_sibling is not None and getattr(after.next_sibling, "get", None) and "footnote-spoken" in (after.next_sibling.get("class") or []):
+                after = after.next_sibling                      # several notes in one paragraph keep their order
+            new["class"] = ["footnote-spoken"]
+            after.insert_after(new)
+            moved += 1
+    for page in [soup, *pages.values()]:                         # what is left of the "FOOTNOTES:" lists
+        for d in page.find_all(class_=["footnote", "footnotes"]):
+            if not d.decomposed and re.fullmatch(r"(FOOTNOTES:?)?", d.get_text(strip=True), re.I):
+                d.decompose()
+    return moved
+
+
 def extract_epub(path: Path, out_dir: Path) -> dict:
     import ebooklib
     from bs4 import BeautifulSoup
@@ -136,11 +194,18 @@ def extract_epub(path: Path, out_dir: Path) -> dict:
     walk(book.toc)
 
     chapters = []
+    pages = {}
     for item_id, _ in book.spine:
         item = book.get_item_with_id(item_id)
-        if item is None or item.get_type() != ebooklib.ITEM_DOCUMENT:
+        if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT:
+            pages[item_id] = (item, BeautifulSoup(item.get_content(), "lxml"))
+    by_file = {Path(it.get_name()).name: sp for it, sp in pages.values()}       # a note may sit on a different page from its marker
+    for it, sp in pages.values():
+        _footnotes(sp, by_file)
+    for item_id, _ in book.spine:
+        if item_id not in pages:
             continue
-        soup = BeautifulSoup(item.get_content(), "lxml")
+        item, soup = pages[item_id]
         head = soup.find(["h1", "h2", "h3"])
         paras = [p.get_text(" ", strip=True) for p in soup.find_all(["p", "h1", "h2", "h3"])]
         text = _clean("\n\n".join(p for p in paras if p))
@@ -150,6 +215,10 @@ def extract_epub(path: Path, out_dir: Path) -> dict:
         chapters.append({"index": len(chapters) + 1,
                          "title": title or f"Chapter {len(chapters) + 1}", "text": text})
 
+    from .textclean import clean_chapters
+    chapters = [c for c in clean_chapters(chapters) if len(c["text"]) >= 200]       # small-capital names put right, capitals tamed, the file note gone
+    for n, c in enumerate(chapters, 1):
+        c["index"] = n
     cover = None
     for item in book.get_items():
         if item.get_type() == ebooklib.ITEM_COVER or "cover" in item.get_name().lower() \

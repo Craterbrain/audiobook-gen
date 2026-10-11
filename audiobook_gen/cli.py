@@ -34,7 +34,7 @@ def _printer():
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="audiobook_gen")
-    p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "rank", "synth", "qc", "refine", "pacing", "assemble", "run"])
+    p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "dialect", "prep", "rank", "synth", "qc", "names", "epub", "refine", "pacing", "assemble", "run"])
     p.add_argument("input", help=".epub or .txt")
     p.add_argument("--work", help="working dir (default work/<name>)")
     p.add_argument("--config", default=ROOT / "config.yaml")
@@ -69,6 +69,10 @@ def main(argv=None):
             from .extract import extract
             d = extract(a.input, work, a.max_chapters)
             print(f"{len(d['chapters'])} chapters")
+        elif step == "epub":
+            from .epubout import build
+            out = Path(a.out) if getattr(a, "out", None) else Path("out") / f"{Path(work).name}.epub"
+            print(build(Path(work), out))
         elif step == "parse":
             from .speakers import parse_book
             llm = (a.llm_endpoint, a.llm_model) if a.llm_endpoint else None
@@ -102,6 +106,14 @@ def main(argv=None):
                 from .lexicon import MACBETH_SEED
                 seed(work, MACBETH_SEED)
             print(f"{len(lex)} entries -> {work / 'lexicon.json'}")
+        elif step == "prep":
+            from . import prep
+            r = prep.run(work, None, lambda f, d: print(f"[{f:4.0%}] {d}", flush=True))
+            print("prepared:", ", ".join(f"{k} ({v})" for k, v in r["notes"].items()))
+        elif step == "dialect":
+            from . import dialect
+            r = dialect.apply(work)
+            print(f"{r['words']} dialect words found, {r['added']} added to the lexicon, {r['missing']} without a sound (see dialect_scan.json)")
         elif step == "bible-dict":
             from .bible_dict import build
             if a.input == "apply":      # re-apply data/bible_ipa_user.txt / bible_ipa_claude_*.txt without rebuilding
@@ -158,6 +170,9 @@ def main(argv=None):
         elif step == "qc":
             from . import qc
             qc.run(work, cfg)
+        elif step == "names":
+            from . import namecheck
+            namecheck.run(work, cfg)
         elif step == "assemble":
             from .assemble import assemble
             out = Path(a.out) if a.out else ROOT / "out" / f"{work.name}.m4b"

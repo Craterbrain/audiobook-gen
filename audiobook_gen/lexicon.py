@@ -81,6 +81,8 @@ def _is_known(word: str) -> bool:
     if expanded != w and ok(expanded):
         return True  # Elizabethan elision: promis'd -> promised
     parts = [p for p in re.split(r"[-']", w) if p]  # good-bye, o'clock, don't
+    if "'" in w and len(parts) == 2 and len(parts[0]) == 1 and len(parts[1]) > 2 and word[:1].isupper():
+        return False        # a name like M'ling or O'Niel: the one-letter piece and the ordinary word beside it do not make it a known word
     return ok(w) or all(any(ok(s) for s in _stems(p)) or len(p) <= 2 for p in parts)
 
 
@@ -578,7 +580,8 @@ class Preprocessor:
     mode="plain":   no substitutions at all.
     mode="typed":   plain spelling, except respellings you typed in the lexicon (Qwen3-TTS).
     mode="verified": plain spelling, except names whose respelling in data/bible_respell.json was tested to sound
-                    better (Chatterbox); respellings you typed into the project lexicon win over those.
+                    better (Chatterbox) and respellings the name check (namecheck.py) scored better than the plain spelling;
+                    respellings you typed into the project lexicon win over those.
     Entries lacking the needed field are skipped. Possessives keep their suffix (Edmond's)."""
 
     def __init__(self, lexicon: list[dict], mode: str = "respell"):
@@ -587,7 +590,8 @@ class Preprocessor:
         if mode in ("verified", "typed"):
             lexicon = ([{"term": k, "respell": v["respell"]} for k, v in verified_respellings().items()] if mode == "verified" else []) + \
                       [e for e in lexicon if e.get("respell") and (e.get("respell_src") == "user" or
-                                                                   (not e.get("respell_src") and e.get("source") == "user"))]   # typed by you, not auto-made from IPA
+                                                                   (not e.get("respell_src") and e.get("source") == "user") or
+                                                                   (mode == "verified" and e.get("respell_src") == "checked"))]   # typed by you (or, for Chatterbox, found and scored by the name check), not auto-made from IPA
         for e in ([] if mode == "plain" else lexicon):
             val = (e.get(field) or "").strip()
             if mode == "respell":

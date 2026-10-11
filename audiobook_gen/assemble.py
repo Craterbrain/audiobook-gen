@@ -165,6 +165,10 @@ def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, text
                     pause = fixed if cut == "space" else pick(f"{'sentence' if cut == 'end' else 'comma'}_{speech}", f, fixed)
                 else:
                     pause = p["sentence"]
+            elif seg.get("section_break") and cfg.get("pacing_section_gap_s"):
+                pause = int(float(cfg["pacing_section_gap_s"]) * 1000)                   # background -> passage: a fixed gap in seconds
+            elif seg.get("pause_ms"):
+                pause = int(seg["pause_ms"])                                          # a pause set for this one place (e.g. after a title)
             elif prev and prev["text"].rstrip().endswith((",", ";", ":", "—", "–", "-")):
                 after_quote = prev.get("kind") == "dialogue" and seg.get("kind") == "narration"
                 pause = pick("before_tag" if after_quote else f"comma_{'dialogue' if prev.get('kind') == 'dialogue' else 'narration'}",
@@ -172,7 +176,10 @@ def build_chapter(segs: list[dict], clips: dict, clip_dir: Path, cfg: dict, text
             elif prev and prev.get("kind") == "dialogue" and seg.get("kind") == "narration" and len(seg["text"]) < 90:
                 pause = pick("before_tag", f, p.get("tag", 120))      # a quote followed by its tag: "In an hour?" / inquired Danglars
             elif seg.get("para_start"):
-                pause = pick("paragraph", f, p["paragraph"])
+                scale = float(cfg.get("pacing_paragraph_scale", 1.0))                          # 2.0 = twice as long
+                if seg.get("section_break"):                                                   # background -> passage: longer still
+                    scale *= float(cfg.get("pacing_section_gap_scale", 1.0))
+                pause = int(pick("paragraph", f, p["paragraph"]) * scale)
             else:
                 pause = pick("speaker_change", f, p["speaker_change"])
             out = join(out, a, sr, pause, xf)
@@ -401,6 +408,19 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
     title, author = title or meta["title"], author or meta.get("author", "")
     (work / "chapters").mkdir(exist_ok=True)
 
+    from . import music
+    mplan = music.load_plan(work)
+    made = [c["index"] for c in meta["chapters"] if not only_chapters or c["index"] in only_chapters]
+    mguess = music.chapter_seconds(work) if mplan.get("enabled") else []
+    if mplan.get("enabled"):
+        lines = music.credits(mplan)
+        (work / "music_credits.txt").write_text("\n".join(lines) + "\n")
+        print(f"[assemble] music on: {len(lines)} track(s), credits in {work / 'music_credits.txt'}", flush=True)
+    ttl = mplan.get("titles") or {}
+    if ttl.get("speak"):                                                       # titles are read aloud: the same pause comes before each one
+        cfg = {**cfg, "pacing_ms": {**cfg["pacing_ms"], "chapter_start": int(float(ttl.get("pause", 2.8)) * 1000)}}
+    opening_idx = {c["index"] for c in meta["chapters"] if c.get("opening")} if mplan.get("enabled") and mplan["intro"].get("title") and mplan["intro"].get("track") else set()
+    pending_tail = np.zeros(0, np.float32)
     chap_info, listing = [], []
     for ch in meta["chapters"]:
         if only_chapters and ch["index"] not in only_chapters:
@@ -412,6 +432,12 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
         audio = build_chapter(cs, clips, work / "clips", cfg, texts, feel)
         peak = np.abs(audio).max() or 1.0
         audio = audio * min(1.0, 0.7 / peak)  # peak-limit to ~ -3 dBFS
+        if ch.get("opening") and mplan.get("enabled") and mplan["intro"].get("title") and mplan["intro"].get("track"):
+            audio, pending_tail = music.opening(audio, mplan, sr)                 # spoken title over the music; its fade-out carries on below
+        else:
+            audio = music.apply_tail(audio, pending_tail)
+            pending_tail = np.zeros(0, np.float32)
+            audio = music.wrap(audio, ch["index"], [i for i in made if i not in opening_idx], mplan, mguess, sr, layered=bool(opening_idx))
         wav = work / "chapters" / f"{ch['index']:03d}.wav"
         sf.write(wav, audio, sr)
         chap_info.append((ch["title"], len(audio) / sr))

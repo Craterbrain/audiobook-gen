@@ -16,6 +16,9 @@ voices:
   # Jesus: {engine: f5, ref_audio: voices/jesus.wav, ref_text: "transcript of the clip"}
 # pacing_style: narrator draws every pause from a measured narrator's spread (data/narrator_pacing.json); fixed uses the numbers below as they are
 pacing_style: narrator
+pacing_paragraph_scale: 1.0   # multiplies every paragraph-end pause (2.0 = twice as long)
+pacing_section_gap_s: 0           # a fixed gap in seconds at a section_break (0 = use the scale below); overrides it when set
+pacing_section_gap_scale: 1.0     # extra multiplier at a segment marked section_break (e.g. where a study edition's background ends and the passage begins)
 pacing_emotion: true      # the feeling of the sentence before a pause shortens sentence pauses and lengthens paragraph pauses a little
 pacing_ms:
   sentence: 350
@@ -25,3 +28,10 @@ pacing_ms:
   chapter_start: 1200
 crossfade_ms: 60
 max_chunk_chars: 300
+
+# Name pronunciation pass (Chatterbox books): listens to clips that say a lexicon name that has an IPA, scores 0-1 against the IPA
+name_check: true     # false skips the pass
+name_good: 0.70      # a clip with a name scoring below this is made again with other seeds until it reaches it (best take kept)
+name_respell_batches: [5, 10, 15]   # spellings tried per round; the next round only if the best so far is not good enough
+name_respell_target: 0.80   # a spelling at this score (and clearly better than the plain one) ends the search early; otherwise the next round is tried
+name_bands: [[0.3, 1], [0.4, 2], [0.5, 3], [0.6, 4], [0.7, 5]]   # [score, takes under it] that make a respelling due: 1 under 30%, 2 under 40%, ... 5 under 70%
