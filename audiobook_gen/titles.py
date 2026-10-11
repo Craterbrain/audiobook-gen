@@ -31,7 +31,7 @@ def spoken(title: str) -> str:
     r = re.match(r"^(part|chapter|book|section)\s+([IVXLC]+)\.?$", t, re.I)
     if r and r[2].upper() == r[2]:                        # "CHAPTER IV" -> "Chapter 4"
         t = f"{r[1]} {_roman(r[2])}"
-    t = t.replace("ESQ.", "Esquire")
+    t = re.sub(r"\bEsq\b\.?", "Esquire", t, flags=re.I)
     if t.isupper():                                       # "PREFACE" would be read letter by letter
         t = _cap(t)
     else:

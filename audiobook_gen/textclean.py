@@ -4,6 +4,8 @@
     text extractor puts a space where the tag was) -> "Douglass", "Patrick Henry", "Boston";
   * names and words in ALL CAPITALS: "FREDERICK DOUGLASS", "NO COMPROMISE WITH SLAVERY!" -> "Frederick Douglass", "No compromise with slavery!"
     (a name keeps its capital letter; acronyms and roman numerals are left alone);
+  * "Esq." / "ESQ." -> "Esquire" (the full stop is kept only where it ends a sentence);
+  * chapter titles written in capitals ("CHAPTER VII", "LETTER FROM WENDELL PHILLIPS, ESQ.") -> Title Case;
   * a space before punctuation ("Douglass ," "Institution !");
   * paragraphs that are not part of the book: the Project Gutenberg file note and a "Contents" line.
 
@@ -28,6 +30,23 @@ def _zipf(word: str) -> float:
         return zipf_frequency(word.lower(), "en")
     except Exception:
         return 0.0
+
+
+ESQ = re.compile(r"\bEsq\b\.?", re.I)
+
+
+def esquire(text: str) -> str:
+    """Esq. -> Esquire; the full stop stays when the sentence ends there (end of text, or a capital letter / quote after it)."""
+    def sub(m):
+        end = text[m.end():m.end() + 3]
+        stop = m.group(0).endswith(".") and (not end.strip() or re.match(r"\s*[\"“‘'(]?[A-Z]", end) or end[:1] in "\n")
+        return "Esquire" + ("." if stop else "")
+    return ESQ.sub(sub, text)
+
+
+def title_case(title: str) -> str:
+    """A title written in capitals becomes Title Case (Esq. is spelled out); any other title is only given the Esquire fix."""
+    return esquire(_heading(title.strip()) or title)
 
 
 def evidence(texts: list[str]) -> set[str]:
@@ -96,6 +115,7 @@ def fix_text(text: str, names: set[str] | None = None) -> str:
         return "".join(out)
     text = re.sub(r"\b[A-Z]{2,}(?: +[A-Z]{2,})+\b", run, text)                       # two or more capital words together
     text = CAPS.sub(lambda m: word(m.group(0), m.start(), True) if _zipf(m.group(0).lower()) >= 2.0 or m.group(0).lower() in names else m.group(0), text)                       # a single capital word of three letters or more
+    text = esquire(text)
     text = re.sub(r"(?<=[A-Za-z0-9”’\"')]) +([,;:!?])", r"\1", text)
     text = re.sub(rf"(?<=[{LETTER}0-9]) +\.(?=\s|$|[”’\"'])", ".", text)
     return text
@@ -109,7 +129,7 @@ def drop_cruft(text: str) -> str:
 
 def clean_chapters(chapters: list[dict]) -> list[dict]:
     """Clean every chapter of a book; chapters that are nothing but cruft and their own title disappear."""
-    cleaned = [dict(c, text=drop_cruft(c["text"])) for c in chapters]
+    cleaned = [dict(c, text=drop_cruft(c["text"]), **({"title": title_case(c["title"])} if c.get("title") else {})) for c in chapters]
     names = evidence([c["text"] for c in cleaned])
     for c in cleaned:
         c["text"] = fix_text(c["text"], names)
@@ -131,6 +151,9 @@ def clean_work(work: Path) -> dict:
         before = c["text"]
         c["text"] = fix_text(drop_cruft(c["text"]), names)
         report["changed_text"] += before != c["text"]
+        if c.get("title") and title_case(c["title"]) != c["title"]:
+            c["title"] = title_case(c["title"])
+            report["changed_titles"] = report.get("changed_titles", 0) + 1
     kept = []
     for g in segs:
         if g["id"].endswith("-title") or g.get("kind") == "title":

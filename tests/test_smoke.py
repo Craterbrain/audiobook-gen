@@ -2124,7 +2124,7 @@ def test_book_text_is_cleaned_of_split_names_capitals_and_file_notes(tmp_path):
     names = {"douglass"}
     assert tc.fix_text("Mr. D OUGLASS and P ATRICK H ENRY , of old , said JOHN went.", names) == "Mr. Douglass and Patrick Henry, of old, said John went."
     assert tc.fix_text("B OSTON , April 22, 1845.", names) == "Boston, April 22, 1845." and tc.fix_text("A PARODY", names) == "A Parody"
-    assert tc.fix_text("LETTER FROM WENDELL PHILLIPS, ESQ.", names) == "Letter from Wendell Phillips, Esq." and tc.fix_text("CHAPTER VII", names) == "Chapter VII"
+    assert tc.fix_text("LETTER FROM WENDELL PHILLIPS, ESQ.", names) == "Letter from Wendell Phillips, Esquire." and tc.fix_text("CHAPTER VII", names) == "Chapter VII"
     assert tc.fix_text("He said “NO COMPROMISE WITH SLAVERY!” and left.", names) == "He said “No compromise with slavery!” and left."
     assert tc.fix_text("The NASA team and the USA, I AM sure.", names) == "The NASA team and the USA, I AM sure."          # acronyms are left alone
     assert tc.fix_text("Institution !” and it is .", names) == "Institution!” and it is."
@@ -2165,3 +2165,27 @@ def test_epub_from_a_work_folder(tmp_path):
     z = zipfile.ZipFile(out)
     assert z.namelist()[0] == "mimetype" and z.testzip() is None
     assert "Two &lt;b&gt;." in z.read("OEBPS/c002.xhtml").decode() and "<h1>Part 1</h1>" in z.read("OEBPS/c002.xhtml").decode()
+
+
+def test_titles_in_capitals_become_title_case_and_esq_is_spelled_out():
+    from audiobook_gen.textclean import title_case, esquire
+    assert title_case("LETTER FROM WENDELL PHILLIPS, ESQ.") == "Letter from Wendell Phillips, Esquire."
+    assert title_case("CHAPTER VII") == "Chapter VII" and title_case("Part 3: The First Disciples") == "Part 3: The First Disciples"
+    assert esquire("Phillips, Esq., said. Smith, Esq. He went.") == "Phillips, Esquire, said. Smith, Esquire. He went."
+
+
+def test_a_bridge_can_lead_into_the_title(tmp_path):
+    import numpy as np
+    from audiobook_gen import music
+    sr = 8000
+    wav = tmp_path / "t.wav"
+    import soundfile as sf
+    sf.write(wav, (np.sin(np.arange(40 * sr) * 0.05) * 0.3).astype(np.float32), sr)
+    music.LIB = tmp_path
+    music.INDEX = tmp_path / "index.json"
+    music._save([{"id": "t", "file": "t.wav", "seconds": 40.0, "credit": "x", "title": "t"}])
+    audio = np.concatenate([np.zeros(2 * sr), np.ones(20 * sr, np.float32) * 0.2])
+    spec = {**music.DEFAULT_PLAN["bridge"], "track": "t", "seconds": 30.0, "title_before": 10.0}
+    out = music.bridge_under_title(audio, spec, sr, 0.2, -4)
+    assert abs(len(out) / sr - (3 + 20 + 20)) < 0.01                      # 3 s lead, 20 s of music alone, then the 20 s of speech
+    assert np.abs(out[:3 * sr]).max() == 0 and np.abs(out[5 * sr:20 * sr]).max() > 0

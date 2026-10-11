@@ -38,7 +38,10 @@ DEFAULT_PLAN = {
               # layered opening (used when `title` is set): music alone for `lead` s, the spoken title over the music (turned down by
               # `duck_db`), music alone again for `tail` s, then the book begins with the music turned down to `under_db` and fading out over `fade` s
               "title": "", "title_pause": 2.8, "lead": 6.0, "tail": 6.0, "fade": 12.0, "duck_db": -14.0, "under_db": -9.0},
-    "bridge": {"track": "", "start": 0.0, "seconds": 8.0, "fade_in": 0.8, "fade_out": 3.0},
+    "bridge": {"track": "", "start": 0.0, "seconds": 8.0, "fade_in": 0.8, "fade_out": 3.0,
+               # with `title_before` > 0 the bridge plays alone after `lead` s of silence, and the next section's title is spoken over its last
+               # `title_before` s (the music turned down to `under_db`); the narration then resumes while the music slowly fades out
+               "lead": 3.0, "title_before": 0.0, "under_db": -10.0},
     # the ending: the music fades in under the last `before` seconds of speech, stays turned down for `hold` s after the last word, swells, carries on for `after`
     # seconds and fades out over the last `fade_out` of them
     "outro": {"track": "", "start": 0.0, "before": 20.0, "after": 9.0, "fade_out": 5.0, "under_db": -11.0, "hold": 1.0},
@@ -216,11 +219,47 @@ def wrap(audio: np.ndarray, chapter: int, chapters: list[int], plan: dict, guess
     if chapter == chapters[0]:
         pre = None if layered else piece(plan["intro"], sr, rms, db)           # a layered opening is its own chapter
     elif chapter in bridge_before(plan, [g for g in guess if g[0] in chapters]):
-        pre = piece(plan["bridge"], sr, rms, db)
+        spec = plan["bridge"]
+        if float(spec.get("title_before", 0)) > 0:
+            mixed = bridge_under_title(audio, spec, sr, rms, db)
+            if mixed is not None:
+                return mixed if not (chapter == chapters[-1] and plan["outro"].get("track")) else ending(mixed, plan, sr)
+        pre = piece(spec, sr, rms, db)
     if chapter == chapters[-1] and plan["outro"].get("track"):
         audio = ending(audio, plan, sr)
     parts = [x for x in (pre, audio) if x is not None]
     return np.concatenate(parts) if len(parts) > 1 else audio
+
+
+def _speech_start(audio: np.ndarray, sr: int) -> int:
+    """Index of the first sample of speech (the silence a section begins with is skipped)."""
+    loud = np.flatnonzero(np.abs(audio) > 0.02)
+    return int(loud[0]) if len(loud) else 0
+
+
+def bridge_under_title(audio: np.ndarray, spec: dict, sr: int, rms: float, level_db: float) -> np.ndarray | None:
+    """A bridge that leads into the section: `lead` s of silence, the music alone, then the section's spoken title starts `title_before` s
+    before the music ends (the music turned down to `under_db`), and the narration carries on while the music fades out slowly.
+    None if the track is missing (the caller then falls back to a plain bridge)."""
+    music = piece({**spec, "fade_out": 0.0}, sr, rms, level_db)
+    if music is None:
+        return None
+    lead, n_m = int(float(spec.get("lead", 3.0)) * sr), len(music)
+    s0 = _speech_start(audio, sr)
+    t0 = max(0, n_m - int(float(spec["title_before"]) * sr))                  # where the title starts, within the music
+    g = np.ones(n_m, np.float32)
+    under, ramp = 10 ** (float(spec.get("under_db", -10)) / 20), min(int(1.0 * sr), n_m - t0)
+    if ramp > 0:
+        g[t0:t0 + ramp] = np.linspace(1, under, ramp, dtype=np.float32)
+    rest = n_m - t0 - ramp
+    if rest > 0:
+        g[t0 + ramp:] = under * np.linspace(1, 0, rest, dtype=np.float32) ** 1.5      # the slow fade
+    body = audio[s0:]
+    out = np.zeros(max(lead + n_m, lead + t0 + len(body)), np.float32)
+    out[lead:lead + n_m] += music * g
+    out[lead + t0:lead + t0 + len(body)] += body
+    peak = float(np.abs(out).max()) or 1.0
+    return (out * min(1.0, 0.98 / peak)).astype(np.float32)
 
 
 def add_opening(work: Path, text: str, pause_s: float = 0.0, after: int | None = None) -> None:
