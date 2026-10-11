@@ -18,7 +18,7 @@ from .extract import extract
 from .lexicon import MACBETH_SEED, MONTE_CRISTO_SEED, autofill, build_lexicon, fill_respell, seed
 from .speakers import NARRATOR, backup_segments, parse_book
 from . import casting
-from . import prep
+from . import prep, workflow
 from . import m4b as m4blib
 from . import sync as synclib
 from . import voicepack as vpk
@@ -88,7 +88,7 @@ def _not_while_making(project, what="change this"):
 
 
 def run_prepare(project, chap_df, selected, progress=gr.Progress()):
-    """The Prepare button: run the ticked steps, then say what the Generate tab may do."""
+    """The Prepare button: run the ticked steps, then say what the Make tab may do."""
     _not_while_making(project, "prepare it again")
     if not project:
         raise gr.Error("Load a book first.")
@@ -102,7 +102,7 @@ def run_prepare(project, chap_df, selected, progress=gr.Progress()):
 
 
 def _reapply_extras(work):
-    """Preparing again rebuilds the lines from the plain chapters, which drops the spoken opening and section titles the Music tab put in.
+    """Preparing again rebuilds the lines from the plain chapters, which drops the spoken opening and section titles the Extras tab put in.
     Put back whatever the music plan says is on, and keep the book 'prepared'."""
     from . import music, titles
     work = Path(work)
@@ -120,8 +120,48 @@ def _reapply_extras(work):
         prep.restamp(work)
 
 
+def refresh_flow(project, chap_df=None):
+    """(header strip, then for each step: its banner text, its 'go to' button, that button's target). Never raises: a page must still work."""
+    from . import jobqueue
+    n = len(workflow.STAGES)
+    empty = [gr.skip()] * (1 + 3 * n)
+    try:
+        work = _wd(project) if project else None
+        last = next(iter(jobqueue.jobs_for(str(work))), None) if work else None
+        ticks = _selected(chap_df) if chap_df is not None and len(chap_df) else None
+        stages = workflow.stage_status(work if work and (work / "chapters.json").exists() else None, jobqueue.load(), ticks,
+                                       Path(last["out"]) if last and last.get("out") else None)
+        meta = json.loads((work / "chapters.json").read_text()) if work and (work / "chapters.json").exists() else {}
+        out = [workflow.strip_markdown(stages, meta.get("title", ""), meta.get("author", ""))]
+        for st in stages:
+            nxt = workflow.next_step(stages, st.id)
+            go = workflow.STAGES[workflow.STAGES.index(st.blocked_by)] if st.blocked_by else (nxt.id if nxt else "")
+            lab = workflow.LABELS.get(go, "")
+            out += [workflow.banner_markdown(st, nxt), gr.update(value=f"Go to {lab}", visible=bool(go)), go]
+        return out
+    except Exception:
+        return empty
+
+
+def refresh_strip(project, chap_df=None):
+    """The header: the six steps with their states, for the open book."""
+    from . import jobqueue
+    try:
+        work = _wd(project) if project else None
+        if work is None or not (work / "chapters.json").exists():
+            return workflow.strip_markdown(workflow.stage_status(None))
+        jobs = jobqueue.load()
+        last = next(iter(jobqueue.jobs_for(str(work))), None)
+        ticks = _selected(chap_df) if chap_df is not None and len(chap_df) else None
+        stages = workflow.stage_status(work, jobs, ticks, Path(last["out"]) if last and last.get("out") else None)
+        meta = json.loads((work / "chapters.json").read_text())
+        return workflow.strip_markdown(stages, meta.get("title", ""), meta.get("author", ""))
+    except Exception as e:                       # the header must never break a page
+        return f"_(progress strip unavailable: {e})_"
+
+
 def prep_state(project):
-    """(ticked steps, the Book tab's status, the Generate tab's note, whether Generate is allowed) for the loaded book."""
+    """(ticked steps, the Book tab's status, the Make tab's note, whether Generate is allowed) for the loaded book."""
     work = _wd(project) if project else None
     if work is None or not (work / "chapters.json").exists():
         return (gr.update(), "Load a book, tick the steps below and press **Prepare**.",
@@ -303,7 +343,7 @@ def run_parse(project, chap_df, endpoint, use_judge=False, progress=gr.Progress(
 
 
 def load_parsed(project):
-    """The Cast tab's contents for an already-parsed project (what run_parse returns, without parsing again)."""
+    """The Voices tab's contents for an already-parsed project (what run_parse returns, without parsing again)."""
     work = _wd(project)
     if not (work / "segments.json").exists():
         return [], pd.DataFrame(columns=SEG_COLS), "Not parsed yet.", gr.update(choices=["All"], value="All"), gr.update(choices=[]), \
@@ -851,7 +891,7 @@ def clone_assign(project, name, role, engine="F5-TTS"):
     cfg = _cfg(project)
     cfg.setdefault("voices", {})[role] = {"engine": _engine_key(engine), "library": name}
     (_wd(project) / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-    return f"**{role}** now speaks as **{name}** in {engine}. The Cast tab is updated."
+    return f"**{role}** now speaks as **{name}** in {engine}. The Voices tab is updated."
 
 
 # ---------- Reference from an audiobook ----------
@@ -1008,7 +1048,7 @@ def vp_make(source, clone_name, audio_file, m4b_file, around, name, steps, warm,
            f"stock best **{rep['stock_similarity']:.3f}** → new **{rep['final_similarity']:.3f}**; on sentences it never saw: "
            f"**{rep['held_out_stock']:.3f}** → **{rep['held_out_new']:.3f}** ({rep['seconds']} s). "
            "This score is a computer's measure of speaker likeness; compare the three samples by ear. "
-           "It now appears in the voice menus (Cast tab → Refresh voice list).")
+           "It now appears in the voice menus (Voices tab → Refresh voice list).")
     return (msg, real, new, stock, gr.update(choices=_mine(), value=name),
             gr.update(choices=["(start from the closest stock voice)"] + _mine()), gr.update(choices=casting.voice_choices()))
 
@@ -1028,7 +1068,7 @@ def vp_tag(name, label, tags):
     meta = json.loads(path.read_text()) if path.exists() else {}
     meta.update(label=(label or "").strip(), tags=(tags or "").strip())
     path.write_text(json.dumps(meta, indent=2))
-    return f"Tagged **{name}** as “{meta['label'] or name} — {meta['tags'] or 'your Kokoro voice'}”. Cast tab → Refresh voice list.", gr.update(choices=casting.voice_choices())
+    return f"Tagged **{name}** as “{meta['label'] or name} — {meta['tags'] or 'your Kokoro voice'}”. Voices tab → Refresh voice list.", gr.update(choices=casting.voice_choices())
 
 
 def vp_hear(name, text):
@@ -1194,7 +1234,7 @@ def gen_stop(project):
 
 
 def gen_panel(project, shown):
-    """The Generate tab's status for this book's newest job: progress while it runs, the file when it is done."""
+    """The Make tab's status for this book's newest job: progress while it runs, the file when it is done."""
     from . import jobqueue
     if not project:
         return gr.skip(), gr.skip(), gr.skip(), shown
@@ -1346,7 +1386,7 @@ def queue_reschedule(picked, when, window_on, w_start, w_stop):
 def queue_send(picked, device):
     from . import jobqueue
     if not device:
-        raise gr.Error("Choose a device on the Generate tab first (paired in KDE Connect).")
+        raise gr.Error("Choose a device on the Make tab first (paired in KDE Connect).")
     jobqueue.save_default_device(device)
     n = jobqueue.set_send(_need(picked), device)
     return f"{n} book(s) will be sent to your phone when done (finished ones are sent now, and again if your phone is out of reach).", *queue_refresh(picked)
@@ -1426,10 +1466,12 @@ def _enqueue(work, title, author, cover, chapters, not_before, window, send_to):
     if waiting:
         jobqueue.update(waiting["id"], title=title, author=author, cover=cover, chapters=chapters or None, not_before=not_before,
                         window=window, send_to=send_to, status="queued", note="")
-        return {**waiting, "title": title}, True
-    job = jobqueue.add(str(work), title, author, cover, "", "", chapters, not_before, window, send_to)
-    jobqueue.ensure_supervisor()
-    return job, False
+        job, updated = {**waiting, "title": title}, True
+    else:
+        job, updated = jobqueue.add(str(work), title, author, cover, "", "", chapters, not_before, window, send_to), False
+        jobqueue.ensure_supervisor()
+    workflow.stamp_queued(work, job["id"], title, author)          # what this build is made from, so a later change can say what it costs
+    return job, updated
 
 
 def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
@@ -1602,7 +1644,7 @@ def music_remove(track_id):
 
 
 def music_load(project):
-    """Fill the Music tab from the book's saved plan."""
+    """Fill the Extras tab from the book's saved plan."""
     from . import music
     ch = _track_choices()
     empty = (False, gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), 22.0, 0.0, 8.0, 0.0, 30.0, 0.0, -4.0, 25,
@@ -1733,23 +1775,11 @@ def assistant_discard(project):
             gr.update(value=None, visible=False))
 
 
-# The Clone tab is a workshop rather than a step in the book flow, so its button is set apart from the numbered tabs.
+# The three tabs after the numbered steps (Queue, Voice lab, Ask Claude) are not steps in the book flow: set them apart on the right.
 CSS = """
-#clone-tab-button {
-    background: linear-gradient(135deg, #7c3aed, #db2777);
-    color: #fff !important;
-    font-weight: 700;
-    border: none !important;
-    border-radius: 999px;
-    padding: 4px 18px;
-    margin-left: 14px;
-    box-shadow: 0 0 0 2px rgba(124, 58, 237, .30);
-}
-#clone-tab-button:hover { filter: brightness(1.12); }
-#clone-tab-button.selected, #clone-tab-button[aria-selected="true"] {
-    box-shadow: 0 0 0 3px rgba(219, 39, 119, .55);
-    filter: brightness(1.08);
-}
+#util-first-button { margin-left: 28px; border-left: 2px solid rgba(128, 128, 128, .45) !important; padding-left: 16px !important; }
+.stage-banner { border-left: 4px solid #7c3aed; padding: 4px 12px; margin-bottom: 6px; background: rgba(124, 58, 237, .07); border-radius: 4px; }
+#strip { font-size: 1.02em; padding: 6px 2px; }
 """
 
 
@@ -1890,7 +1920,7 @@ def corr_revert(project, file):
 def corr_rebuild(project, send=False, device=""):
     from . import jobqueue
     if send and not device:
-        raise gr.Error("Choose which phone to send it to on the Generate tab (or untick the box).")
+        raise gr.Error("Choose which phone to send it to on the Make tab (or untick the box).")
     work = _wd(project)
     book = json.loads((work / "chapters.json").read_text())
     last = next(iter(jobqueue.jobs_for(str(work))), None) or {}    # keep what the last run of this book used
@@ -1914,8 +1944,20 @@ def build_ui() -> gr.Blocks:
                 give = gr.Button("Give the GPU back to the queue", scale=1, size="sm")
             gpu_bars.append((md, take, give))
         gpu_timer = gr.Timer(15)
-        with gr.Tabs():
-            with gr.Tab("1 · Book"):
+        strip_md = gr.Markdown(workflow.strip_markdown(workflow.stage_status(None)), elem_id="strip")
+        banners = {}                        # stage id -> (text, "go to the step before this" button, its target, "looks right" button)
+
+        def banner(sid):
+            """The first thing on each step's page: what this step is for, its state, and a button to the step that should come first."""
+            md = gr.Markdown(elem_classes="stage-banner")
+            with gr.Row():
+                nxt = gr.Button(visible=False, size="sm", variant="primary", scale=2)
+                ok = gr.Button("These look right ✓", size="sm", scale=1, visible=sid in ("voices", "names"))
+                gr.Markdown("", scale=3)
+            banners[sid] = (md, nxt, gr.State(""), ok)
+        with gr.Tabs() as tabs:
+            with gr.Tab("① Book", id="book"):
+                banner("book")
                 with gr.Row():
                     book = gr.File(label="EPUB or TXT", file_types=[".epub", ".txt"])
                     with gr.Column():
@@ -1929,13 +1971,15 @@ def build_ui() -> gr.Blocks:
                                        interactive=True, label="Chapters (untick to skip)")
                 gr.Markdown("### Text preparation\nTick what this book needs, most important first, then press **Prepare**. A book cannot be generated until "
                             "it has been prepared. 🧠 marks the steps that need an AI model loaded on the GPU (a book being made steps aside for them); "
-                            "the others run without one. Re-run Prepare after changing the chapters. It rebuilds the lines, so moves made on the Cast tab are lost (the last 10 versions are kept in the book's segments.backup folder).")
+                            "the others run without one. Re-run Prepare after changing the chapters. It rebuilds the lines, so moves made on the Voices tab are lost (the last 10 versions are kept in the book's segments.backup folder).")
                 prep_cbg = gr.CheckboxGroup(choices=prep.choices(), value=prep.default_selected(), label="Preparation steps")
                 prep_help = gr.Markdown("\n".join(f"- **{s['label'].split(' (')[0]}** — {s['help']}" for s in prep.STEPS))
                 with gr.Row():
                     prep_btn = gr.Button("Prepare", variant="primary", scale=1)
                     prep_status = gr.Markdown("Load a book, tick the steps below and press **Prepare**.", elem_id="prep-status")
-            with gr.Tab("2 · Cast"):
+
+            with gr.Tab("② Voices", id="voices"):
+                banner("voices")
                 gpu_bar()
                 with gr.Row():
                     parse_btn = gr.Button("Parse speakers", variant="primary", scale=1)
@@ -1952,7 +1996,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Accordion("Voice preview & menu help", open=False):
                     gr.Markdown("Every saved clone shows up three times in the voice menus: **(F5)**, **(Chatterbox)** and **(Qwen3)**. "
                                 "The **Pace** slider applies to Kokoro and F5; Chatterbox and Qwen3 choose their own pace "
-                                "(Chatterbox gets emotion from the text — see the Generate tab).")
+                                "(Chatterbox gets emotion from the text — see the Make tab).")
                     with gr.Row():
                         pv_text = gr.Textbox(label="Sample text for ▶ Hear", scale=3,
                                              value="In the beginning was the Word, and the Word was with God.")
@@ -2039,7 +2083,9 @@ def build_ui() -> gr.Blocks:
                         seg_df = gr.Dataframe(headers=SEG_COLS, interactive=True, wrap=True,
                                               datatype=["str", "number", "str", "str", "str"])
                         save_seg_btn = gr.Button("Save segments")
-            with gr.Tab("3 · Lexicon"):
+
+            with gr.Tab("③ Names", id="names"):
+                banner("names")
                 gpu_bar()
                 gr.Markdown("How names and hard words are pronounced. **Build lexicon**, fill in the IPA (try **Look up**), review, then **Save**.\n\n"
                             "**Who uses what:** Kokoro voices use the **IPA** column. **Chatterbox and Qwen3 use only the respelling you type** in the "
@@ -2096,7 +2142,108 @@ def build_ui() -> gr.Blocks:
                         which_rd = gr.Radio(["Kokoro's guess", "My IPA", "Compare"], value="Compare", label="Version", scale=2)
                         hear_btn = gr.Button("Hear", scale=1)
                         term_audio = gr.Audio(label="Pronunciation", scale=2, autoplay=True)
-            with gr.Tab("4 · Generate") as gen_tab:
+
+            with gr.Tab("④ Extras", id="extras") as extras_tab:
+                banner("extras")
+                with gr.Accordion("Cover", open=True):
+                    gr.Markdown("Make the cover. Pick a picture, choose how it is laid out, and press **Use this cover**. "
+                                "Uses the title and author from the Book tab. Searches only pictures that are free to use "
+                                "(public domain or CC0) on Wikimedia Commons, and avoids book covers. For people, the picture sits like a "
+                                "window on a book-cloth colour; for scenery, it fills the background.")
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            gr.Markdown("### 1 · Picture")
+                            cv_upload = gr.Image(label="Use your own picture (optional)", type="filepath", height=140)
+                            with gr.Row():
+                                cv_query = gr.Textbox(label="…or search free pictures", scale=4,
+                                                      placeholder="e.g. Civil War painting, Frederick Douglass portrait, Martian landscape")
+                                cv_search = gr.Button("Search", scale=1)
+                            cv_status = gr.Markdown()
+                            cv_gallery = gr.Gallery(label="Results (click one)", columns=4, height=260, object_fit="contain", allow_preview=False)
+                            gr.Markdown("### 2 · Look")
+                            cv_layout = gr.Radio(list(COVER_LAYOUTS), value=list(COVER_LAYOUTS)[0], label="Layout")
+                            cv_colour = gr.Dropdown(list(covers_mod.CLOTH), value="navy", label="Cloth colour (picture-window layout)")
+                            with gr.Row():
+                                cv_fx = gr.Slider(0, 1, 0.5, step=0.05, label="Focus left ↔ right (full background)")
+                                cv_fy = gr.Slider(0, 1, 0.5, step=0.05, label="Focus up ↕ down (full background)")
+                                cv_zoom = gr.Slider(0.8, 2.5, 1.0, step=0.05, label="Zoom (full background)")
+                            cv_make = gr.Button("Update preview", variant="primary")
+                        with gr.Column(scale=2):
+                            gr.Markdown("### 3 · Preview")
+                            cv_preview = gr.Image(label="Cover preview", type="filepath", height=420, interactive=False)
+                            cv_use = gr.Button("Use this cover", variant="primary")
+                            cv_msg = gr.Markdown()
+                    cv_hits, cv_pic, cv_credit = gr.State([]), gr.State(""), gr.State("")
+
+                with gr.Accordion("Music and spoken titles", open=False):
+                    gr.Markdown("Music for the title, between sections and at the end. Only recordings that are free to use (public domain or CC0, from "
+                                "Wikimedia Commons) are offered. Music plays **between** the speech, never under it. Pick tracks, choose where each goes, "
+                                "and it is mixed in when the book is assembled. Sections marked ★ are recommended for a bridge; change them freely.")
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            gr.Markdown("### 1 · Find music")
+                            with gr.Row():
+                                mu_query = gr.Textbox(label="Search free recordings", scale=4, placeholder="e.g. Bach cello suite, Satie piano, Handel organ")
+                                mu_search = gr.Button("Search", scale=1)
+                            with gr.Row():
+                                mu_role = gr.Dropdown(["intro", "bridge", "outro"], value="intro", label="…or suggest music for the", scale=2)
+                                mu_suggest = gr.Button("Suggest", scale=1)
+                            mu_status = gr.Markdown()
+                            mu_table = gr.Dataframe(headers=["Title", "Artist", "Length", "Licence"], interactive=False, wrap=True, label="Results (click a row to add it)")
+                            mu_hear = gr.Audio(label="Last track added", interactive=False)
+                            with gr.Row():
+                                mu_lib = gr.Dropdown(label="My music library", choices=_track_choices(), scale=4)
+                                mu_remove = gr.Button("Remove from library", scale=1)
+                        with gr.Column(scale=3):
+                            gr.Markdown("### 2 · This book")
+                            mu_on = gr.Checkbox(label="Use music in this book", value=False)
+                            with gr.Row():
+                                mu_intro = gr.Dropdown(label="Title intro (start of the book)", choices=_track_choices(), scale=4)
+                                mu_intro_sec = gr.Slider(5, 60, 22, step=1, label="seconds", scale=2)
+                                mu_intro_start = gr.Number(0, label="start at (s)", scale=1)
+                                mu_intro_hear = gr.Button("▶", scale=0)
+                            mu_title = gr.Textbox(label="Spoken title read over the intro music (leave empty for a plain music intro). A new line starts a new part, after the pause below.", lines=3,
+                                                  placeholder="The Gospel of John, a study edition.\nA copyright-free collection of introductions, and the passages of John from the original Greek.")
+                            mu_tpause = gr.Slider(0, 6, 2.8, step=0.2, label="Pause after the first line of the title (s), the music swells into it")
+                            with gr.Row():
+                                mu_lead = gr.Slider(3, 12, 6, step=1, label="Music alone before the title (s)")
+                                mu_tail = gr.Slider(3, 12, 6, step=1, label="Music alone after the title (s)")
+                                mu_fade = gr.Slider(4, 30, 12, step=1, label="Slow fade-out behind the first words (s)")
+                            with gr.Row():
+                                mu_duck = gr.Slider(-24, -4, -14, step=1, label="Music under the spoken title (dB)")
+                                mu_under = gr.Slider(-24, -3, -9, step=1, label="Music at the start of the book (dB), then fading out")
+                            with gr.Row():
+                                mu_bridge = gr.Dropdown(label="Bridge (between sections)", choices=_track_choices(), scale=4)
+                                mu_bridge_sec = gr.Slider(3, 30, 8, step=1, label="seconds", scale=2)
+                                mu_bridge_start = gr.Number(0, label="start at (s)", scale=1)
+                                mu_bridge_hear = gr.Button("▶", scale=0)
+                            with gr.Row():
+                                mu_outro = gr.Dropdown(label="Ending (end of the book)", choices=_track_choices(), scale=4)
+                                mu_outro_sec = gr.Slider(4, 120, 9, step=1, label="music goes on after the last word, including its fade-out (s)", scale=2)
+                                mu_outro_start = gr.Number(0, label="start at (s)", scale=1)
+                                mu_outro_hear = gr.Button("▶", scale=0)
+                            with gr.Row():
+                                mu_before = gr.Slider(5, 40, 20, step=1, label="Ending music starts fading in this long before the last word (s)")
+                                mu_outro_under = gr.Slider(-24, -3, -11, step=1, label="Ending music under the last words (dB)")
+                            with gr.Row():
+                                mu_level = gr.Slider(-14, 0, -4, step=1, label="Music loudness against the voice (dB)")
+                                mu_interval = gr.Slider(8, 90, 25, step=1, label="Recommend a bridge about every (minutes)")
+                            mu_listen = gr.Audio(label="Preview of the piece", interactive=False)
+                            with gr.Row():
+                                mu_speak = gr.Checkbox(label="Read each section's title aloud (\"Part one. The Word Became Flesh.\")", value=False, scale=3)
+                                mu_speak_pause = gr.Slider(0, 6, 2.8, step=0.2, label="Pause before and after each title (s)", scale=2)
+                            gr.Markdown("### 3 · Sections that get a bridge")
+                            mu_note = gr.Markdown()
+                            mu_sections = gr.CheckboxGroup(label="Bridge before these sections", choices=[], value=[])
+                            with gr.Row():
+                                mu_rec = gr.Button("Use the recommendation")
+                                mu_save = gr.Button("Save for this book", variant="primary")
+                            mu_msg = gr.Markdown()
+                            mu_credits = gr.Textbox(label="Credits for the tracks in use (kept in the book's folder)", lines=3, interactive=False)
+                    mu_hits = gr.State([])
+
+            with gr.Tab("⑤ Make", id="make") as gen_tab:
+                banner("make")
                 gen_prep = gr.Markdown("⛔ **Text not prepared** (no book loaded).")
                 eng_status = gr.Markdown(engine_status())
                 speed_md = gr.Markdown(speed_text())
@@ -2147,7 +2294,41 @@ def build_ui() -> gr.Blocks:
                             f5_half = gr.Checkbox(value=True, label="Half precision (about 4.8× faster on Arc, same sound) — F5-TTS only")
                     gr.Markdown("*Qwen3-TTS has no settings of its own here.*")
 
-            with gr.Tab("5 · Queue"):
+            with gr.Tab("⑥ Fix", id="fix"):
+                banner("fix")
+                gpu_bar()
+                gr.Markdown("Find clips of this book, hear them, and remake single ones: say a name differently, or change the emotion of a "
+                            "line the emotion reader got wrong. Remaking uses the GPU, so a book being made is paused (use the button at the top) "
+                            "and carries on by itself afterwards. To remake **every** clip with a name after changing the lexicon, search for the "
+                            "name to see them, then press “Rebuild the audiobook”: only the clips whose words changed are made again.")
+                with gr.Row():
+                    cr_query = gr.Textbox(label="Words in the text (a name, a phrase)", scale=3)
+                    cr_chapter = gr.Number(label="Chapter (0 = all)", value=0, precision=0, scale=1)
+                    cr_speaker = gr.Textbox(label="Speaker contains", scale=2)
+                with gr.Row():
+                    cr_flagged = gr.Checkbox(label="Only clips the quality check flagged"); cr_corrected = gr.Checkbox(label="Only clips I corrected")
+                    cr_find = gr.Button("Find clips", variant="primary")
+                cr_msg = gr.Markdown()
+                cr_tbl = gr.Dataframe(value=pd.DataFrame([], columns=CORR_HEADERS), headers=CORR_HEADERS, interactive=False, wrap=True,
+                                     label="Clips (click one)")
+                cr_files, cr_file, cr_take_path = gr.State([]), gr.State(""), gr.State("")
+                cr_info = gr.Markdown()
+                with gr.Row():
+                    cr_old = gr.Audio(label="This clip now", type="filepath", interactive=False)
+                    cr_new = gr.Audio(label="New take", type="filepath", interactive=False)
+                cr_orig = gr.Textbox(label="Original text of the passage", interactive=False)
+                cr_text = gr.Textbox(label="Text to speak (change a spelling or respelling here)", lines=3)
+                with gr.Row():
+                    cr_exag = gr.Slider(0.0, 1.5, value=0.5, step=0.05, label="Emotion (exaggeration)")
+                    cr_cfg = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="Pace / adherence (cfg weight)")
+                    cr_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = keep as is)")
+                with gr.Row():
+                    cr_make = gr.Button("🎙 Make a new take", variant="primary"); cr_use = gr.Button("✅ Use this take")
+                    cr_back = gr.Button("↩ Back to the original"); cr_rebuild = gr.Button("Rebuild the audiobook")
+                    cr_send = gr.Checkbox(label="Send it to my phone when done (phone chosen on the Make tab)", value=False)
+                cr_out = gr.Markdown()
+
+            with gr.Tab("Queue", id="queue", elem_id="util-first"):
                 gpu_bar()
                 gr.Markdown("Every book you generate is added here and made by the queue runner, which watches it: if it stalls (a GPU hang) "
                             "or crashes it is restarted, it waits while anything else is using the GPU, and it carries on if you close the app. "
@@ -2188,156 +2369,7 @@ def build_ui() -> gr.Blocks:
                         qs_asap = gr.Button("Start as soon as possible, any time")
                 q_timer = gr.Timer(10)
 
-            with gr.Tab("6 · Corrections"):
-                gpu_bar()
-                gr.Markdown("Find clips of this book, hear them, and remake single ones: say a name differently, or change the emotion of a "
-                            "line the emotion reader got wrong. Remaking uses the GPU, so a book being made is paused (use the button at the top) "
-                            "and carries on by itself afterwards. To remake **every** clip with a name after changing the lexicon, search for the "
-                            "name to see them, then press “Rebuild the audiobook”: only the clips whose words changed are made again.")
-                with gr.Row():
-                    cr_query = gr.Textbox(label="Words in the text (a name, a phrase)", scale=3)
-                    cr_chapter = gr.Number(label="Chapter (0 = all)", value=0, precision=0, scale=1)
-                    cr_speaker = gr.Textbox(label="Speaker contains", scale=2)
-                with gr.Row():
-                    cr_flagged = gr.Checkbox(label="Only clips the quality check flagged"); cr_corrected = gr.Checkbox(label="Only clips I corrected")
-                    cr_find = gr.Button("Find clips", variant="primary")
-                cr_msg = gr.Markdown()
-                cr_tbl = gr.Dataframe(value=pd.DataFrame([], columns=CORR_HEADERS), headers=CORR_HEADERS, interactive=False, wrap=True,
-                                     label="Clips (click one)")
-                cr_files, cr_file, cr_take_path = gr.State([]), gr.State(""), gr.State("")
-                cr_info = gr.Markdown()
-                with gr.Row():
-                    cr_old = gr.Audio(label="This clip now", type="filepath", interactive=False)
-                    cr_new = gr.Audio(label="New take", type="filepath", interactive=False)
-                cr_orig = gr.Textbox(label="Original text of the passage", interactive=False)
-                cr_text = gr.Textbox(label="Text to speak (change a spelling or respelling here)", lines=3)
-                with gr.Row():
-                    cr_exag = gr.Slider(0.0, 1.5, value=0.5, step=0.05, label="Emotion (exaggeration)")
-                    cr_cfg = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="Pace / adherence (cfg weight)")
-                    cr_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = keep as is)")
-                with gr.Row():
-                    cr_make = gr.Button("🎙 Make a new take", variant="primary"); cr_use = gr.Button("✅ Use this take")
-                    cr_back = gr.Button("↩ Back to the original"); cr_rebuild = gr.Button("Rebuild the audiobook")
-                    cr_send = gr.Checkbox(label="Send it to my phone when done (phone chosen on the Generate tab)", value=False)
-                cr_out = gr.Markdown()
-
-            with gr.Tab("✨ Assistant"):
-                gr.Markdown("Ask Claude to set up this book — “give the women different voices”, “make the narration calmer”, "
-                            "“fix how Morlock is said”. Claude works on a **copy** of the settings; you see exactly what would change "
-                            "and nothing is touched until you press Apply. It cannot start a generation, run commands or hear audio. "
-                            "Each question uses your Claude Code login (usually a few cents of usage); the cast, a few sample lines "
-                            "and the lexicon are sent to Anthropic.")
-                a_chat = gr.Chatbot(height=320, label="Conversation")
-                with gr.Row():
-                    a_in = gr.Textbox(label="What would you like set up?", scale=4, lines=2,
-                                      placeholder="e.g. Give each female character a different female voice, and make the narrator a little slower")
-                    a_go = gr.Button("Ask Claude", variant="primary", scale=1)
-                a_cost = gr.Markdown()
-                a_note = gr.Markdown()
-                a_diff = gr.Markdown("_Nothing to show._")
-                a_cover = gr.Image(label="Proposed cover", type="filepath", height=300, interactive=False, visible=False)
-                with gr.Row():
-                    a_apply = gr.Button("Apply these changes", variant="primary", interactive=False)
-                    a_discard = gr.Button("Discard", interactive=False)
-                a_session, a_spent = gr.State(""), gr.State(0.0)
-
-            with gr.Tab("🎨 Cover"):
-                gr.Markdown("Make the cover. Pick a picture, choose how it is laid out, and press **Use this cover**. "
-                            "Uses the title and author from the Book tab. Searches only pictures that are free to use "
-                            "(public domain or CC0) on Wikimedia Commons, and avoids book covers. For people, the picture sits like a "
-                            "window on a book-cloth colour; for scenery, it fills the background.")
-                with gr.Row():
-                    with gr.Column(scale=3):
-                        gr.Markdown("### 1 · Picture")
-                        cv_upload = gr.Image(label="Use your own picture (optional)", type="filepath", height=140)
-                        with gr.Row():
-                            cv_query = gr.Textbox(label="…or search free pictures", scale=4,
-                                                  placeholder="e.g. Civil War painting, Frederick Douglass portrait, Martian landscape")
-                            cv_search = gr.Button("Search", scale=1)
-                        cv_status = gr.Markdown()
-                        cv_gallery = gr.Gallery(label="Results (click one)", columns=4, height=260, object_fit="contain", allow_preview=False)
-                        gr.Markdown("### 2 · Look")
-                        cv_layout = gr.Radio(list(COVER_LAYOUTS), value=list(COVER_LAYOUTS)[0], label="Layout")
-                        cv_colour = gr.Dropdown(list(covers_mod.CLOTH), value="navy", label="Cloth colour (picture-window layout)")
-                        with gr.Row():
-                            cv_fx = gr.Slider(0, 1, 0.5, step=0.05, label="Focus left ↔ right (full background)")
-                            cv_fy = gr.Slider(0, 1, 0.5, step=0.05, label="Focus up ↕ down (full background)")
-                            cv_zoom = gr.Slider(0.8, 2.5, 1.0, step=0.05, label="Zoom (full background)")
-                        cv_make = gr.Button("Update preview", variant="primary")
-                    with gr.Column(scale=2):
-                        gr.Markdown("### 3 · Preview")
-                        cv_preview = gr.Image(label="Cover preview", type="filepath", height=420, interactive=False)
-                        cv_use = gr.Button("Use this cover", variant="primary")
-                        cv_msg = gr.Markdown()
-                cv_hits, cv_pic, cv_credit = gr.State([]), gr.State(""), gr.State("")
-
-            with gr.Tab("🎵 Music") as mu_tab:
-                gr.Markdown("Music for the title, between sections and at the end. Only recordings that are free to use (public domain or CC0, from "
-                            "Wikimedia Commons) are offered. Music plays **between** the speech, never under it. Pick tracks, choose where each goes, "
-                            "and it is mixed in when the book is assembled. Sections marked ★ are recommended for a bridge; change them freely.")
-                with gr.Row():
-                    with gr.Column(scale=3):
-                        gr.Markdown("### 1 · Find music")
-                        with gr.Row():
-                            mu_query = gr.Textbox(label="Search free recordings", scale=4, placeholder="e.g. Bach cello suite, Satie piano, Handel organ")
-                            mu_search = gr.Button("Search", scale=1)
-                        with gr.Row():
-                            mu_role = gr.Dropdown(["intro", "bridge", "outro"], value="intro", label="…or suggest music for the", scale=2)
-                            mu_suggest = gr.Button("Suggest", scale=1)
-                        mu_status = gr.Markdown()
-                        mu_table = gr.Dataframe(headers=["Title", "Artist", "Length", "Licence"], interactive=False, wrap=True, label="Results (click a row to add it)")
-                        mu_hear = gr.Audio(label="Last track added", interactive=False)
-                        with gr.Row():
-                            mu_lib = gr.Dropdown(label="My music library", choices=_track_choices(), scale=4)
-                            mu_remove = gr.Button("Remove from library", scale=1)
-                    with gr.Column(scale=3):
-                        gr.Markdown("### 2 · This book")
-                        mu_on = gr.Checkbox(label="Use music in this book", value=False)
-                        with gr.Row():
-                            mu_intro = gr.Dropdown(label="Title intro (start of the book)", choices=_track_choices(), scale=4)
-                            mu_intro_sec = gr.Slider(5, 60, 22, step=1, label="seconds", scale=2)
-                            mu_intro_start = gr.Number(0, label="start at (s)", scale=1)
-                            mu_intro_hear = gr.Button("▶", scale=0)
-                        mu_title = gr.Textbox(label="Spoken title read over the intro music (leave empty for a plain music intro). A new line starts a new part, after the pause below.", lines=3,
-                                              placeholder="The Gospel of John, a study edition.\nA copyright-free collection of introductions, and the passages of John from the original Greek.")
-                        mu_tpause = gr.Slider(0, 6, 2.8, step=0.2, label="Pause after the first line of the title (s), the music swells into it")
-                        with gr.Row():
-                            mu_lead = gr.Slider(3, 12, 6, step=1, label="Music alone before the title (s)")
-                            mu_tail = gr.Slider(3, 12, 6, step=1, label="Music alone after the title (s)")
-                            mu_fade = gr.Slider(4, 30, 12, step=1, label="Slow fade-out behind the first words (s)")
-                        with gr.Row():
-                            mu_duck = gr.Slider(-24, -4, -14, step=1, label="Music under the spoken title (dB)")
-                            mu_under = gr.Slider(-24, -3, -9, step=1, label="Music at the start of the book (dB), then fading out")
-                        with gr.Row():
-                            mu_bridge = gr.Dropdown(label="Bridge (between sections)", choices=_track_choices(), scale=4)
-                            mu_bridge_sec = gr.Slider(3, 30, 8, step=1, label="seconds", scale=2)
-                            mu_bridge_start = gr.Number(0, label="start at (s)", scale=1)
-                            mu_bridge_hear = gr.Button("▶", scale=0)
-                        with gr.Row():
-                            mu_outro = gr.Dropdown(label="Ending (end of the book)", choices=_track_choices(), scale=4)
-                            mu_outro_sec = gr.Slider(4, 120, 9, step=1, label="music goes on after the last word, including its fade-out (s)", scale=2)
-                            mu_outro_start = gr.Number(0, label="start at (s)", scale=1)
-                            mu_outro_hear = gr.Button("▶", scale=0)
-                        with gr.Row():
-                            mu_before = gr.Slider(5, 40, 20, step=1, label="Ending music starts fading in this long before the last word (s)")
-                            mu_outro_under = gr.Slider(-24, -3, -11, step=1, label="Ending music under the last words (dB)")
-                        with gr.Row():
-                            mu_level = gr.Slider(-14, 0, -4, step=1, label="Music loudness against the voice (dB)")
-                            mu_interval = gr.Slider(8, 90, 25, step=1, label="Recommend a bridge about every (minutes)")
-                        mu_listen = gr.Audio(label="Preview of the piece", interactive=False)
-                        with gr.Row():
-                            mu_speak = gr.Checkbox(label="Read each section's title aloud (\"Part one. The Word Became Flesh.\")", value=False, scale=3)
-                            mu_speak_pause = gr.Slider(0, 6, 2.8, step=0.2, label="Pause before and after each title (s)", scale=2)
-                        gr.Markdown("### 3 · Sections that get a bridge")
-                        mu_note = gr.Markdown()
-                        mu_sections = gr.CheckboxGroup(label="Bridge before these sections", choices=[], value=[])
-                        with gr.Row():
-                            mu_rec = gr.Button("Use the recommendation")
-                            mu_save = gr.Button("Save for this book", variant="primary")
-                        mu_msg = gr.Markdown()
-                        mu_credits = gr.Textbox(label="Credits for the tracks in use (kept in the book's folder)", lines=3, interactive=False)
-                mu_hits = gr.State([])
-            with gr.Tab("🎙 Clone", elem_id="clone-tab"):
+            with gr.Tab("🎙 Voice lab", elem_id="clone-tab", id="lab"):
                 gpu_bar()
                 gr.Markdown("Clone a voice from a short clean clip (5–12 s, one speaker, no music), compare the takes, then save it. "
                             "A saved voice can be spoken by F5-TTS, Chatterbox or Qwen3-TTS.")
@@ -2473,7 +2505,33 @@ def build_ui() -> gr.Blocks:
                         vp_tags = gr.Textbox(label="Description (e.g. US male)", scale=2)
                         vp_tag_btn = gr.Button("Tag this voice")
 
+            with gr.Tab("✨ Ask Claude", id="claude"):
+                gr.Markdown("Ask Claude to set up this book — “give the women different voices”, “make the narration calmer”, "
+                            "“fix how Morlock is said”. Claude works on a **copy** of the settings; you see exactly what would change "
+                            "and nothing is touched until you press Apply. It cannot start a generation, run commands or hear audio. "
+                            "Each question uses your Claude Code login (usually a few cents of usage); the cast, a few sample lines "
+                            "and the lexicon are sent to Anthropic.")
+                a_chat = gr.Chatbot(height=320, label="Conversation")
+                with gr.Row():
+                    a_in = gr.Textbox(label="What would you like set up?", scale=4, lines=2,
+                                      placeholder="e.g. Give each female character a different female voice, and make the narrator a little slower")
+                    a_go = gr.Button("Ask Claude", variant="primary", scale=1)
+                a_cost = gr.Markdown()
+                a_note = gr.Markdown()
+                a_diff = gr.Markdown("_Nothing to show._")
+                a_cover = gr.Image(label="Proposed cover", type="filepath", height=300, interactive=False, visible=False)
+                with gr.Row():
+                    a_apply = gr.Button("Apply these changes", variant="primary", interactive=False)
+                    a_discard = gr.Button("Discard", interactive=False)
+                a_session, a_spent = gr.State(""), gr.State(0.0)
+
+
         REMAKE_IN = [project, emo_cb, emo_base]
+        FLOW_OUTS = [strip_md] + [c for sid in workflow.STAGES for c in banners[sid][:3]]
+        for sid, (_md, nxt, tgt, ok) in banners.items():
+            nxt.click(lambda t: gr.Tabs(selected=t), tgt, tabs)
+            if sid in ("voices", "names"):
+                ok.click(lambda p, w=sid: workflow.ack(_wd(p), w) if p else None, project).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
         lex_snap = gr.State({})     # the lexicon table as loaded from lexicon.json (see save_lexicon)
         LEX_OUTS = [lex_df, term_dd, lex_snap]
@@ -2481,14 +2539,15 @@ def build_ui() -> gr.Blocks:
         load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
             gen_settings, project, GEN_OUTS).then(speed_text, project, speed_md).then(
-            prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)
+            prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         cast_outs = [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]
         prep_btn.click(run_prepare, [project, chap_df, prep_cbg], [prep_status, gen_prep, go]).then(
-            load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group])
+            load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
+            refresh_flow, [project, chap_df], FLOW_OUTS)
         gen_tab.select(prep_state, project, prep_outs)
         parse_btn.click(run_parse, [project, chap_df, endpoint, judge_cb],
                         [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group])
+            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         save_hints_btn.click(save_hints, [project, hints], status2)
         char_dd.change(show_lines, [project, char_dd], lines_df)
         review_out = [lines_df, roles_state, char_dd, target_dd]
@@ -2551,13 +2610,14 @@ def build_ui() -> gr.Blocks:
         qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
                         mode, single_dd, single_speed, single_group, *GEN_OUTS]
-        q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)
+        q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
-        ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)              # and open the book that is being made
+        ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
         q_timer.tick(queue_refresh, q_pick, QOUT)
+        q_timer.tick(refresh_flow, [project, chap_df], FLOW_OUTS)
         mu_outs = [mu_on, mu_intro, mu_bridge, mu_outro, mu_intro_sec, mu_intro_start, mu_bridge_sec, mu_bridge_start, mu_outro_sec, mu_outro_start,
                    mu_level, mu_interval, mu_sections, mu_note, mu_credits, mu_title, mu_lead, mu_tail, mu_fade, mu_duck, mu_under, mu_before, mu_outro_under, mu_tpause, mu_speak, mu_speak_pause]
-        mu_tab.select(music_load, project, mu_outs)
+        extras_tab.select(music_load, project, mu_outs)
         mu_search.click(music_search, mu_query, [mu_hits, mu_table, mu_status])
         mu_suggest.click(music_suggest, mu_role, [mu_hits, mu_table, mu_status])
         mu_table.select(music_pick, mu_hits, [mu_lib, mu_intro, mu_bridge, mu_outro, mu_hear, mu_status])
@@ -2584,7 +2644,7 @@ def build_ui() -> gr.Blocks:
                     [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
         a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover]).then(
             gen_settings, project, GEN_OUTS).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)
+            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
