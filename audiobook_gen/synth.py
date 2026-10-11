@@ -147,13 +147,14 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
     cuts = [[k for _, k in p] for p in pairs]                 # how each chunk ends: the join pauses by this
     from . import refine
     refined = refine.load(work)                      # the language pass, if the book has had one: added question marks, delivery
+    read = [list(r) for r in raw]                    # the chunks as they were before the language pass changed any
     if refined:
         raw = refine.apply_fixes(raw, segs, refined)
     feel = None   # per-chunk emotion settings (cfg "emotion: true"), for engines that take them
     if cfg.get("emotion") and any(resolve_voice(sg["speaker"], cfg)["engine"] == "chatterbox" for sg in segs):
         from .emotion import delivery
         yield 0, max(1, sum(map(len, raw))), "Reading the emotion of each sentence"
-        feel = delivery(segs, raw, cfg.get("emotion_base", 0.0), refine.hints(segs, raw, refined) if refined else None)
+        feel = delivery(segs, raw, cfg.get("emotion_base", 0.0), refine.hints(segs, read, refined) if refined else None)
     for si, seg in enumerate(segs):
         voice = resolve_voice(seg["speaker"], cfg)
         ename = voice["engine"]
@@ -164,6 +165,8 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
             if feel and ename == "chatterbox":
                 voice = {**voice, **feel[si][ci]}
             ov = overrides.get(f"{seg['id']}:{ci}") or {}
+            if ov.get("orig") not in (None, raw[si][ci]):          # the line at this position is no longer the one that was corrected
+                ov = {}
             spoken = ov.get("text") or chunk
             vv = {**voice, **ov["voice"]} if ov.get("voice") else voice          # a correction changes this clip only
             key = clip_key(spoken, vv, ename)

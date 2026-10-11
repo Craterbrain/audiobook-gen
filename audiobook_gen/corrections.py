@@ -81,7 +81,8 @@ def accept(work: Path, clip: dict, text: str, changes: dict, take: Path) -> str:
     changes = {k: v for k, v in changes.items() if v is not None}
     over = load_overrides(work)
     prev = over.get(clip["key"], {})
-    over[clip["key"]] = {"text": text, "voice": {**prev.get("voice", {}), **changes}, "was": prev.get("was") or clip["file"]}
+    over[clip["key"]] = {"text": text, "voice": {**prev.get("voice", {}), **changes}, "was": prev.get("was") or clip["file"],
+                         "orig": clip.get("orig")}
     voice = {**clip["voice"], **changes}
     name = f"{clip_key(text, voice, clip['engine'])}.wav"
     shutil.copyfile(take, work / "clips" / name)

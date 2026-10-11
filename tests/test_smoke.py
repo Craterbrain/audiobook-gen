@@ -2313,3 +2313,33 @@ def test_book_being_made_cannot_be_edited_and_new_ticks_need_prepare(tmp_path, m
     jq.update(j["id"], status="done")
     assert "Queued" in gui.corr_rebuild(str(p), True, "phone1")
     assert jq.load()[-1]["send_to"] == "phone1"
+
+
+def test_corrections_and_hints_follow_their_line_not_its_position(tmp_path):
+    import json
+    from audiobook_gen import refine
+    segs = [{"id": "s1"}, {"id": "s2"}]
+    tag = refine.text_tag("Run!")
+    data = {"items": {"s1:0": {"emo": "fear", "h": tag}, "s2:0": {"emo": "joy"}}}
+    assert refine.hints(segs, [["Run!"], ["Hello there."]], data)[0][0]["emo"] == "fear"
+    assert refine.hints(segs, [["A different line."], ["Hello there."]], data)[0][0] is None      # the line changed: no stale feeling
+    assert refine.hints(segs, [["x"], ["y"]], data)[1][0]["emo"] == "joy"                           # old data without a tag still works
+
+
+def test_override_is_ignored_when_the_line_has_moved(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    from audiobook_gen import synth
+    class Fake:
+        sample_rate = 24000
+        def synth(self, text, voice): return np.zeros(2400, np.float32)
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Fake())
+    work = tmp_path / "w"; work.mkdir()
+    (work / "clip_overrides.json").write_text(json.dumps({"1:0": {"text": "Fixed text.", "orig": "Old line.", "voice": {}}}))
+    cfg = {"voices": {"Narrator": {"engine": "kokoro", "voice": "bm_george"}}}
+    def spoken(text):
+        (work / "segments.json").write_text(json.dumps([{"id": 1, "speaker": "Narrator", "kind": "narration", "text": text, "chapter": 1}]))
+        list(synth.synthesize_iter(work, cfg))
+        return [m["text"] for m in json.loads((work / "clips_meta.json").read_text()).values()]
+    assert spoken("Old line.") == ["Fixed text."]                         # the same line: the correction applies
+    assert spoken("A new line took its place.") == ["A new line took its place."]      # another line now: it does not

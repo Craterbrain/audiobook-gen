@@ -1096,6 +1096,30 @@ def speed_text(project=None) -> str:
     return text
 
 
+def remake_note(project, emotion=None, emo_base=None) -> str:
+    """Warn what changing the emotion settings costs: a clip's settings are part of its file name, so every Chatterbox clip already
+    made for this book is recorded again (not just rebuilt). Stronger wording once the controls differ from what the book was made with."""
+    from .runstats import averages, clock
+    try:
+        work = _wd(project)
+        meta = json.loads((work / "clips_meta.json").read_text())
+        cfg = _cfg(project)
+    except Exception:
+        return ""
+    made = [m for f, m in meta.items() if m.get("engine") == "chatterbox" and (work / "clips" / f).exists()]
+    if not made:
+        return ""
+    chars = sum(len(m.get("text", "")) for m in made)
+    cps = (averages().get("chatterbox") or {}).get("cps")
+    cost = f", roughly {clock(chars / cps)} of GPU time" if cps else ""
+    changed = emotion is not None and (bool(emotion) != bool(cfg.get("emotion")) or
+                                       (bool(emotion) and abs(float(emo_base or 0) - float(cfg.get("emotion_base", 0.0))) > 1e-9))
+    if changed:
+        return (f"⚠️ **This records {len(made):,} Chatterbox clips again{cost}.** Emotion settings are part of each clip, so the lines already made "
+                "can't be reused (they stay on disk; setting it back reuses them). Name-check improvements made to those clips are lost too.")
+    return f"ℹ️ {len(made):,} Chatterbox clips are already made. Changing the emotion settings records them again{cost}."
+
+
 def gen_settings(project):
     """Generate-tab engine options as saved in the project's config."""
     cfg = _cfg(project)
@@ -1922,6 +1946,9 @@ def build_ui() -> gr.Blocks:
                     judge_cb = gr.Checkbox(label="Small-LLM tie-breaker for ambiguous quotes (Qwen2.5-1.5B, ~3 GB)")
                 gr.Markdown("### Who reads the book?")
                 mode = gr.Radio([MODE_MULTI, MODE_SINGLE], value=MODE_MULTI, label="Narration style")
+                gr.Markdown("ℹ️ On a book that is already made: changing a character's voice or pace records that character's lines again "
+                            "(about the cost of making them the first time), and switching the narration style can move corrections and emotion hints "
+                            "to other lines, so they are ignored where the line no longer matches.")
                 with gr.Accordion("Voice preview & menu help", open=False):
                     gr.Markdown("Every saved clone shows up three times in the voice menus: **(F5)**, **(Chatterbox)** and **(Qwen3)**. "
                                 "The **Pace** slider applies to Kokoro and F5; Chatterbox and Qwen3 choose their own pace "
@@ -2073,6 +2100,7 @@ def build_ui() -> gr.Blocks:
                 gen_prep = gr.Markdown("⛔ **Text not prepared** (no book loaded).")
                 eng_status = gr.Markdown(engine_status())
                 speed_md = gr.Markdown(speed_text())
+                remake_md = gr.Markdown()
                 with gr.Row():
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
                                          info="Each sentence gets its own expressiveness, from its mood and tags like “cried” or “whispered”.")
@@ -2445,6 +2473,7 @@ def build_ui() -> gr.Blocks:
                         vp_tags = gr.Textbox(label="Description (e.g. US male)", scale=2)
                         vp_tag_btn = gr.Button("Tag this voice")
 
+        REMAKE_IN = [project, emo_cb, emo_base]
         GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
         lex_snap = gr.State({})     # the lexicon table as loaded from lexicon.json (see save_lexicon)
         LEX_OUTS = [lex_df, term_dd, lex_snap]
@@ -2452,7 +2481,7 @@ def build_ui() -> gr.Blocks:
         load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
             gen_settings, project, GEN_OUTS).then(speed_text, project, speed_md).then(
-            prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS)
+            prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)
         cast_outs = [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]
         prep_btn.click(run_prepare, [project, chap_df, prep_cbg], [prep_status, gen_prep, go]).then(
             load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group])
@@ -2473,6 +2502,7 @@ def build_ui() -> gr.Blocks:
         refresh_btn.click(refresh_voices, project, single_dd)
         save_seg_btn.click(save_segments, [project, seg_df], [roles_state, char_dd, target_dd, status2])
         save_seg_btn.click(show_lines, [project, char_dd], lines_df)
+        emo_cb.change(remake_note, REMAKE_IN, remake_md); emo_base.release(remake_note, REMAKE_IN, remake_md)
         lex_btn.click(run_lexicon, [project, seed_dd, lang_tb, detect_cb, title, author], [lex_df, status3]).then(
             lambda df: gr.update(choices=list(df["term"])), lex_df, term_dd).then(lex_snapshot, project, lex_snap)
         fill_btn.click(lex_autofill, [project, lex_df, lang_tb, known_cb], [lex_df, status3])
@@ -2521,9 +2551,9 @@ def build_ui() -> gr.Blocks:
         qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
                         mode, single_dd, single_speed, single_group, *GEN_OUTS]
-        q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS)
+        q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
-        ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS)              # and open the book that is being made
+        ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)              # and open the book that is being made
         q_timer.tick(queue_refresh, q_pick, QOUT)
         mu_outs = [mu_on, mu_intro, mu_bridge, mu_outro, mu_intro_sec, mu_intro_start, mu_bridge_sec, mu_bridge_start, mu_outro_sec, mu_outro_start,
                    mu_level, mu_interval, mu_sections, mu_note, mu_credits, mu_title, mu_lead, mu_tail, mu_fade, mu_duck, mu_under, mu_before, mu_outro_under, mu_tpause, mu_speak, mu_speak_pause]
@@ -2554,7 +2584,7 @@ def build_ui() -> gr.Blocks:
                     [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
         a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover]).then(
             gen_settings, project, GEN_OUTS).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS)
+            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md)
         a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],

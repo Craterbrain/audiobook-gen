@@ -8,6 +8,7 @@ text only half says.
 
 The model never writes text: it answers multiple-choice questions by the probability of a letter (one forward pass each,
 batched), so there is nothing to parse and nothing to go wrong. Results go to delivery.json beside the book's other files."""
+import hashlib
 import json
 import math
 import re
@@ -188,6 +189,7 @@ def run(work: Path, cfg: dict, scorer=None, progress=print) -> dict:
             if n in emotional:
                 emo, lvl, ep = emotional[n]
                 e = {"emo": emo, "lvl": lvl, "conf": round(gprob[n][1], 2)}
+            e["h"] = text_tag(c)                       # which passage this was read from (hints() ignores it if the text has changed)
             items[f"{segs[i]['id']}:{j}"] = e
     finally:
         if own:
@@ -219,7 +221,15 @@ def apply_fixes(raw: list[list[str]], segs: list[dict], data: dict) -> list[list
     return raw
 
 
+def text_tag(chunk: str) -> str:
+    return hashlib.sha1(chunk.encode()).hexdigest()[:8]
+
+
 def hints(segs: list[dict], raw: list[list[str]], data: dict) -> list[list[dict | None]]:
     """The model's delivery for each chunk, shaped like `raw`."""
     items = data.get("items") or {}
-    return [[items.get(f"{segs[i]['id']}:{j}") for j, _ in enumerate(cs)] for i, cs in enumerate(raw)]
+
+    def pick(i, j, c):
+        e = items.get(f"{segs[i]['id']}:{j}")
+        return None if e and e.get("h") and e["h"] != text_tag(c) else e      # the passage moved or changed since it was read
+    return [[pick(i, j, c) for j, c in enumerate(cs)] for i, cs in enumerate(raw)]
