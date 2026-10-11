@@ -2381,3 +2381,17 @@ def test_title_case_keeps_roman_numerals_and_capitalises_after_them():
 def test_spoken_title_after_a_book_number_starts_with_a_capital():
     from audiobook_gen import titles
     assert titles.spoken("Book One the Coming of the Martians") == "Book one. The Coming of the Martians."
+
+
+def test_removing_from_the_queue_asks_first(tmp_path, monkeypatch):
+    import pytest, gradio as gr
+    from audiobook_gen import gui
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    ids = [jq.add(str(work), t)["id"] for t in ("One", "Two")]
+    with pytest.raises(gr.Error):
+        gui.queue_remove_ask([])                                                  # nothing ticked
+    show, text = gui.queue_remove_ask([ids[0]])
+    assert show["visible"] is True and "“One”" in text and "stay on disk" in text and len(jq.load()) == 2   # asking removes nothing
+    assert gui.queue_remove_cancel()[0]["visible"] is False and len(jq.load()) == 2
+    out = gui.queue_remove_yes([ids[0]])
+    assert out[0]["visible"] is False and "Removed 1" in out[2] and [j["title"] for j in jq.load()] == ["Two"]

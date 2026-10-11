@@ -1529,12 +1529,30 @@ def queue_cancel(picked):
     return (f"Cancelled {n} book(s). Clips already made are kept." if n else "Nothing to cancel."), *queue_refresh(picked)
 
 
+def queue_remove_ask(picked):
+    """Step one of Remove: say what will go and ask. Nothing is removed until 'Yes, remove' is pressed."""
+    from . import jobqueue
+    ids = _need(picked)
+    titles = [f"“{j['title']}” ({j['status']})" for j in jobqueue.load() if j["id"] in ids]
+    return (gr.update(visible=True),
+            f"**Remove {len(titles)} book(s) from the list?** " + ", ".join(titles[:6]) + (" …" if len(titles) > 6 else "") +
+            "  \nOnly the list entry goes. The clips and any finished audiobook stay on disk.")
+
+
+def queue_remove_cancel():
+    return gr.update(visible=False), ""
+
+
 def queue_remove(picked):
     from . import jobqueue
     ids = _need(picked)
     n = jobqueue.remove_many(ids)
     left = len(ids) - n
     return (f"Removed {n} book(s) from the list." + (f" {left} is being made right now: pause or cancel it first." if left else "")), *queue_refresh([])
+
+
+def queue_remove_yes(picked):
+    return (gr.update(visible=False), "", *queue_remove(picked))
 
 
 # ---------- Cover ----------
@@ -2431,8 +2449,12 @@ def build_ui() -> gr.Blocks:
                     q_top = gr.Button("⏫ To the top"); q_up = gr.Button("🔼 Up"); q_down = gr.Button("🔽 Down"); q_bottom = gr.Button("⏬ To the bottom")
                 with gr.Row():
                     q_hold = gr.Button("⏸ Pause / save for later"); q_resume = gr.Button("▶️ Resume")
-                    q_cancel = gr.Button("Cancel"); q_remove = gr.Button("Remove from list")
+                    q_cancel = gr.Button("Cancel"); q_remove = gr.Button("Remove from list…")
                     q_open = gr.Button("Open this book")
+                with gr.Group(visible=False) as q_confirm:
+                    q_confirm_md = gr.Markdown()
+                    with gr.Row():
+                        q_yes = gr.Button("Yes, remove from the list", variant="stop"); q_no = gr.Button("No, keep it")
                 with gr.Row():
                     q_send = gr.Button("📱 Send to my phone when done"); q_nosend = gr.Button("Don’t send to my phone")
                 with gr.Accordion("Change the schedule of the ticked books", open=False):
@@ -2687,7 +2709,9 @@ def build_ui() -> gr.Blocks:
         q_hold.click(queue_hold, q_pick, QMSG)
         q_resume.click(queue_resume, q_pick, QMSG)
         q_cancel.click(queue_cancel, q_pick, QMSG)
-        q_remove.click(queue_remove, q_pick, QMSG)
+        q_remove.click(queue_remove_ask, q_pick, [q_confirm, q_confirm_md])
+        q_yes.click(queue_remove_yes, q_pick, [q_confirm, q_confirm_md, *QMSG])
+        q_no.click(queue_remove_cancel, None, [q_confirm, q_confirm_md])
         qs_apply.click(queue_reschedule, [q_pick, qs_when, qs_win, qs_w1, qs_w2], QMSG)
         qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
