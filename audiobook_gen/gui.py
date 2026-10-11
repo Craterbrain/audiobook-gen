@@ -173,7 +173,10 @@ def prep_state(project):
     except (OSError, ValueError):
         ticked = prep.default_selected()
     ticked = [t for t in ticked if t in prep.BY_ID] or prep.default_selected()
-    return (gr.update(value=ticked), prep.describe(work), prep.describe(work), gr.update(interactive=st["ready"]))
+    from . import jobqueue
+    waiting = jobqueue.pending_for(str(work))
+    label = "Prepare the book first (① Book)" if not st["ready"] else ("Update the queued job" if waiting else "Generate audiobook")
+    return (gr.update(value=ticked), prep.describe(work), prep.describe(work), gr.update(interactive=st["ready"], value=label))
 
 
 def open_project(work, title="", author="", cover=""):
@@ -2244,9 +2247,10 @@ def build_ui() -> gr.Blocks:
 
             with gr.Tab("⑤ Make", id="make") as gen_tab:
                 banner("make")
-                gen_prep = gr.Markdown("⛔ **Text not prepared** (no book loaded).")
-                eng_status = gr.Markdown(engine_status())
-                speed_md = gr.Markdown(speed_text())
+                with gr.Accordion("Details: text status, engines, speed", open=False):
+                    gen_prep = gr.Markdown("⛔ **Text not prepared** (no book loaded).")
+                    eng_status = gr.Markdown(engine_status())
+                    speed_md = gr.Markdown(speed_text())
                 remake_md = gr.Markdown()
                 with gr.Row():
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
