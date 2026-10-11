@@ -1024,10 +1024,18 @@ def parse_respell(text: str) -> list[tuple[str, str]]:
 
 
 def finished_list() -> list[dict]:
-    """The books the `done` reply shows, in its numbering: the latest twelve finished or failed, the newest first (number 1)."""
+    """The books the `done` reply shows, in its numbering: the latest twelve, the newest first (number 1). A book appears once, however
+    often it was rebuilt: its newest finished job (a failure only stands if the book never finished)."""
     done = [j for j in load() if j["status"] in ("done", "failed")]
-    done.sort(key=lambda j: j.get("finished") or "", reverse=True)                  # stable: the same finish time keeps the queue's order
-    return done[:12]
+    done.sort(key=lambda j: (j["status"] == "done", j.get("finished") or ""), reverse=True)         # finished beats failed, then the newest
+    seen, one = set(), []
+    for j in done:
+        book = str(j.get("out") or j.get("work") or j["id"])
+        if book not in seen:
+            seen.add(book)
+            one.append(j)
+    one.sort(key=lambda j: j.get("finished") or "", reverse=True)                  # stable: the same finish time keeps the queue's order
+    return one[:12]
 
 
 def send_book(arg: str, spawn=None) -> str:

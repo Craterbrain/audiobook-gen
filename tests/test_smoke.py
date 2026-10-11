@@ -2156,6 +2156,16 @@ def test_done_lists_the_newest_book_first(tmp_path, monkeypatch):
     assert [j["title"] for j in jq.finished_list()] == ["Newest", "Middle", "Old"]
 
 
+def test_a_rebuilt_book_appears_once_in_the_done_list(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    for title, out, status, when in (("Book", "b.m4b", "done", "2026-10-09 08:00"), ("Book", "b.m4b", "done", "2026-10-10 08:00"),
+                                     ("Book", "b.m4b", "failed", "2026-10-11 08:00"), ("Other", "o.m4b", "done", "2026-10-09 12:00")):
+        j = jq.add(str(work), title, out=str(tmp_path / out))
+        jq.update(j["id"], status=status, finished=when)
+    got = jq.finished_list()
+    assert [(j["title"], j["finished"]) for j in got] == [("Book", "2026-10-10 08:00"), ("Other", "2026-10-09 12:00")]       # the failed rebuild does not hide the finished book
+
+
 def test_epub_from_a_work_folder(tmp_path):
     import json, zipfile
     from audiobook_gen.epubout import build
