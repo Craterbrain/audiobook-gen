@@ -32,6 +32,7 @@ WORDS = ("one two three four five six seven eight nine ten eleven twelve thirtee
 def _body(t: str) -> str:
     """The words of a title: an ALL-CAPS heading would be read letter by letter, so it becomes title case."""
     t = re.sub(r"\bEsq\b\.?", "Esquire", t, flags=re.I)
+    t = t[:1].upper() + t[1:]                       # a heading after its number starts with a capital ("Book one. The Coming ...")
     if t.isupper():
         return _cap(t)
     return re.sub(r"\b[A-Z]{2,}\b", lambda x: x[0].capitalize(), t)

@@ -2369,3 +2369,15 @@ def test_spoken_titles_read_roman_numbers_and_book_headings():
     assert titles.spoken("II. THE FALLING STAR.") == "Two. The Falling Star."
     assert titles.spoken("XVII. THE “THUNDER CHILD”.") == "Seventeen. The “Thunder Child”."
     assert titles.spoken("Book of Kells") == "Book of Kells." and titles.spoken("CHAPTER IV") == "Chapter four."
+
+
+def test_title_case_keeps_roman_numerals_and_capitalises_after_them():
+    from audiobook_gen import textclean
+    assert textclean.title_case("II. THE FALLING STAR.") == "II. The Falling Star."
+    assert textclean.title_case("XII. WHAT I SAW OF THE DESTRUCTION OF WEYBRIDGE") == "XII. What I Saw of the Destruction of Weybridge"
+    assert textclean.title_case("CHAPTER I") == "Chapter I"
+
+
+def test_spoken_title_after_a_book_number_starts_with_a_capital():
+    from audiobook_gen import titles
+    assert titles.spoken("Book One the Coming of the Martians") == "Book one. The Coming of the Martians."

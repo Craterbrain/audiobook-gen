@@ -46,7 +46,12 @@ def esquire(text: str) -> str:
 
 def title_case(title: str) -> str:
     """A title written in capitals becomes Title Case (Esq. is spelled out); any other title is only given the Esquire fix."""
-    return esquire(_heading(title.strip()) or title)
+    t = _heading(title.strip()) or title
+    m = re.match(r"^(M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))\.\s+(\S.*)$", t, re.I)
+    if m and m[1] and (m[1] != m[1].upper() or m[2][0].islower()):                       # an earlier version wrote "II. THE X" as "Ii. the X": put it right
+        rest = m[2][0].upper() + m[2][1:] if m[2][0].islower() else m[2]
+        t = f"{m[1].upper()}. {rest}"
+    return esquire(t)
 
 
 def evidence(texts: list[str]) -> set[str]:
@@ -69,9 +74,11 @@ def _heading(par: str) -> str | None:
         core = re.sub(r"[^A-Za-z]", "", w)
         if ROMAN.match(core) and (len(core) == 1 or core in ("II", "III", "IV", "VI", "VII", "VIII", "IX", "XI", "XII")) and i > 0:
             out.append(w)
+        elif i == 0 and w.endswith(".") and len(words) > 1 and ROMAN.fullmatch(core):      # "XII. WHAT I SAW" keeps its numeral
+            out.append(w)
         elif core.upper() in KEEP:
             out.append(w)
-        elif i and core.lower() in SMALL_WORDS:
+        elif i and not words[i - 1].endswith((".", ":")) and core.lower() in SMALL_WORDS:
             out.append(w.lower())
         else:
             out.append(re.sub(r"[A-Za-z]+", lambda m: m.group(0).capitalize(), w))
