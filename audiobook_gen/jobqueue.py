@@ -123,6 +123,33 @@ def pending_for(work: str) -> dict | None:
     return next((j for j in jobs_for(work) if j["status"] in ("queued", "held", "paused")), None)
 
 
+def book_key(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
+
+
+def same_book(work: str, title: str, author: str = "") -> list[dict]:
+    """Jobs for the same book (same title, and the same author when both are known) made from a different work folder.
+    Cancelled ones don't count. Newest first."""
+    w = str(Path(work).resolve())
+    key, au = book_key(title), book_key(author)
+    out = [j for j in load() if j["status"] != "cancelled" and str(Path(j["work"]).resolve()) != w
+           and book_key(j["title"]) == key and (not au or not j.get("author") or book_key(j["author"]) == au)]
+    return sorted(out, key=lambda j: j.get("created") or "", reverse=True)
+
+
+def supersede(old_ids: list[str], new_id: str) -> int:
+    """A newer job replaces these: ones waiting or being made are cancelled (their clips stay on disk); finished ones are left as they are.
+    Each gets a note saying so. Returns how many were cancelled."""
+    n = 0
+    for j in load():
+        if j["id"] in old_ids:
+            if j["status"] in ("queued", "paused", "running", "held"):
+                update(j["id"], status="cancelled", note=f"replaced by a newer job for this book ({new_id})"); n += 1
+            else:
+                update(j["id"], note=f"replaced by a newer job for this book ({new_id})")
+    return n
+
+
 def cancel(job_id: str) -> None:
     update(job_id, status="cancelled", note="cancelled by you")
 

@@ -1213,7 +1213,7 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
 
 def generate_queued(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
                     emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when="", window_on=False, w_start="23:00", w_stop="06:30",
-                    send=False, device=""):
+                    send=False, device="", supersede=None):
     """The Generate button: add the book to the queue to start as soon as the GPU is free. The queue runner makes it, watches it,
     and keeps going if this app is closed."""
     if send and not device:
@@ -1223,8 +1223,43 @@ def generate_queued(project, chap_df, title, author, cover, crossfade, p_sent, p
             if chatterbox_workers(cb_workers) > 1 and vram and vram < 16 else "")
     msg, *_ = queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
                         emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop,
-                        device if send else "")
+                        device if send else "", supersede)
     return msg + " Follow it on the **Queue** tab; the finished file appears here." + warn
+
+
+def _dups(project, title, author):
+    from . import jobqueue
+    meta = {}
+    try:
+        meta = json.loads((_wd(project) / "chapters.json").read_text())
+    except Exception:
+        pass
+    return jobqueue.same_book(str(_wd(project)), title or meta.get("title", ""), author or meta.get("author", ""))
+
+
+def generate_flow(*a, dup="ask"):
+    """Generate with a duplicate check. dup: 'ask' (stop and ask if the same book is already queued from another folder),
+    'add' (queue it as well) or 'replace' (queue it and cancel the earlier job). Returns
+    (message, duplicate question shown, its text, remove-earlier question shown, its text, the earlier job ids)."""
+    hide = gr.update(visible=False)
+    dups = _dups(a[0], a[2], a[3]) if dup == "ask" else []
+    if dups:
+        lines = "; ".join(f"“{j['title']}” — {j['status']}" + (f" {j['progress']}" if j.get("progress") and j["status"] == "running" else "") +
+                          f", from `{Path(j['work']).name}`" for j in dups[:4])
+        return ("", gr.update(visible=True), f"⚠️ **This book is already in the queue:** {lines}. Queueing it again makes the same book twice.",
+                hide, "", [])
+    earlier = [j["id"] for j in _dups(a[0], a[2], a[3])] if dup == "replace" else []
+    msg = generate_queued(*a, supersede=earlier or None)
+    if earlier:
+        return (msg + " The earlier job was cancelled (its clips are kept).", hide, "", gr.update(visible=True),
+                "**Remove the earlier job from the queue list too?** Only the list entry goes; its clips and files stay on disk.", earlier)
+    return msg, hide, "", hide, "", []
+
+
+def dup_remove(ids):
+    from . import jobqueue
+    n = jobqueue.remove_many(list(ids or []))
+    return f"Removed {n} earlier job(s) from the list.", gr.update(visible=False)
 
 
 def gen_stop(project):
@@ -1466,7 +1501,7 @@ def _parse_schedule(when, window_on, w_start, w_stop) -> tuple[str, str]:
     return not_before, window
 
 
-def _enqueue(work, title, author, cover, chapters, not_before, window, send_to):
+def _enqueue(work, title, author, cover, chapters, not_before, window, send_to, supersede=None):
     """Queue a book once. If it already has a waiting job, that job is updated instead of adding a second one.
     Returns (job, updated). Refuses a book whose text has not been prepared."""
     from . import jobqueue
@@ -1482,12 +1517,14 @@ def _enqueue(work, title, author, cover, chapters, not_before, window, send_to):
     else:
         job, updated = jobqueue.add(str(work), title, author, cover, "", "", chapters, not_before, window, send_to), False
         jobqueue.ensure_supervisor()
+    if supersede:
+        jobqueue.supersede(supersede, job["id"])
     workflow.stamp_queued(work, job["id"], title, author)          # what this build is made from, so a later change can say what it costs
     return job, updated
 
 
 def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
-              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop, send_to=""):
+              emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop, send_to="", supersede=None):
     from . import jobqueue
     work, cfg, only = _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
                                           emotion, emo_base, lex_label, p_cont, p_tag, cb_workers)
@@ -1496,7 +1533,7 @@ def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para,
     chapters = sorted(only) if only and only != all_chapters else None
     if send_to:
         jobqueue.save_default_device(send_to)
-    jq_job, updated = _enqueue(work, title or work.name, author or "", cover or "", chapters, not_before, window, send_to)
+    jq_job, updated = _enqueue(work, title or work.name, author or "", cover or "", chapters, not_before, window, send_to, supersede)
     when_txt = f"from {not_before}" if not_before else "as soon as the GPU is free"
     return (f"{'Updated the waiting job for' if updated else 'Queued'} “{jq_job['title']}” — starts {when_txt}" + (f", only between {window}" if window else "") +
             ". It is watched: if it stalls or crashes it is restarted." + (" It will be sent to your phone when it is done." if send_to else "")), *queue_refresh()
@@ -2350,6 +2387,16 @@ def build_ui() -> gr.Blocks:
                     g_find = gr.Button("↻ Find devices", scale=1)
                 with gr.Row():
                     go = gr.Button("Generate audiobook", variant="primary"); stop = gr.Button("Cancel")
+                with gr.Group(visible=False) as dup_box:
+                    dup_md = gr.Markdown()
+                    with gr.Row():
+                        dup_replace = gr.Button("Replace the earlier job", variant="primary"); dup_add = gr.Button("Queue it as well")
+                        dup_cancel = gr.Button("Cancel")
+                with gr.Group(visible=False) as rm_box:
+                    rm_md = gr.Markdown()
+                    with gr.Row():
+                        rm_yes = gr.Button("Yes, remove it from the list", variant="stop"); rm_no = gr.Button("No, keep it listed")
+                rm_ids = gr.State([])
                 status4 = gr.Markdown()
                 with gr.Row():
                     m4b = gr.File(label="M4B"); ch1 = gr.Audio(label="First chapter (preview)")
@@ -2676,8 +2723,14 @@ def build_ui() -> gr.Blocks:
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
         QOUT = [q_state, q_tbl, q_now, q_runner, q_pick]
         QMSG = [q_msg] + QOUT
-        go.click(generate_queued, [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2, g_send, g_dev],
-                 status4).then(queue_refresh, q_pick, QOUT)
+        GO_IN = [project, chap_df, title, author, cover, xf, ps, pp, pc, k_workers, f5_half, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, g_when, g_win, g_w1, g_w2, g_send, g_dev]
+        GO_OUT = [status4, dup_box, dup_md, rm_box, rm_md, rm_ids]
+        go.click(generate_flow, GO_IN, GO_OUT).then(queue_refresh, q_pick, QOUT)
+        dup_add.click(lambda *a: generate_flow(*a, dup="add"), GO_IN, GO_OUT).then(queue_refresh, q_pick, QOUT)
+        dup_replace.click(lambda *a: generate_flow(*a, dup="replace"), GO_IN, GO_OUT).then(queue_refresh, q_pick, QOUT)
+        dup_cancel.click(lambda: (gr.update(visible=False), ""), None, [dup_box, dup_md])
+        rm_yes.click(dup_remove, rm_ids, [status4, rm_box]).then(queue_refresh, q_pick, QOUT)
+        rm_no.click(lambda: gr.update(visible=False), None, rm_box)
         stop.click(gen_stop, project, status4)
         gen_shown = gr.State("")
         q_timer.tick(gen_panel, [project, gen_shown], [status4, m4b, ch1, gen_shown])

@@ -2395,3 +2395,27 @@ def test_removing_from_the_queue_asks_first(tmp_path, monkeypatch):
     assert gui.queue_remove_cancel()[0]["visible"] is False and len(jq.load()) == 2
     out = gui.queue_remove_yes([ids[0]])
     assert out[0]["visible"] is False and "Removed 1" in out[2] and [j["title"] for j in jq.load()] == ["Two"]
+
+
+def test_same_book_from_another_folder_asks_and_can_replace_the_earlier_job(tmp_path, monkeypatch):
+    import shutil
+    import pandas as pd
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    jq_, work_a = _queue_env(tmp_path, monkeypatch)
+    work_b = tmp_path / "book_copy"; shutil.copytree(work_a, work_b)
+    old = jq.add(str(work_a), "The war of the worlds", "H. G. Wells")
+    chap = pd.DataFrame([[True, 1, "One", 6]], columns=gui.CHAP_COLS)
+    args = (str(work_b), chap, "The War of the Worlds", "H. G. Wells", "", 60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, False)
+    out = gui.generate_flow(*args)                                           # same book, other folder: asks, queues nothing
+    assert out[1]["visible"] is True and "already in the queue" in out[2] and len(jq.load()) == 1
+    out = gui.generate_flow(*args, dup="add")                                # queue it as well
+    assert len(jq.load()) == 2 and out[1]["visible"] is False
+    jq.remove_many([jq.load()[-1]["id"]])
+    out = gui.generate_flow(*args, dup="replace")                            # replace: the earlier job is cancelled, then asks about removing it
+    jobs = {j["id"]: j for j in jq.load()}
+    assert jobs[old["id"]]["status"] == "cancelled" and "replaced" in jobs[old["id"]]["note"]
+    assert out[3]["visible"] is True and out[5] == [old["id"]] and len(jobs) == 2
+    msg, box = gui.dup_remove(out[5])                                        # yes: the entry goes from the list (nothing else)
+    assert "Removed 1" in msg and old["id"] not in {j["id"] for j in jq.load()} and work_a.exists()
+    assert jq.same_book(str(work_b), "The War of the Worlds") == []          # the book itself, from its own folder, is not a duplicate
