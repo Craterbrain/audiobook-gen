@@ -1392,6 +1392,7 @@ def test_chapters_encoded_side_by_side_match_the_single_pass_encode(tmp_path, mo
     list(synth.synthesize_iter(tmp_path, cfg))
     probe = lambda f: json.loads(subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_chapters", "-show_format", str(f)], capture_output=True, text=True).stdout)
     outs = {}
+    cfg = {**cfg, "audio_codec": "aac"}                                       # the AAC path joins separately encoded chapters; Opus is encoded in one pass
     for label, workers in (("serial", 1), ("parallel", 3)):
         outs[label] = probe(assemble.assemble(tmp_path, {**cfg, "encode_workers": workers}, tmp_path / f"{label}.m4b", None, "T", "A"))
     assert abs(float(outs["serial"]["format"]["duration"]) - float(outs["parallel"]["format"]["duration"])) < 0.2
@@ -1402,6 +1403,15 @@ def test_chapters_encoded_side_by_side_match_the_single_pass_encode(tmp_path, mo
     monkeypatch.setattr(assemble, "AAC_FRAME", 48000)
     out = probe(assemble.assemble(tmp_path, {**cfg, "encode_workers": 3}, tmp_path / "fallback.m4b", None, "T", "A"))
     assert abs(float(out["format"]["duration"]) - float(outs["serial"]["format"]["duration"])) < 0.2
+    # Opus is the default codec: the same book, in an .m4b, with the same chapters and length
+    opus_cfg = {k: v for k, v in cfg.items() if k != "audio_codec"}
+    opus_path = assemble.assemble(tmp_path, {**opus_cfg, "encode_workers": 3}, tmp_path / "opus.m4b", None, "T", "A")
+    streams = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(opus_path)],
+                             capture_output=True, text=True).stdout.split()
+    o = probe(opus_path)
+    assert streams == ["opus"] and len(o["chapters"]) == 3 and abs(float(o["format"]["duration"]) - float(outs["serial"]["format"]["duration"])) < 0.3
+    assert subprocess.run(["ffmpeg", "-v", "error", "-i", str(opus_path), "-f", "null", "-"], capture_output=True).stderr == b""      # decodes clean
+    assert assemble.audio_codec({"audio_codec": "AAC"}) == "aac" and "loudnorm=I=-16.0" in assemble.loudnorm({})
 
 
 def test_a_send_the_phone_never_fetched_counts_as_failed(monkeypatch):

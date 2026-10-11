@@ -365,6 +365,24 @@ def make_cover(path: Path, title: str, author: str, background: str | None = Non
     return path
 
 
+LOUDNESS_LUFS = -16.0     # integrated loudness of the finished book (it was -18; a little louder is easier to hear over a noisy room)
+
+
+def loudnorm(cfg: dict | None = None) -> str:
+    return f"loudnorm=I={float((cfg or {}).get('loudness_lufs', LOUDNESS_LUFS))}:TP=-1.5:LRA=11"
+
+
+def audio_codec(cfg: dict | None = None) -> str:
+    """'opus' (the default) or 'aac' (what Apple Books and some old players need), from cfg['audio_codec']."""
+    c = str((cfg or {}).get("audio_codec", "opus")).lower()
+    return "aac" if c in ("aac", "m4a") else "opus"
+
+
+def codec_args(cfg: dict | None = None) -> list[str]:
+    br = str((cfg or {}).get("audio_bitrate", "64k"))
+    return ["-c:a", "libopus", "-b:a", br, "-vbr", "on"] if audio_codec(cfg) == "opus" else ["-c:a", "aac", "-b:a", br]
+
+
 AAC_FRAME = 1024          # samples in one AAC frame: each separately encoded piece adds one frame of encoder lead-in when joined
 
 
@@ -373,15 +391,15 @@ def encode_workers(cfg: dict) -> int:
     return int(cfg.get("encode_workers") or max(1, min(6, (os.cpu_count() or 2) // 2)))
 
 
-def encode_chapters(wavs: list[Path], sr: int, workers: int, run=None) -> list[Path]:
+def encode_chapters(wavs: list[Path], sr: int, workers: int, run=None, cfg: dict | None = None) -> list[Path]:
     """Loudness-normalise and AAC-encode each chapter file on its own, several at a time (one ffmpeg process per chapter)."""
     from concurrent.futures import ThreadPoolExecutor
     run = run or (lambda cmd: subprocess.run(cmd, check=True))
 
     def one(wav: Path) -> Path:
         out = wav.with_suffix(".m4a")
-        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", "loudnorm=I=-18:TP=-2:LRA=11", "-ar", str(sr), "-ac", "1",
-             "-c:a", "aac", "-b:a", "64k", "-f", "ipod", str(out)])
+        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", loudnorm(cfg), "-ar", str(sr), "-ac", "1",
+             *codec_args({**(cfg or {}), "audio_codec": "aac"}), "-f", "ipod", str(out)])
         return out
     with ThreadPoolExecutor(workers) as ex:
         return list(ex.map(one, wavs))
@@ -449,18 +467,20 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wavs = [Path(x[6:-1]) for x in listing]
 
+    opus = audio_codec(cfg) == "opus"       # Opus in an .m4b (mp4) file; AAC pieces can be encoded side by side and joined, Opus is encoded in one pass
+
     def finish(list_file: Path, info: list, codec_args: list[str], filters: list[str]) -> None:
         (work / "chapters.ffmeta").write_text(ffmeta(info, title, author))
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(list_file),
                         "-i", str(work / "chapters.ffmeta"), "-i", str(cover_path),
                         "-map", "0:a", "-map", "2:v", "-map_metadata", "1", "-map_chapters", "1", *filters,
-                        *codec_args, "-c:v", "mjpeg", "-disposition:v:0", "attached_pic", "-movflags", "+faststart", "-f", "ipod", str(out_path)], check=True)
+                        *codec_args, "-c:v", "mjpeg", "-disposition:v:0", "attached_pic", "-movflags", "+faststart", "-f", "mp4" if opus else "ipod", str(out_path)], check=True)
 
     workers = encode_workers(cfg)
-    if workers > 1 and len(wavs) > 1:
+    if workers > 1 and len(wavs) > 1 and not opus:
         try:                  # chapters are normalised and encoded side by side, then joined without re-encoding
             print(f"[assemble] encoding {len(wavs)} chapters, {workers} at a time", flush=True)
-            pieces = encode_chapters(wavs, sr, workers)
+            pieces = encode_chapters(wavs, sr, workers, cfg=cfg)
             lead = AAC_FRAME / sr                                       # every piece after the first starts one frame late in the joined file
             lengths = [d for _, d in chap_info]
             expected = sum(lengths) + lead * (len(pieces) - 1)
@@ -475,5 +495,5 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
         except Exception as e:                                          # anything unexpected: the single-pass way below
             print(f"[assemble] parallel encode not used ({e}); encoding in one pass", flush=True)
     (work / "list.txt").write_text("\n".join(listing))
-    finish(work / "list.txt", chap_info, ["-c:a", "aac", "-b:a", "64k"], ["-af", "loudnorm=I=-18:TP=-2:LRA=11", "-ar", str(sr), "-ac", "1"])
+    finish(work / "list.txt", chap_info, codec_args(cfg), ["-af", loudnorm(cfg), "-ar", str(sr), "-ac", "1"])
     return out_path

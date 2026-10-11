@@ -35,3 +35,8 @@ name_good: 0.70      # a clip with a name scoring below this is made again with 
 name_respell_batches: [5, 10, 15]   # spellings tried per round; the next round only if the best so far is not good enough
 name_respell_target: 0.80   # a spelling at this score (and clearly better than the plain one) ends the search early; otherwise the next round is tried
 name_bands: [[0.3, 1], [0.4, 2], [0.5, 3], [0.6, 4], [0.7, 5]]   # [score, takes under it] that make a respelling due: 1 under 30%, 2 under 40%, ... 5 under 70%
+
+# The finished .m4b: Opus (the default; Android players, VLC, Audiobookshelf) or aac (Apple Books and older players need it).
+# audio_codec: opus
+# audio_bitrate: 64k
+# loudness_lufs: -16     # integrated loudness of the finished book (was -18)
