@@ -377,7 +377,7 @@ def _queue_env(tmp_path, monkeypatch):
     monkeypatch.setattr(jq, "notify", lambda text, title="", **k: sent.append((title, text)) or True)
     jq.sent_alerts = sent
     work = tmp_path / "book"; work.mkdir()
-    (work / "segments.json").write_text("[]")
+    (work / "segments.json").write_text('[{"id": 1, "speaker": "Narrator", "kind": "narration", "text": "Hello.", "chapter": 1}]')
     from audiobook_gen import prep
     prep.mark_done(work)                                                        # a prepared book: the queue tests are about the queue
     return jq, work
@@ -2292,3 +2292,24 @@ def test_segments_are_backed_up_and_extras_survive_prepare(tmp_path):
     plan = music.load_plan(p); plan["enabled"] = True; plan["intro"].update(track="x", title="A Tale"); music.save_plan(p, plan)
     gui._reapply_extras(p)
     assert any(c.get("opening") for c in json.loads((p / "chapters.json").read_text())["chapters"]) and prep.status(p)["ready"]
+
+
+def test_book_being_made_cannot_be_edited_and_new_ticks_need_prepare(tmp_path, monkeypatch):
+    import pandas as pd, pytest, gradio as gr
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue"); monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    p = _assistant_project(tmp_path)
+    chap = pd.DataFrame([[True, 1, "One", 6], [True, 2, "Two", 6]], columns=gui.CHAP_COLS)
+    args = (60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, False)
+    with pytest.raises(gr.Error, match="no lines yet"):                   # chapter 2 was ticked after Prepare
+        gui.generate_queued(str(p), chap, "B", "A", "", *args)
+    j = jq.add(str(p), "B", "A")
+    jq.update(j["id"], status="running")
+    with pytest.raises(gr.Error, match="being made right now"):
+        gui.reassign(str(p), pd.DataFrame({"Pick": [True], "id": [1]}), "Bob", "")
+    with pytest.raises(gr.Error, match="being made right now"):
+        gui.run_prepare(str(p), chap, [])
+    jq.update(j["id"], status="done")
+    assert "Queued" in gui.corr_rebuild(str(p), True, "phone1")
+    assert jq.load()[-1]["send_to"] == "phone1"

@@ -77,8 +77,19 @@ def load_book(file, max_chapters):
 
 
 # ---------- Text preparation (Book tab) ----------
+def _not_while_making(project, what="change this"):
+    """Refuse to rewrite a book's lines, chapters or music while the queue is making that very book: the running job planned
+    its clips from the old ones, and assembly would disagree with them."""
+    from . import jobqueue
+    run = jobqueue.now_running()
+    if project and run and Path(run["work"]).resolve() == _wd(project).resolve():
+        raise gr.Error(f"“{run['title']}” is being made right now, so you can't {what} until it finishes. "
+                       "Pause or cancel it on the Queue tab first (clips already made are kept).")
+
+
 def run_prepare(project, chap_df, selected, progress=gr.Progress()):
     """The Prepare button: run the ticked steps, then say what the Generate tab may do."""
+    _not_while_making(project, "prepare it again")
     if not project:
         raise gr.Error("Load a book first.")
     work = _wd(project)
@@ -265,6 +276,7 @@ def refresh_voices(project):
 
 
 def run_parse(project, chap_df, endpoint, use_judge=False, progress=gr.Progress()):
+    _not_while_making(project, "parse it again")
     work = _wd(project)
     progress(0.0, desc="Preparing chapters")
     _filter_chapters(project, chap_df)
@@ -310,6 +322,7 @@ def open_everything(work, title="", author="", cover=""):
 
 
 def save_segments(project, seg_df):
+    _not_while_making(project, "edit its lines")
     work = _wd(project)
     backup_segments(work)
     old = {s["id"]: s for s in json.loads((work / "segments.json").read_text())}
@@ -353,6 +366,7 @@ def _refresh(project, role):
 
 
 def reassign(project, lines_df, target, role):
+    _not_while_making(project, "move its lines")
     target = (target or "").strip()
     picked = set(lines_df.loc[lines_df["Pick"].astype(bool), "id"])
     if not target or not picked:
@@ -369,6 +383,7 @@ def reassign(project, lines_df, target, role):
 
 
 def merge_role(project, role, target):
+    _not_while_making(project, "merge its characters")
     target = (target or "").strip()
     if role in (None, "", "All") or not target or role == target:
         raise gr.Error("Pick a specific character, and a different target.")
@@ -836,7 +851,7 @@ def clone_assign(project, name, role, engine="F5-TTS"):
     cfg = _cfg(project)
     cfg.setdefault("voices", {})[role] = {"engine": _engine_key(engine), "library": name}
     (_wd(project) / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-    return f"**{role}** now speaks as **{name}** in {engine}. Open the Cast tab (re-parse or reload) to see it."
+    return f"**{role}** now speaks as **{name}** in {engine}. The Cast tab is updated."
 
 
 # ---------- Reference from an audiobook ----------
@@ -1109,6 +1124,12 @@ def _prepare_generation(project, chap_df, crossfade, p_sent, p_para, p_speaker, 
     st = prep.status(work)
     if not st["ready"]:
         raise gr.Error(f"The text has not been prepared ({st['why']}). Open the Book tab, tick the preparation steps this book needs and press Prepare.")
+    only = _selected(chap_df)
+    have = {s["chapter"] for s in json.loads((work / "segments.json").read_text())}
+    missing = sorted(only - have)
+    if missing:
+        raise gr.Error(f"Chapter(s) {', '.join(map(str, missing[:8]))} are ticked but have no lines yet (they were ticked after the book was "
+                       "prepared). Press Prepare on the Book tab again, or untick them.")
     cfg = _cfg(project)
     cfg.update(crossfade_ms=int(crossfade), workers={**(cfg.get("workers") or {}), "kokoro": int(kokoro_workers)},
                f5_precision="float16" if f5_half else "float32")
@@ -1593,6 +1614,7 @@ def music_recommend(project, interval):
 
 def music_save(project, enabled, intro, bridge, outro, i_sec, i_start, b_sec, b_start, o_sec, o_start, level, interval, ticked,
                title="", lead=6, tail=6, fade=12, duck=-14, under=-9, before=20, outro_under=-11, title_pause=2.8, speak=False, speak_pause=2.8):
+    _not_while_making(project, "change its music or spoken titles")
     from . import music
     work = _wd(project)
     if not (work / "chapters.json").exists():
@@ -1841,14 +1863,16 @@ def corr_revert(project, file):
     return "Back to the original clip." if corr.revert(_wd(project), c) else "This clip has no correction."
 
 
-def corr_rebuild(project):
+def corr_rebuild(project, send=False, device=""):
     from . import jobqueue
+    if send and not device:
+        raise gr.Error("Choose which phone to send it to on the Generate tab (or untick the box).")
     work = _wd(project)
     book = json.loads((work / "chapters.json").read_text())
     last = next(iter(jobqueue.jobs_for(str(work))), None) or {}    # keep what the last run of this book used
     cover = last.get("cover") or next((str(work / n) for n in ("cover_custom.jpg", "cover.jpg") if (work / n).exists()), "")
     job, updated = _enqueue(work, last.get("title") or book.get("title", work.name), last.get("author") or book.get("author", ""), cover,
-                            last.get("chapters"), "", last.get("window", ""), "")   # never sends to the phone unasked
+                            last.get("chapters"), "", last.get("window", ""), device if send else "")   # only when you tick it
     return (f"{'Updated the waiting job for' if updated else 'Queued'} “{job['title']}” to be rebuilt. Clips that exist are reused, so only the missing ones are made (for example after a "
             "lexicon change), then the audiobook is built again.")
 
@@ -2166,6 +2190,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     cr_make = gr.Button("🎙 Make a new take", variant="primary"); cr_use = gr.Button("✅ Use this take")
                     cr_back = gr.Button("↩ Back to the original"); cr_rebuild = gr.Button("Rebuild the audiobook")
+                    cr_send = gr.Checkbox(label="Send it to my phone when done (phone chosen on the Generate tab)", value=False)
                 cr_out = gr.Markdown()
 
             with gr.Tab("✨ Assistant"):
@@ -2480,7 +2505,7 @@ def build_ui() -> gr.Blocks:
         cr_make.click(corr_take, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed], [cr_new, cr_take_path, cr_out]).then(same(gpu_banner), None, gpu_mds)
         cr_use.click(corr_use, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed, cr_take_path], [cr_out, cr_file])
         cr_back.click(corr_revert, [project, cr_file], cr_out)
-        cr_rebuild.click(corr_rebuild, project, cr_out)
+        cr_rebuild.click(corr_rebuild, [project, cr_send, g_dev], cr_out)
         q_ntfy_save.click(alerts_save, [q_ntfy], q_alert_msg)
         q_ntfy_test.click(alerts_test, q_ntfy, q_alert_msg)
         for btn, where in ((q_top, "top"), (q_up, "up"), (q_down, "down"), (q_bottom, "bottom")):
@@ -2529,7 +2554,7 @@ def build_ui() -> gr.Blocks:
                     [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
         a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover]).then(
             gen_settings, project, GEN_OUTS).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group])
+            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS)
         a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
@@ -2556,7 +2581,8 @@ def build_ui() -> gr.Blocks:
         pc_remove.click(pacing_remove, pc_voice, [pc_status, pc_tbl])
         pc_voice.change(pacing_status, pc_voice, [pc_status, pc_tbl])
         pc_timer.tick(pacing_status, pc_voice, [pc_status, pc_tbl])
-        c_assign.click(clone_assign, [project, lib_dd, lib_role, lib_engine], c_status)
+        c_assign.click(clone_assign, [project, lib_dd, lib_role, lib_engine], c_status).then(
+            load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group])
         c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_qw, c_status])
     return ui
 
