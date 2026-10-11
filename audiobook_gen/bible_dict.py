@@ -74,11 +74,10 @@ def _read_pairs(path: Path) -> dict[str, str]:
 
 
 def manual_entries() -> dict[str, tuple[str, str]]:
-    """{name: (ipa, source)} from hand-written files: data/bible_ipa_claude_*.txt (written by Claude) and
+    """{name: (ipa, source)} from hand-written files: data/bible_ipa_claude.txt (written by Claude) and
     data/bible_ipa_user.txt (yours; wins over everything). Lines are `Name|IPA`."""
     out = {}
-    for f in sorted((ROOT / "data").glob("bible_ipa_claude_*.txt")):
-        out.update({k: (v, "claude") for k, v in _read_pairs(f).items()})
+    out.update({k: (v, "claude") for k, v in _read_pairs(ROOT / "data" / "bible_ipa_claude.txt").items()})
     user = ROOT / "data" / "bible_ipa_user.txt"
     if user.exists():
         out.update({k: (v, "user") for k, v in _read_pairs(user).items()})
