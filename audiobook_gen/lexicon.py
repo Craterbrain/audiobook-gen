@@ -488,6 +488,10 @@ ABBREVIATIONS = [
     (r"\bDr\.\s+(?=[A-Z])", "Doctor "), (r"\bMr\.\s+(?=[A-Z])", "Mister "),
     (r"\bMrs\.\s+(?=[A-Z])", "Missus "), (r"\bSt\.\s+(?=[A-Z])", "Saint "),
     (r"\bCapt\.\s+(?=[A-Z])", "Captain "), (r"\bCol\.\s+(?=[A-Z])", "Colonel "),
+    # first names written short in older books ("Wm. Lloyd Garrison"); read as written they come out as noise
+    (r"\bWm\.\s+(?=[A-Z])", "William "), (r"\bChas\.\s+(?=[A-Z])", "Charles "), (r"\bGeo\.\s+(?=[A-Z])", "George "),
+    (r"\bThos\.\s+(?=[A-Z])", "Thomas "), (r"\bJas\.\s+(?=[A-Z])", "James "), (r"\bJno\.\s+(?=[A-Z])", "John "),
+    (r"\bSaml\.\s+(?=[A-Z])", "Samuel "), (r"\bBenj\.\s+(?=[A-Z])", "Benjamin "), (r"\bGen\.\s+(?=[A-Z])", "General "),
 ]
 ROMAN_RE = re.compile(r"\b(?:(Act|Scene|Chapter|Book|Part|Canto)\s+|([A-Z][a-z]+)\s+)([IVXLC]{2,})\b")
 

@@ -2189,3 +2189,9 @@ def test_a_bridge_can_lead_into_the_title(tmp_path):
     out = music.bridge_under_title(audio, spec, sr, 0.2, -4)
     assert abs(len(out) / sr - (3 + 20 + 20)) < 0.01                      # 3 s lead, 20 s of music alone, then the 20 s of speech
     assert np.abs(out[:3 * sr]).max() == 0 and np.abs(out[5 * sr:20 * sr]).max() > 0
+
+
+def test_short_first_names_are_spelled_out_before_synthesis():
+    from audiobook_gen.lexicon import normalize
+    assert normalize("Wm. Lloyd Garrison Boston,") == "William Lloyd Garrison Boston,"
+    assert normalize("Geo. Washington and Thos. Jefferson") == "George Washington and Thomas Jefferson"
