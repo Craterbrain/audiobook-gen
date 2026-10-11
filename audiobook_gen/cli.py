@@ -35,7 +35,7 @@ def _printer():
 def main(argv=None):
     p = argparse.ArgumentParser(prog="audiobook_gen")
     p.add_argument("cmd", choices=["extract", "parse", "lexicon", "lookup", "bible-dict", "dialect", "prep", "rank", "synth", "qc", "names", "epub", "refine", "pacing", "assemble", "run"])
-    p.add_argument("input", help=".epub or .txt")
+    p.add_argument("input", help=".epub, .txt, .md, .html or .docx")
     p.add_argument("--work", help="working dir (default work/<name>)")
     p.add_argument("--config", default=ROOT / "config.yaml")
     p.add_argument("--max-chapters", type=int, help="only first N chapters")

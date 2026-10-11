@@ -45,8 +45,9 @@ def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: s
         raise ValueError("Give the voice a name.")
     if not ref_text.strip():
         raise ValueError("The reference transcript is required: F5-TTS needs the exact words spoken in the clip.")
-    a, sr = sf.read(audio_path, dtype="float32", always_2d=True)
-    a = a.mean(1)[: int(MAX_REF_SECONDS * sr)]
+    from .audio_io import read_audio
+    a, sr = read_audio(audio_path)                         # any format: wav, mp3, flac, ogg, opus, m4a, aac, wma, a video's soundtrack ...
+    a = a[: int(MAX_REF_SECONDS * sr)]
     if sr != 24000:
         from math import gcd
         g = gcd(24000, sr)

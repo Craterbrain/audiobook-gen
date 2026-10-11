@@ -14,7 +14,8 @@ import soundfile as sf
 import yaml
 
 from .assemble import assemble
-from .extract import extract
+from .audio_io import AUDIO_EXTS
+from .extract import TEXT_EXTS, extract
 from .lexicon import MACBETH_SEED, MONTE_CRISTO_SEED, autofill, build_lexicon, fill_respell, seed
 from .speakers import NARRATOR, backup_segments, parse_book
 from . import casting
@@ -67,10 +68,13 @@ def _cfg(project: str) -> dict:
 # ---------- Book ----------
 def load_book(file, max_chapters):
     if file is None:
-        raise gr.Error("Choose an .epub or .txt file.")
+        raise gr.Error("Choose an .epub, .txt, .md, .html or .docx file.")
     src = Path(file if isinstance(file, str) else file.name)
     work = ROOT / "work" / re.sub(r"\W+", "_", src.stem)
-    data = extract(str(src), str(work), int(max_chapters) or None)
+    try:
+        data = extract(str(src), str(work), int(max_chapters) or None)
+    except ValueError as e:
+        raise gr.Error(str(e))
     rows = [[True, c["index"], c["title"], len(c["text"])] for c in data["chapters"]]
     return (str(work), pd.DataFrame(rows, columns=CHAP_COLS), data["title"], data["author"] or "",
             data["cover"], f"Loaded **{data['title']}**: {len(rows)} chapters → `{work}`")
@@ -703,6 +707,11 @@ def clone_transcribe(audio):
     if not audio:
         raise gr.Error("Add a reference clip first.")
     from f5_tts.infer.utils_infer import preprocess_ref_audio_text
+    from .audio_io import to_wav
+    try:
+        audio = to_wav(audio)
+    except ValueError as e:
+        raise gr.Error(str(e))
     _, text = preprocess_ref_audio_text(audio, "")  # Whisper; downloads its model the first time
     return text.strip()
 
@@ -723,6 +732,11 @@ def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, s
     key = _engine_key(engine)
     if not audio:
         raise gr.Error("Add a reference clip first.")
+    from .audio_io import to_wav
+    try:
+        audio = to_wav(audio)                          # any audio format: decoded to WAV first if the engines could not read it
+    except ValueError as e:
+        raise gr.Error(str(e))
     if key != "chatterbox" and not (ref_text or "").strip():
         raise gr.Error("Type exactly what is said in the clip (F5-TTS and Qwen3 need it; Chatterbox does not).")
     _need_engine(key)
@@ -1019,8 +1033,11 @@ def vp_make(source, clone_name, audio_file, m4b_file, around, name, steps, warm,
         path = audio_file if isinstance(audio_file, str) else getattr(audio_file, "name", None)
         if not path:
             raise gr.Error("Upload an audio file (a minute or more of one person speaking is best).")
-        a, sr = sf.read(path, dtype="float32", always_2d=True)
-        a = a.mean(1)
+        from .audio_io import read_audio
+        try:
+            a, sr = read_audio(path)
+        except ValueError as e:
+            raise gr.Error(str(e))
         step = 10 * sr
         clips = [(a[i:i + step], sr) for i in range(0, min(len(a), 8 * step), step) if len(a[i:i + step]) > 4 * sr]
     else:
@@ -2199,7 +2216,7 @@ def build_ui() -> gr.Blocks:
             with gr.Tab("① Book", id="book"):
                 banner("book")
                 with gr.Row():
-                    book = gr.File(label="EPUB or TXT", file_types=[".epub", ".txt"])
+                    book = gr.File(label="EPUB, TXT, Markdown, HTML or DOCX", file_types=TEXT_EXTS)
                     with gr.Column():
                         maxch = gr.Number(label="Only first N chapters (0 = all)", value=0, precision=0)
                         load_btn = gr.Button("Load book", variant="primary")
@@ -2675,8 +2692,8 @@ def build_ui() -> gr.Blocks:
                             gr.Markdown("Open a narrated audiobook and pick a chapter. Clean 6–12 s clips are cut on pauses; Whisper writes "
                                         "down each short clip, and if you add the ebook, the book's exact words replace what Whisper heard.")
                             with gr.Row():
-                                ab_file = gr.File(label="Audiobook (.m4b / .m4a / .mp3)", file_types=[".m4b", ".m4a", ".mp3", ".mp4"])
-                                ab_ebook = gr.File(label="Ebook (optional, .epub / .txt)", file_types=[".epub", ".txt"])
+                                ab_file = gr.File(label="Audiobook (.m4b, .m4a, .mp3, .opus, .ogg, .flac … any audio)", file_types=AUDIO_EXTS)
+                                ab_ebook = gr.File(label="Ebook (optional: .epub, .txt, .md, .html, .docx)", file_types=TEXT_EXTS)
                             with gr.Row():
                                 ab_read_btn = gr.Button("Read chapters")
                                 ab_chapter = gr.Dropdown(label="Chapter", choices=[], scale=3)
@@ -2774,7 +2791,7 @@ def build_ui() -> gr.Blocks:
                         vp_around = gr.Slider(0.05, 0.95, 0.5, step=0.05, label="…snippet near this point of the book (0.5 = middle)", scale=2)
                     with gr.Row():
                         vp_clone = gr.Dropdown(label="Saved clone voice", choices=vlib.list_voices(), scale=2)
-                        vp_audio = gr.File(label="…or an audio file", file_types=["audio"], scale=2)
+                        vp_audio = gr.File(label="…or an audio file (any format)", file_types=AUDIO_EXTS, scale=2)
                     with gr.Row():
                         vp_name = gr.Textbox(label="Name for the new Kokoro voice", scale=2)
                         vp_steps = gr.Slider(20, 200, 60, step=10, label="Search steps (more = closer, slower)", scale=2)

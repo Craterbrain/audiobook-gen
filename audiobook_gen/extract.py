@@ -1,4 +1,4 @@
-"""Module 1a: raw text + chapter structure from .epub / .txt."""
+"""Module 1a: raw text + chapter structure from .epub / .txt / .md / .html / .docx."""
 import json
 import re
 from pathlib import Path
@@ -233,10 +233,147 @@ def extract_epub(path: Path, out_dir: Path) -> dict:
             "cover": str(cover) if cover else None, "chapters": chapters}
 
 
+TEXT_EXTS = [".epub", ".txt", ".text", ".md", ".markdown", ".html", ".htm", ".docx"]
+
+
+def _pretty(stem: str) -> str:
+    return re.sub(r"[_\-]+", " ", stem).strip().title() or "Untitled"
+
+
+def _from_blocks(blocks: list[tuple[int, str]], fallback: str, title: str = "", author: str = "") -> dict:
+    """Chapters from a flat list of (heading level, or 0 for a paragraph; text). Chapters start at the shallowest heading level that occurs
+    at least twice; a single heading above that level is the book's title; with no such level the whole text is one chapter."""
+    blocks = [(lv, re.sub(r"\s+", " ", t).strip()) for lv, t in blocks]
+    blocks = [(lv, t) for lv, t in blocks if t]
+    counts: dict[int, int] = {}
+    for lv, _ in blocks:
+        if lv:
+            counts[lv] = counts.get(lv, 0) + 1
+    split = min((lv for lv, n in counts.items() if n >= 2), default=0)
+    skip = -1
+    if counts:
+        top = min(counts)
+        if counts[top] == 1 and (top < split or not split):
+            skip = next(i for i, (lv, _) in enumerate(blocks) if lv == top)         # the one heading above the chapters: the title
+            title = title or blocks[skip][1]
+    title = title or fallback
+    chapters, cur = [], None
+    for i, (lv, text) in enumerate(blocks):
+        if i == skip:
+            continue
+        if split and lv and lv <= split:
+            cur = {"index": len(chapters) + 1, "title": text, "text": ""}
+            chapters.append(cur)
+            continue
+        if cur is None:
+            cur = {"index": 1, "title": title, "text": ""}
+            chapters.append(cur)
+        cur["text"] += ("\n\n" if cur["text"] else "") + text                        # other headings are read as a line of text
+    chapters = [{**c, "text": _clean(c["text"])} for c in chapters if c["text"].strip()]
+    for n, c in enumerate(chapters, 1):
+        c["index"] = n
+    return {"title": title, "author": author, "cover": None, "chapters": chapters}
+
+
+def extract_markdown(path: Path) -> dict:
+    raw = path.read_text(encoding="utf-8", errors="replace").replace("\r", "")
+    meta = {}
+    m = re.match(r"^---\n(.*?)\n---\n", raw, re.S)                                  # YAML front matter: title / author
+    if m:
+        for line in m.group(1).splitlines():
+            k, _, v = line.partition(":")
+            meta[k.strip().lower()] = v.strip().strip("\"'")
+        raw = raw[m.end():]
+    raw = re.sub(r"^(```|~~~).*?^\1[ \t]*$", "", raw, flags=re.S | re.M)              # code blocks are not read aloud
+    raw = re.sub(r"<!--.*?-->", "", raw, flags=re.S)
+    raw = re.sub(r"^(.+)\n=+[ \t]*$", r"# \1", raw, flags=re.M)                        # setext headings
+    raw = re.sub(r"^(.+)\n-{2,}[ \t]*$", r"## \1", raw, flags=re.M)
+    blocks: list[tuple[int, str]] = []
+    para: list[str] = []
+
+    def flush():
+        if para:
+            blocks.append((0, " ".join(para)))
+            para.clear()
+    for line in raw.split("\n"):
+        h = re.match(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if h:
+            flush()
+            blocks.append((len(h[1]), _md_inline(h[2])))
+        elif not line.strip() or re.match(r"^\s{0,3}([-*_]\s*){3,}$", line) or line.lstrip().startswith("|"):    # blank, rule, table row
+            flush()
+        elif re.match(r"^\s*([-*+]|\d+[.)])\s+", line):                                  # each list item is a paragraph
+            flush()
+            para.append(_md_inline(re.sub(r"^\s*([-*+]|\d+[.)])\s+", "", line)))
+            flush()
+        else:
+            para.append(_md_inline(re.sub(r"^\s*>\s?", "", line)))
+    flush()
+    return _from_blocks(blocks, _pretty(path.stem), meta.get("title", ""), meta.get("author", ""))
+
+
+def _md_inline(t: str) -> str:
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)                                     # images
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)                                  # [text](url) -> text
+    t = re.sub(r"\[\^[^\]]*\]", "", t)                                              # footnote marks
+    t = re.sub(r"<(https?://[^>]*)>", "", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = re.sub(r"(\*\*|__|\*|_|`|~~)(.+?)\1", r"\2", t)
+    return t.replace("\\", "").strip()
+
+
+def extract_html(path: Path) -> dict:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(path.read_bytes(), "lxml")
+    for t in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
+        t.decompose()
+    title = (soup.title.get_text(strip=True) if soup.title else "")
+    au = soup.find("meta", attrs={"name": "author"})
+    blocks = []
+    for el in (soup.body or soup).find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote"]):
+        if el.name == "blockquote" and el.find(["p", "li"]):
+            continue                                                                  # its paragraphs are read on their own
+        blocks.append((int(el.name[1]) if el.name[0] == "h" else 0, el.get_text(" ", strip=True)))
+    return _from_blocks(blocks, title or _pretty(path.stem), "", au.get("content", "") if au else "")
+
+
+def extract_docx(path: Path) -> dict:
+    import zipfile
+    import xml.etree.ElementTree as ET
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+        core = ET.fromstring(z.read("docProps/core.xml")) if "docProps/core.xml" in z.namelist() else None
+    blocks, title = [], ""
+    for p in root.iter(W + "p"):
+        style = p.find(f"{W}pPr/{W}pStyle")
+        sid = (style.get(W + "val") if style is not None else "") or ""
+        text = "".join(t.text or "" for t in p.iter(W + "t"))
+        m = re.match(r"(?i)heading\s*(\d)", sid)
+        if sid.lower() == "title":
+            title = title or text.strip()
+        elif m:
+            blocks.append((int(m[1]), text))
+        else:
+            blocks.append((0, text))
+    author = ""
+    if core is not None:
+        for el in core:
+            if el.tag.endswith("}creator") and el.text:
+                author = el.text
+            if el.tag.endswith("}title") and el.text and not title:
+                title = el.text
+    return _from_blocks(blocks, _pretty(path.stem), title, author)
+
+
 def extract(path: str, out_dir: str, max_chapters: int | None = None) -> dict:
     path, out_dir = Path(path), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    data = extract_epub(path, out_dir) if path.suffix.lower() == ".epub" else extract_txt(path)
+    ext = path.suffix.lower()
+    if ext not in TEXT_EXTS:
+        raise ValueError(f"Cannot read {path.suffix or 'that file'}: use one of {', '.join(TEXT_EXTS)}.")
+    data = (extract_epub(path, out_dir) if ext == ".epub" else extract_markdown(path) if ext in (".md", ".markdown") else
+            extract_html(path) if ext in (".html", ".htm") else extract_docx(path) if ext == ".docx" else extract_txt(path))
     if max_chapters:
         data["chapters"] = data["chapters"][:max_chapters]
     (out_dir / "chapters.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))

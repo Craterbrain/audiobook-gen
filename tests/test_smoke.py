@@ -2485,3 +2485,52 @@ def test_done_tab_rates_books_and_cleans_up_work_folders(tmp_path, monkeypatch):
     _, _, pending = gui.done_ask(gui.done_table().assign(**{"✔": [True]}), "delete")
     msg, *_ = gui.done_do(pending)
     assert "folder deleted" in msg and not book.exists() and (tmp_path / "out" / "mybook.m4b").exists()
+
+
+def test_books_can_be_read_from_markdown_html_and_docx(tmp_path):
+    import zipfile
+    from audiobook_gen import extract
+    md = tmp_path / "my_book.md"
+    md.write_text("---\ntitle: The Test Book\nauthor: A. Writer\n---\n\n## Chapter One\n\nIt was a **dark** night, see [this](http://x).\n\n- one\n- two\n\n"
+                  "```\ncode()\n```\n\n## Chapter Two\n\nThe second chapter.\n")
+    d = extract.extract(str(md), str(tmp_path / "w1"))
+    assert d["title"] == "The Test Book" and d["author"] == "A. Writer" and [c["title"] for c in d["chapters"]] == ["Chapter One", "Chapter Two"]
+    assert "dark night, see this." in d["chapters"][0]["text"] and "code()" not in d["chapters"][0]["text"] and "one\n\ntwo" in d["chapters"][0]["text"]
+    h = tmp_path / "page.html"
+    h.write_text("<html><head><title>Web Book</title><meta name='author' content='W. Eb'></head><body><nav>menu</nav><h1>First</h1><p>Alpha beta.</p>"
+                 "<h1>Second</h1><p>Gamma.</p><script>x()</script></body></html>")
+    d = extract.extract(str(h), str(tmp_path / "w2"))
+    assert d["title"] == "Web Book" and d["author"] == "W. Eb" and [c["title"] for c in d["chapters"]] == ["First", "Second"] and "menu" not in d["chapters"][0]["text"]
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    para = lambda t, s=None: f"<w:p>{f'<w:pPr><w:pStyle w:val=\"{s}\"/></w:pPr>' if s else ''}<w:r><w:t>{t}</w:t></w:r></w:p>"
+    doc = tmp_path / "doc.docx"
+    with zipfile.ZipFile(doc, "w") as z:
+        z.writestr("word/document.xml", f'<w:document xmlns:w="{w}"><w:body>{para("Doc Book", "Title")}{para("One", "Heading1")}{para("First text.")}'
+                                        f'{para("Two", "Heading1")}{para("Second text.")}</w:body></w:document>')
+    d = extract.extract(str(doc), str(tmp_path / "w3"))
+    assert d["title"] == "Doc Book" and [(c["title"], c["text"]) for c in d["chapters"]] == [("One", "First text."), ("Two", "Second text.")]
+    import pytest
+    with pytest.raises(ValueError):
+        extract.extract(str(tmp_path / "x.pdf"), str(tmp_path / "w4"))
+
+
+def test_any_audio_format_can_be_a_clone_reference(tmp_path, monkeypatch):
+    import subprocess
+    import soundfile as sf
+    from audiobook_gen import audio_io, voices
+    monkeypatch.setattr(audio_io, "CACHE", tmp_path / "cache")
+    monkeypatch.setattr(voices, "LIB", tmp_path / "lib")
+    src = tmp_path / "tone.wav"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=3", "-ar", "44100", str(src)], check=True)
+    for ext, codec in ((".m4a", "aac"), (".opus", "libopus"), (".wma", "wmav2"), (".mp3", "libmp3lame")):
+        f = tmp_path / f"clip{ext}"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-c:a", codec, str(f)], check=True)
+        a, sr = audio_io.read_audio(f)
+        assert len(a) > sr and a.ndim == 1                                         # decoded, mono
+        voices.save_voice(f"v{ext[1:]}", str(f), "a tone", {})
+        ref, rsr = sf.read(tmp_path / "lib" / f"v{ext[1:]}" / "ref.wav")
+        assert rsr == 24000 and len(ref) > 24000
+    import pytest
+    bad = tmp_path / "notaudio.m4a"; bad.write_bytes(b"hello world" * 200)
+    with pytest.raises(ValueError, match="could not be read"):
+        audio_io.to_wav(bad)
