@@ -1260,7 +1260,7 @@ def gen_panel(project, shown):
 
 
 # ---------- Queue ----------
-QUEUE_HEADERS = ["#", "Book", "Status", "Progress", "Starts", "Window", "Phone", "Note", "id"]
+QUEUE_HEADERS = ["✔", "#", "Book", "Status", "Progress", "Starts", "Window", "Phone", "Note", "id"]
 
 
 def device_choices() -> list[tuple[str, str]]:
@@ -1305,10 +1305,20 @@ def queue_eta() -> str:
             + (f" No estimate yet for: {', '.join(e['unknown'])}." if e["unknown"] else ""))
 
 
-def queue_table():
+def queue_table(picked=None):
+    """The queue as a table whose first column is a tick box (the ticked books are what the buttons below act on)."""
     from . import jobqueue
     import pandas as _pd
-    return _pd.DataFrame([[i + 1, *r] for i, r in enumerate(jobqueue.table())], columns=QUEUE_HEADERS)
+    rows = [[i + 1, *r] for i, r in enumerate(jobqueue.table())]
+    return _pd.DataFrame([[r[-1] in set(picked or []), *r] for r in rows], columns=QUEUE_HEADERS)
+
+
+def ticked_ids(df) -> list:
+    """The job ids of the rows ticked in the queue table."""
+    try:
+        return [str(r["id"]) for _, r in df.iterrows() if r["✔"] in (True, "true", "True")]
+    except Exception:
+        return []
 
 
 def queue_now() -> str:
@@ -1341,15 +1351,14 @@ def runner_button():
 
 
 def queue_pick_update(picked=None):
-    """The tick list of books (in queue order). Ticks you made are kept while the list refreshes."""
+    """The ids that stay ticked while the list refreshes (a book that left the queue is dropped)."""
     from . import jobqueue
-    jobs = jobqueue.load()
-    choices = [(f"{i + 1}. {j['title'][:44]} — {j['status']}", j["id"]) for i, j in enumerate(jobs)]
-    return gr.update(choices=choices, value=[x for x in (picked or []) if x in {j["id"] for j in jobs}])
+    have = {j["id"] for j in jobqueue.load()}
+    return [x for x in (picked or []) if x in have]
 
 
 def queue_refresh(picked=None):
-    return queue_status(), queue_table(), queue_now(), runner_button(), queue_pick_update(picked)
+    return queue_status(), queue_table(queue_pick_update(picked)), queue_now(), runner_button(), queue_pick_update(picked)
 
 
 def _need(picked):
@@ -2413,9 +2422,11 @@ def build_ui() -> gr.Blocks:
                         q_ntfy = gr.Textbox(value=alerts_settings()[0], label="ntfy topic", scale=3)
                         q_ntfy_save = gr.Button("Save", scale=1); q_ntfy_test = gr.Button("Send a test", scale=1)
                     q_alert_msg = gr.Markdown()
-                q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=False, wrap=True,
-                                     label="Queue — the book at the top is made first")
-                q_pick = gr.CheckboxGroup(choices=[], value=[], label="Select books (tick one or more, then use the buttons below)")
+                q_tbl = gr.Dataframe(value=queue_table(), headers=QUEUE_HEADERS, interactive=True, wrap=True, max_height=520,
+                                     datatype=["bool"] + ["str"] * (len(QUEUE_HEADERS) - 1),
+                                     static_columns=list(range(1, len(QUEUE_HEADERS))),
+                                     label="Queue — the book at the top is made first. Tick the books you want, then use the buttons below.")
+                q_pick = gr.State([])
                 with gr.Row():
                     q_top = gr.Button("⏫ To the top"); q_up = gr.Button("🔼 Up"); q_down = gr.Button("🔽 Down"); q_bottom = gr.Button("⏬ To the bottom")
                 with gr.Row():
@@ -2684,7 +2695,8 @@ def build_ui() -> gr.Blocks:
         q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
-        q_timer.tick(queue_refresh, q_pick, QOUT)
+        q_tbl.input(ticked_ids, q_tbl, q_pick)
+        q_timer.tick(lambda df: queue_refresh(ticked_ids(df)), q_tbl, QOUT)
         q_timer.tick(refresh_flow, [project, chap_df], FLOW_OUTS)
         q_timer.tick(fix_reports, project, fix_md)
         mu_outs = [mu_on, mu_intro, mu_bridge, mu_outro, mu_intro_sec, mu_intro_start, mu_bridge_sec, mu_bridge_start, mu_outro_sec, mu_outro_start,

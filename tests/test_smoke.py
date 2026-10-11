@@ -676,8 +676,8 @@ def test_queue_tab_actions(tmp_path, monkeypatch):
         gui.queue_move([], "top")                                                   # nothing ticked: a clear message
     msg, state, table, now, btn, pick = gui.queue_move([ids[2]], "top")
     assert titles() == ["Three", "One", "Two"] and list(table["#"]) == [1, 2, 3] and list(table["Book"]) == titles()
-    assert pick["value"] == [ids[2]]                                                  # the ticks survive a refresh
-    assert [c[0].split(". ")[1].split(" —")[0] for c in pick["choices"]] == titles()
+    assert pick == [ids[2]]                                                           # the ticks survive a refresh
+    assert [bool(x) for x in table["✔"]] == [True, False, False] and gui.ticked_ids(table) == [ids[2]]   # and show in the table's first column
     assert "Paused" in gui.queue_hold([ids[0], ids[1]])[0] and "2 saved for later" in gui.queue_status()
     assert gui.queue_table().set_index("id").loc[ids[0], "Starts"] == "when you resume it"
     assert "Resumed 1" in gui.queue_resume([ids[0]])[0]
