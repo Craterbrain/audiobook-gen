@@ -8,7 +8,7 @@ d = json.load(open('data/bible_ipa.json'))['entries']
 top = [n for n, _ in sorted(d.items(), key=lambda x: -x[1]['count'])[:N]]
 opt = {**rr.OPTIONS, **json.load(open('data/respell_options.json'))}
 hand = {}
-for f in sorted(Path('data').glob('bible_respell_claude_*.txt')): hand.update(_read_pairs(f))
+for f in sorted(Path('data').glob('bible_respell_claude.txt')): hand.update(_read_pairs(f))
 verses = [re.sub(r'^.*?\d+:\d+\s+', '', l).replace('*', '') for l in open(sys.argv[1] if len(sys.argv) > 1 else 'bible_text.txt', encoding='utf-8').read().splitlines() if re.search(r'\d+:\d+\s', l)]
 def frames(name, count=2):
     rx = re.compile(r'\b' + re.escape(name) + r'\b'); order = list(range(len(verses))); random.Random(name).shuffle(order); out = []
