@@ -1920,6 +1920,41 @@ def corr_revert(project, file):
     return "Back to the original clip." if corr.revert(_wd(project), c) else "This clip has no correction."
 
 
+def fix_reports(project):
+    """What the quality check and the name check found, in a few lines (the full lists are in qc_report.json / name_report.json)."""
+    if not project:
+        return "Open a book to see its reports."
+    work = _wd(project)
+    out = []
+    try:
+        qc = json.loads((work / "qc_report.json").read_text())
+        out.append(f"**Quality check** — {qc.get('checked', 0):,} clips listened to, {qc.get('flagged', 0)} flagged, {qc.get('fixed', 0)} remade, "
+                   f"**{len(qc.get('problems_left') or [])} still flagged**.")
+    except (OSError, ValueError):
+        out.append("**Quality check** — not run yet (it runs after the clips are made).")
+    try:
+        nr = json.loads((work / "name_report.json").read_text())
+        weak = [r for r in (nr.get("per_name") or []) if isinstance(r, dict) and r.get("below_good")] if isinstance(nr.get("per_name"), list) else []
+        out.append(f"**Name check** — {nr.get('names', 0)} names judged, {len(nr.get('respelled') or [])} respelled, "
+                   f"**{nr.get('clips_below_good', 0)} clips still under {nr.get('good', 0):.0%}**."
+                   + (" Weakest: " + ", ".join(str(r.get("name") or r.get("term")) for r in weak[:8]) + "." if weak else ""))
+    except (OSError, ValueError):
+        out.append("**Name check** — not run (Chatterbox books only).")
+    return "\n\n".join(out)
+
+
+def export_epub(project):
+    """A text-only epub of the book as prepared (what the audiobook says), for reading along."""
+    from . import epubout
+    from .jobqueue import ROOT
+    if not project:
+        raise gr.Error("Open a book first.")
+    work = _wd(project)
+    (ROOT / "out").mkdir(exist_ok=True)
+    path = epubout.build(work, ROOT / "out" / f"{work.name}.epub")
+    return str(path)
+
+
 def corr_rebuild(project, send=False, device=""):
     from . import jobqueue
     if send and not device:
@@ -2300,6 +2335,11 @@ def build_ui() -> gr.Blocks:
 
             with gr.Tab("⑥ Fix", id="fix"):
                 banner("fix")
+                with gr.Accordion("Reports and export", open=False):
+                    fix_md = gr.Markdown()
+                    with gr.Row():
+                        ex_btn = gr.Button("Make an EPUB of the text", size="sm", scale=1)
+                        ex_file = gr.File(label="EPUB", scale=3)
                 gpu_bar()
                 gr.Markdown("Find clips of this book, hear them, and remake single ones: say a name differently, or change the emotion of a "
                             "line the emotion reader got wrong. Remaking uses the GPU, so a book being made is paused (use the button at the top) "
@@ -2598,6 +2638,8 @@ def build_ui() -> gr.Blocks:
         cr_make.click(corr_take, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed], [cr_new, cr_take_path, cr_out]).then(same(gpu_banner), None, gpu_mds)
         cr_use.click(corr_use, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed, cr_take_path], [cr_out, cr_file])
         cr_back.click(corr_revert, [project, cr_file], cr_out)
+        ex_btn.click(export_epub, project, ex_file)
+        ui.load(fix_reports, project, fix_md)
         cr_rebuild.click(corr_rebuild, [project, cr_send, g_dev], cr_out)
         q_ntfy_save.click(alerts_save, [q_ntfy], q_alert_msg)
         q_ntfy_test.click(alerts_test, q_ntfy, q_alert_msg)
@@ -2619,6 +2661,7 @@ def build_ui() -> gr.Blocks:
         ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
         q_timer.tick(queue_refresh, q_pick, QOUT)
         q_timer.tick(refresh_flow, [project, chap_df], FLOW_OUTS)
+        q_timer.tick(fix_reports, project, fix_md)
         mu_outs = [mu_on, mu_intro, mu_bridge, mu_outro, mu_intro_sec, mu_intro_start, mu_bridge_sec, mu_bridge_start, mu_outro_sec, mu_outro_start,
                    mu_level, mu_interval, mu_sections, mu_note, mu_credits, mu_title, mu_lead, mu_tail, mu_fade, mu_duck, mu_under, mu_before, mu_outro_under, mu_tpause, mu_speak, mu_speak_pause]
         extras_tab.select(music_load, project, mu_outs)

@@ -151,3 +151,12 @@ def test_gui_strip_and_queueing_stamp_the_book(tmp_path, monkeypatch):
     gui._enqueue(w, "T", "A", "", None, "", "", "")
     assert json.loads((w / "workflow.json").read_text())["queued"]["speech"]
     assert "⟳" in gui.refresh_strip(str(w))                                  # its job is waiting: Make shows busy
+
+
+def test_fix_reports_and_epub_export(tmp_path):
+    from audiobook_gen import gui
+    w = make_book(tmp_path)
+    (w / "qc_report.json").write_text(json.dumps({"checked": 10, "flagged": 2, "fixed": 1, "problems_left": [1]}))
+    (w / "name_report.json").write_text(json.dumps({"names": 3, "good": 0.7, "clips_below_good": 4, "respelled": ["a"], "per_name": []}))
+    txt = gui.fix_reports(str(w))
+    assert "10 clips listened to" in txt and "1 still flagged" in txt and "4 clips still under 70%" in txt
