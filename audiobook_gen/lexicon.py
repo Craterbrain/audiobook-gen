@@ -491,6 +491,16 @@ ABBREVIATIONS = [
     # first names written short in older books ("Wm. Lloyd Garrison"); read as written they come out as noise
     (r"\bWm\.\s+(?=[A-Z])", "William "), (r"\bChas\.\s+(?=[A-Z])", "Charles "), (r"\bGeo\.\s+(?=[A-Z])", "George "),
     (r"\bThos\.\s+(?=[A-Z])", "Thomas "), (r"\bJas\.\s+(?=[A-Z])", "James "), (r"\bJno\.\s+(?=[A-Z])", "John "),
+    # titles and ranks
+    (r"\bHon\.\s+(?=[A-Z])", "Honorable "), (r"\bRev\.\s+(?=[A-Z])", "Reverend "), (r"\bMessrs\.\s+(?=[A-Z])", "Messieurs "),
+    (r"\bLieut\.\s*-?\s*(?=[A-Z])", "Lieutenant "), (r"\bMaj\.\s*-?\s*(?=[A-Z])", "Major "), (r"\bBrig\.\s*-?\s*(?=[A-Z])", "Brigadier "),
+    (r"\bProf\.\s+(?=[A-Z])", "Professor "), (r"\bGov\.\s+(?=[A-Z])", "Governor "),
+    (r"(?<=[a-z])\s+Jr\.", " Junior"), (r"(?<=[a-z])\s+Sr\.", " Senior"), (r"\bEsq\.(?=[,;])", "Esquire"), (r"\bEsq\.", "Esquire."),
+    (r"\bviz\.,?", "namely,"), (r"\bi\.e\.,?", "that is,"), (r"\be\.g\.,?", "for example,"), (r"\betc\.(?=[,;])", "et cetera"), (r"\betc\.", "et cetera."),
+    # states after a place name ("Memphis, Tenn.", "Malden, W. Va.")
+    (r"(?<=[,.] )W\. Va\.", "West Virginia"), (r"(?<=, )Va\.", "Virginia"), (r"(?<=, )Tenn\.", "Tennessee"), (r"(?<=, )Mass\.", "Massachusetts"),
+    (r"(?<=, )Ga\.", "Georgia"), (r"(?<=, )Ala\.", "Alabama"), (r"(?<=, )Wis\.", "Wisconsin"), (r"(?<=, )Conn\.", "Connecticut"),
+    (r"(?<=, )Pa\.", "Pennsylvania"), (r"(?<=, )Ky\.", "Kentucky"), (r"(?<=, )Mo\.", "Missouri"),
     (r"\bSaml\.\s+(?=[A-Z])", "Samuel "), (r"\bBenj\.\s+(?=[A-Z])", "Benjamin "), (r"\bGen\.\s+(?=[A-Z])", "General "),
 ]
 ROMAN_RE = re.compile(r"\b(?:(Act|Scene|Chapter|Book|Part|Canto)\s+|([A-Z][a-z]+)\s+)([IVXLC]{2,})\b")

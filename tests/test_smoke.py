@@ -2195,3 +2195,11 @@ def test_short_first_names_are_spelled_out_before_synthesis():
     from audiobook_gen.lexicon import normalize
     assert normalize("Wm. Lloyd Garrison Boston,") == "William Lloyd Garrison Boston,"
     assert normalize("Geo. Washington and Thos. Jefferson") == "George Washington and Thomas Jefferson"
+
+
+def test_titles_ranks_and_states_are_spelled_out_before_synthesis():
+    from audiobook_gen.lexicon import normalize
+    assert normalize("the Hon. B. K. Bruce and the Rev. Daniel Weeden") == "the Honorable B. K. Bruce and the Reverend Daniel Weeden"
+    assert normalize("U. S. GRANT, Lieut.-General. At Memphis, Tenn., and Malden, W. Va. He") == "U. S. GRANT, Lieutenant General. At Memphis, Tennessee, and Malden, West Virginia He"
+    assert normalize("John Melbourne, Esq., and Smith, Esq. He, etc., came, i.e., late.") == "John Melbourne, Esquire, and Smith, Esquire. He, et cetera, came, that is, late."
+    assert normalize("the mass. No. 5 in Massachusetts.") == "the mass. No. 5 in Massachusetts."
