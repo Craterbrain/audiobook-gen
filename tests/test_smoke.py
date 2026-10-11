@@ -2416,6 +2416,27 @@ def test_same_book_from_another_folder_asks_and_can_replace_the_earlier_job(tmp_
     jobs = {j["id"]: j for j in jq.load()}
     assert jobs[old["id"]]["status"] == "cancelled" and "replaced" in jobs[old["id"]]["note"]
     assert out[3]["visible"] is True and out[5] == [old["id"]] and len(jobs) == 2
-    msg, box = gui.dup_remove(out[5])                                        # yes: the entry goes from the list (nothing else)
+    assert "work folder" in out[4] and "gone for good" in out[4]
+    msg, box = gui.dup_remove(out[5], str(work_b))                           # list only: the folder stays
     assert "Removed 1" in msg and old["id"] not in {j["id"] for j in jq.load()} and work_a.exists()
     assert jq.same_book(str(work_b), "The War of the Worlds") == []          # the book itself, from its own folder, is not a duplicate
+
+
+def test_deleting_the_earlier_jobs_work_folder_is_guarded(tmp_path, monkeypatch):
+    import shutil
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    jq_, work_a = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "ROOT", tmp_path)                                # work folders are checked against <root>/work
+    (tmp_path / "work").mkdir(); inside = tmp_path / "work" / "old"; shutil.copytree(work_a, inside)
+    keep = tmp_path / "work" / "new"; shutil.copytree(work_a, keep)
+    a = jq.add(str(inside), "T"); b = jq.add(str(keep), "T")
+    msg, _ = gui.dup_remove([a["id"]], str(keep), delete=True)               # the old folder goes
+    assert "Deleted the work folder: old" in msg and not inside.exists() and keep.exists()
+    c = jq.add(str(keep), "T2")
+    msg, _ = gui.dup_remove([c["id"]], str(keep), delete=True)               # the open book's folder is never deleted
+    assert "No folder was deleted" in msg and keep.exists()
+    outside = tmp_path / "elsewhere"; shutil.copytree(work_a, outside)
+    d = jq.add(str(outside), "T3")
+    msg, _ = gui.dup_remove([d["id"]], "", delete=True)                      # not under work/: kept
+    assert outside.exists()

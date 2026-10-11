@@ -1237,6 +1237,11 @@ def _dups(project, title, author):
     return jobqueue.same_book(str(_wd(project)), title or meta.get("title", ""), author or meta.get("author", ""))
 
 
+def jobqueue_load():
+    from . import jobqueue
+    return jobqueue.load()
+
+
 def generate_flow(*a, dup="ask"):
     """Generate with a duplicate check. dup: 'ask' (stop and ask if the same book is already queued from another folder),
     'add' (queue it as well) or 'replace' (queue it and cancel the earlier job). Returns
@@ -1251,15 +1256,43 @@ def generate_flow(*a, dup="ask"):
     earlier = [j["id"] for j in _dups(a[0], a[2], a[3])] if dup == "replace" else []
     msg = generate_queued(*a, supersede=earlier or None)
     if earlier:
+        old = [j for j in jobqueue_load() if j["id"] in earlier]
+        sizes = ", ".join(f"`{Path(j['work']).name}` ({_folder_size(Path(j['work']))})" for j in old if Path(j["work"]).is_dir())
         return (msg + " The earlier job was cancelled (its clips are kept).", hide, "", gr.update(visible=True),
-                "**Remove the earlier job from the queue list too?** Only the list entry goes; its clips and files stay on disk.", earlier)
+                "**What should happen to the earlier job?**  \nRemove it from the list only (its clips and files stay), or delete it **and its work folder** "
+                f"({sizes or 'nothing on disk'}) — the clips, text and settings in that folder are gone for good.", earlier)
     return msg, hide, "", hide, "", []
 
 
-def dup_remove(ids):
+def _folder_size(p: Path) -> str:
+    n = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
+
+
+def dup_remove(ids, project="", delete=False):
+    """Take the earlier job(s) off the list; with delete=True also delete their work folders (clips, text, everything in them).
+    A folder is never deleted if it is the open book's, is used by another job, or is not under work/."""
     from . import jobqueue
-    n = jobqueue.remove_many(list(ids or []))
-    return f"Removed {n} earlier job(s) from the list.", gr.update(visible=False)
+    from .jobqueue import ROOT
+    ids = list(ids or [])
+    jobs = [j for j in jobqueue.load() if j["id"] in ids]
+    keep = {str(_wd(project).resolve())} if project else set()
+    n = jobqueue.remove_many(ids)
+    gone, kept = [], []
+    if delete:
+        still = {str(Path(j["work"]).resolve()) for j in jobqueue.load()}
+        for w in dict.fromkeys(str(Path(j["work"]).resolve()) for j in jobs):
+            p = Path(w)
+            if w in keep or w in still or (ROOT / "work").resolve() not in p.parents or not p.is_dir():
+                kept.append(p.name)
+            else:
+                shutil.rmtree(p); gone.append(p.name)
+    msg = f"Removed {n} earlier job(s) from the list."
+    if delete:
+        msg += (f" Deleted the work folder{'s' if len(gone) != 1 else ''}: {', '.join(gone)}." if gone else " No folder was deleted.")
+        if kept:
+            msg += f" Kept (still in use or not a work folder): {', '.join(kept)}."
+    return msg, gr.update(visible=False)
 
 
 def gen_stop(project):
@@ -2395,7 +2428,8 @@ def build_ui() -> gr.Blocks:
                 with gr.Group(visible=False) as rm_box:
                     rm_md = gr.Markdown()
                     with gr.Row():
-                        rm_yes = gr.Button("Yes, remove it from the list", variant="stop"); rm_no = gr.Button("No, keep it listed")
+                        rm_del = gr.Button("Delete the job and its work folder", variant="stop")
+                        rm_yes = gr.Button("Remove from the list only"); rm_no = gr.Button("Keep it listed")
                 rm_ids = gr.State([])
                 status4 = gr.Markdown()
                 with gr.Row():
@@ -2729,7 +2763,8 @@ def build_ui() -> gr.Blocks:
         dup_add.click(lambda *a: generate_flow(*a, dup="add"), GO_IN, GO_OUT).then(queue_refresh, q_pick, QOUT)
         dup_replace.click(lambda *a: generate_flow(*a, dup="replace"), GO_IN, GO_OUT).then(queue_refresh, q_pick, QOUT)
         dup_cancel.click(lambda: (gr.update(visible=False), ""), None, [dup_box, dup_md])
-        rm_yes.click(dup_remove, rm_ids, [status4, rm_box]).then(queue_refresh, q_pick, QOUT)
+        rm_yes.click(dup_remove, [rm_ids, project], [status4, rm_box]).then(queue_refresh, q_pick, QOUT)
+        rm_del.click(lambda ids, p: dup_remove(ids, p, True), [rm_ids, project], [status4, rm_box]).then(queue_refresh, q_pick, QOUT)
         rm_no.click(lambda: gr.update(visible=False), None, rm_box)
         stop.click(gen_stop, project, status4)
         gen_shown = gr.State("")
