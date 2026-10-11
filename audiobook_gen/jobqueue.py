@@ -112,6 +112,17 @@ def add(work: str, title: str = "", author: str = "", cover: str = "", config: s
     return job
 
 
+def jobs_for(work: str) -> list[dict]:
+    """Every job for this work folder, newest first."""
+    w = str(Path(work).resolve())
+    return sorted((j for j in load() if str(Path(j["work"]).resolve()) == w), key=lambda j: j.get("created") or "", reverse=True)
+
+
+def pending_for(work: str) -> dict | None:
+    """The job for this book that is waiting (queued, held or paused), if any. Adding the book again should update it."""
+    return next((j for j in jobs_for(work) if j["status"] in ("queued", "held", "paused")), None)
+
+
 def cancel(job_id: str) -> None:
     update(job_id, status="cancelled", note="cancelled by you")
 

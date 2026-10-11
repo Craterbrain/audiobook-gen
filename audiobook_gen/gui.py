@@ -16,7 +16,7 @@ import yaml
 from .assemble import assemble
 from .extract import extract
 from .lexicon import MACBETH_SEED, MONTE_CRISTO_SEED, autofill, build_lexicon, fill_respell, seed
-from .speakers import NARRATOR, parse_book
+from .speakers import NARRATOR, backup_segments, parse_book
 from . import casting
 from . import prep
 from . import m4b as m4blib
@@ -85,8 +85,28 @@ def run_prepare(project, chap_df, selected, progress=gr.Progress()):
     _filter_chapters(project, chap_df)
     t0 = time.time()
     result = prep.run(work, list(selected or []), lambda f, d: progress(f, desc=d))
+    _reapply_extras(work)
     done = "; ".join(f"{prep.BY_ID[i]['label'].split(' (')[0].split(':')[0]} ({result['notes'][i]})" for i in result["ran"] if i in result["notes"])
     return (f"✅ Prepared in {time.time() - t0:.0f} s — {done}.", *prep_state(project)[2:])
+
+
+def _reapply_extras(work):
+    """Preparing again rebuilds the lines from the plain chapters, which drops the spoken opening and section titles the Music tab put in.
+    Put back whatever the music plan says is on, and keep the book 'prepared'."""
+    from . import music, titles
+    work = Path(work)
+    if not (work / "segments.json").exists():
+        return
+    was_ready = prep.status(work)["ready"]
+    plan = music.load_plan(work)
+    intro = plan["intro"]
+    layered = bool(plan["enabled"] and intro.get("track") and intro.get("title"))
+    music.add_opening(work, intro["title"] if layered else "", intro.get("title_pause", 0.0))
+    t = plan.get("titles") or {}
+    if t.get("speak"):
+        titles.apply(work, True, float(t.get("pause", 2.8)))
+    if was_ready:
+        prep.restamp(work)
 
 
 def prep_state(project):
@@ -262,6 +282,8 @@ def run_parse(project, chap_df, endpoint, use_judge=False, progress=gr.Progress(
     finally:
         if judge:
             judge.close()
+    _reapply_extras(work)
+    segs = json.loads((work / "segments.json").read_text())
     roles = _roles_list(segs)
     return (roles, pd.DataFrame(segs)[SEG_COLS], f"{len(segs)} segments, {len(roles)} roles",
             gr.update(choices=["All"] + _roles(segs), value="All"), gr.update(choices=_roles(segs)),
@@ -282,13 +304,14 @@ def load_parsed(project):
 
 
 def open_everything(work, title="", author="", cover=""):
-    """Everything the tabs show for a project: book, cast, voices, generate settings (23 values)."""
+    """Everything the tabs show for a project: book, cast, voices, generate settings (29 values)."""
     book = open_project(work, title, author, cover)
     return (*book, *load_parsed(book[0]), *voice_settings(book[0]), *gen_settings(book[0]))
 
 
 def save_segments(project, seg_df):
     work = _wd(project)
+    backup_segments(work)
     old = {s["id"]: s for s in json.loads((work / "segments.json").read_text())}
     out = []
     for _, r in seg_df.iterrows():
@@ -335,6 +358,7 @@ def reassign(project, lines_df, target, role):
     if not target or not picked:
         raise gr.Error("Tick some lines and choose (or type) the character to move them to.")
     work = _wd(project)
+    backup_segments(work)
     segs = _segs(project)
     for s in segs:
         if s["id"] in picked:
@@ -453,17 +477,46 @@ def lex_lookup(project, lex_df, lang, wikis, bible, offline=False, progress=gr.P
             f"No entry for: {miss or '—'}. Review, hear, then Save.")
 
 
-def save_lexicon(project, lex_df):
+def lex_snapshot(project) -> dict:
+    """The editable cells of lexicon.json as the table was loaded from it: {term: {ipa, respell, lang}}.
+    Save compares the table with this, so only cells you changed are written, never a stale table's old values."""
+    try:
+        lex = json.loads((_wd(project) / "lexicon.json").read_text())
+    except Exception:
+        return {}
+    return {e["term"]: {f: (e.get(f) or "") for f in ("ipa", "respell", "lang")} for e in lex}
+
+
+def lex_load(project):
+    """Fill the lexicon table from the book's lexicon.json (when the book is opened), plus its snapshot."""
+    try:
+        lex = json.loads((_wd(project) / "lexicon.json").read_text())
+    except Exception:
+        return gr.skip(), gr.skip(), {}
+    return _lex_df(lex), gr.update(choices=[e["term"] for e in lex]), lex_snapshot(project)
+
+
+def save_lexicon(project, lex_df, snap=None):
+    """Write the cells you changed. A cell that still equals what the table was loaded with is left alone, so a table
+    that went stale (the name check wrote respellings meanwhile) can't blank them. Without a snapshot, a blank cell
+    never overwrites a filled one."""
     work = _wd(project)
     old = {e["term"]: e for e in json.loads((work / "lexicon.json").read_text())}
+    snap = snap or {}
     for _, r in lex_df.fillna("").iterrows():
         e = old.get(r["term"])
         if e is None:
             continue
-        new = {f: str(r[f]).strip() for f in ("ipa", "respell", "lang")}
-        if new["respell"] != (e.get("respell") or ""):
+        base = snap.get(r["term"])
+        new = {}
+        for f in ("ipa", "respell", "lang"):
+            cell, now = str(r[f]).strip(), (e.get(f) or "")
+            if cell == now or (base is not None and cell == base[f]) or (base is None and not cell):
+                continue
+            new[f] = cell
+        if "respell" in new:
             e["respell_src"] = "user"
-        if any(new[f] != (e.get(f) or "") for f in new):
+        if new:
             e.update(new, source="user")
     fill_respell(old.values(), refresh=True)   # IPA you typed -> an auto-made respelling for F5
     (work / "lexicon.json").write_text(json.dumps(list(old.values()), ensure_ascii=False, indent=2))
@@ -1036,7 +1089,10 @@ def gen_settings(project):
     pm = cfg.get("pacing_ms") or {}
     return (bool(cfg.get("emotion")), float(cfg.get("emotion_base", 0.0)), label,
             int(pm.get("continuation", 140)), int(pm.get("tag", 120)),
-            int((cfg.get("workers") or {}).get("chatterbox", 1)) >= 2)
+            int((cfg.get("workers") or {}).get("chatterbox", 1)) >= 2,
+            int(cfg.get("crossfade_ms", 60)), int(pm.get("sentence", 350)), int(pm.get("paragraph", 700)),
+            int(pm.get("speaker_change", 250)), int((cfg.get("workers") or {}).get("kokoro", 4)),
+            cfg.get("f5_precision", "float16") != "float32")
 
 
 def chatterbox_workers(toggle) -> int:
@@ -1313,6 +1369,24 @@ def _parse_schedule(when, window_on, w_start, w_stop) -> tuple[str, str]:
     return not_before, window
 
 
+def _enqueue(work, title, author, cover, chapters, not_before, window, send_to):
+    """Queue a book once. If it already has a waiting job, that job is updated instead of adding a second one.
+    Returns (job, updated). Refuses a book whose text has not been prepared."""
+    from . import jobqueue
+    work = Path(work)
+    st = prep.status(work)
+    if not (work / "segments.json").exists() or not st["ready"]:
+        raise gr.Error(f"The text has not been prepared ({st['why']}). Open the Book tab, tick the preparation steps and press Prepare.")
+    waiting = jobqueue.pending_for(str(work))
+    if waiting:
+        jobqueue.update(waiting["id"], title=title, author=author, cover=cover, chapters=chapters or None, not_before=not_before,
+                        window=window, send_to=send_to, status="queued", note="")
+        return {**waiting, "title": title}, True
+    job = jobqueue.add(str(work), title, author, cover, "", "", chapters, not_before, window, send_to)
+    jobqueue.ensure_supervisor()
+    return job, False
+
+
 def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
               emotion, emo_base, lex_label, p_cont, p_tag, cb_workers, when, window_on, w_start, w_stop, send_to=""):
     from . import jobqueue
@@ -1323,10 +1397,9 @@ def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para,
     chapters = sorted(only) if only and only != all_chapters else None
     if send_to:
         jobqueue.save_default_device(send_to)
-    jq_job = jobqueue.add(str(work), title or work.name, author or "", cover or "", "", "", chapters, not_before, window, send_to)
-    jobqueue.ensure_supervisor()
+    jq_job, updated = _enqueue(work, title or work.name, author or "", cover or "", chapters, not_before, window, send_to)
     when_txt = f"from {not_before}" if not_before else "as soon as the GPU is free"
-    return (f"Queued “{jq_job['title']}” — starts {when_txt}" + (f", only between {window}" if window else "") +
+    return (f"{'Updated the waiting job for' if updated else 'Queued'} “{jq_job['title']}” — starts {when_txt}" + (f", only between {window}" if window else "") +
             ". It is watched: if it stalls or crashes it is restarted." + (" It will be sent to your phone when it is done." if send_to else "")), *queue_refresh()
 
 
@@ -1343,7 +1416,7 @@ def reconnect_on_load(project):
     from . import jobqueue
     run = jobqueue.now_running()
     if project or not run:
-        return (gr.skip(),) * 23
+        return (gr.skip(),) * 29
     j = next(x for x in jobqueue.load() if x["id"] == run["id"])
     return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 
@@ -1524,6 +1597,7 @@ def music_save(project, enabled, intro, bridge, outro, i_sec, i_start, b_sec, b_
     work = _wd(project)
     if not (work / "chapters.json").exists():
         raise gr.Error("Open a book on the Book tab first.")
+    was_ready = prep.status(work)["ready"]
     plan = music.load_plan(work)
     plan.update(enabled=bool(enabled), level_db=float(level), interval_min=int(interval))
     plan["intro"].update(track=intro or "", seconds=float(i_sec), start=float(i_start), title=(title or "").strip(), title_pause=float(title_pause), lead=float(lead), tail=float(tail),
@@ -1532,7 +1606,9 @@ def music_save(project, enabled, intro, bridge, outro, i_sec, i_start, b_sec, b_
     music.add_opening(work, plan["intro"]["title"] if layered else "", plan["intro"]["title_pause"])
     plan["titles"] = {"speak": bool(speak), "pause": float(speak_pause)}
     from . import titles
-    n_titles = titles.apply(work, bool(speak), float(speak_pause))              # each section's title read aloud, a pause either side           # the spoken title becomes the first chapter, "Opening"
+    n_titles = titles.apply(work, bool(speak), float(speak_pause))
+    if was_ready:
+        prep.restamp(work)                  # only the opening and the section titles changed, so the book stays prepared              # each section's title read aloud, a pause either side           # the spoken title becomes the first chapter, "Opening"
     plan["bridge"].update(track=bridge or "", seconds=float(b_sec), start=float(b_start))
     plan["outro"].update(track=outro or "", after=float(o_sec), start=float(o_start), before=float(before), under_db=float(outro_under))
     chapters = music.chapter_seconds(work)
@@ -1769,10 +1845,11 @@ def corr_rebuild(project):
     from . import jobqueue
     work = _wd(project)
     book = json.loads((work / "chapters.json").read_text())
-    cover = next((str(work / n) for n in ("cover_custom.jpg", "cover.jpg") if (work / n).exists()), "")
-    job = jobqueue.add(str(work.resolve()), book.get("title", work.name), book.get("author", ""), cover)
-    jobqueue.ensure_supervisor()
-    return (f"Queued “{job['title']}” to be rebuilt. Clips that exist are reused, so only the missing ones are made (for example after a "
+    last = next(iter(jobqueue.jobs_for(str(work))), None) or {}    # keep what the last run of this book used
+    cover = last.get("cover") or next((str(work / n) for n in ("cover_custom.jpg", "cover.jpg") if (work / n).exists()), "")
+    job, updated = _enqueue(work, last.get("title") or book.get("title", work.name), last.get("author") or book.get("author", ""), cover,
+                            last.get("chapters"), "", last.get("window", ""), "")   # never sends to the phone unasked
+    return (f"{'Updated the waiting job for' if updated else 'Queued'} “{job['title']}” to be rebuilt. Clips that exist are reused, so only the missing ones are made (for example after a "
             "lexicon change), then the audiobook is built again.")
 
 
@@ -1804,7 +1881,7 @@ def build_ui() -> gr.Blocks:
                                        interactive=True, label="Chapters (untick to skip)")
                 gr.Markdown("### Text preparation\nTick what this book needs, most important first, then press **Prepare**. A book cannot be generated until "
                             "it has been prepared. 🧠 marks the steps that need an AI model loaded on the GPU (a book being made steps aside for them); "
-                            "the others run without one. Re-run Prepare after changing the chapters or the cast.")
+                            "the others run without one. Re-run Prepare after changing the chapters. It rebuilds the lines, so moves made on the Cast tab are lost (the last 10 versions are kept in the book's segments.backup folder).")
                 prep_cbg = gr.CheckboxGroup(choices=prep.choices(), value=prep.default_selected(), label="Preparation steps")
                 prep_help = gr.Markdown("\n".join(f"- **{s['label'].split(' (')[0]}** — {s['help']}" for s in prep.STEPS))
                 with gr.Row():
@@ -2343,11 +2420,14 @@ def build_ui() -> gr.Blocks:
                         vp_tags = gr.Textbox(label="Description (e.g. US male)", scale=2)
                         vp_tag_btn = gr.Button("Tag this voice")
 
+        GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
+        lex_snap = gr.State({})     # the lexicon table as loaded from lexicon.json (see save_lexicon)
+        LEX_OUTS = [lex_df, term_dd, lex_snap]
         prep_outs = [prep_cbg, prep_status, gen_prep, go]
         load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
-            gen_settings, project, [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]).then(speed_text, project, speed_md).then(
-            prep_state, project, prep_outs)
+            gen_settings, project, GEN_OUTS).then(speed_text, project, speed_md).then(
+            prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS)
         cast_outs = [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]
         prep_btn.click(run_prepare, [project, chap_df, prep_cbg], [prep_status, gen_prep, go]).then(
             load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group])
@@ -2369,7 +2449,7 @@ def build_ui() -> gr.Blocks:
         save_seg_btn.click(save_segments, [project, seg_df], [roles_state, char_dd, target_dd, status2])
         save_seg_btn.click(show_lines, [project, char_dd], lines_df)
         lex_btn.click(run_lexicon, [project, seed_dd, lang_tb, detect_cb, title, author], [lex_df, status3]).then(
-            lambda df: gr.update(choices=list(df["term"])), lex_df, term_dd)
+            lambda df: gr.update(choices=list(df["term"])), lex_df, term_dd).then(lex_snapshot, project, lex_snap)
         fill_btn.click(lex_autofill, [project, lex_df, lang_tb, known_cb], [lex_df, status3])
         lex_df.select(fw_pick, lex_df, [fw_word, fw_ipa, fw_resp])
         fw_hear_btn.click(fw_hear, [project, fw_word, fw_ipa, fw_resp, fw_voice, fw_tmpl], [fw_audio, fw_note])
@@ -2378,7 +2458,7 @@ def build_ui() -> gr.Blocks:
         fw_save_btn.click(fw_save, [project, fw_word, fw_ipa, fw_resp], [lex_df, fw_note])
         spell_btn.click(lex_autospell, [project, lex_df], [lex_df, status3])
         lookup_btn.click(lex_lookup, [project, lex_df, lang_tb, wiki_tb, bible_cb, offline_cb], [lex_df, status3])
-        save_lex_btn.click(save_lexicon, [project, lex_df], status3)
+        save_lex_btn.click(save_lexicon, [project, lex_df, lex_snap], status3)
         hear_btn.click(hear_term, [project, lex_df, term_dd, which_rd], term_audio)
         QOUT = [q_state, q_tbl, q_now, q_runner, q_pick]
         QMSG = [q_msg] + QOUT
@@ -2415,10 +2495,10 @@ def build_ui() -> gr.Blocks:
         qs_apply.click(queue_reschedule, [q_pick, qs_when, qs_win, qs_w1, qs_w2], QMSG)
         qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
-                        mode, single_dd, single_speed, single_group, emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]
-        q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs)
+                        mode, single_dd, single_speed, single_group, *GEN_OUTS]
+        q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
-        ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs)              # and open the book that is being made
+        ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS)              # and open the book that is being made
         q_timer.tick(queue_refresh, q_pick, QOUT)
         mu_outs = [mu_on, mu_intro, mu_bridge, mu_outro, mu_intro_sec, mu_intro_start, mu_bridge_sec, mu_bridge_start, mu_outro_sec, mu_outro_start,
                    mu_level, mu_interval, mu_sections, mu_note, mu_credits, mu_title, mu_lead, mu_tail, mu_fade, mu_duck, mu_under, mu_before, mu_outro_under, mu_tpause, mu_speak, mu_speak_pause]
@@ -2448,7 +2528,7 @@ def build_ui() -> gr.Blocks:
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
                     [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
         a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover]).then(
-            gen_settings, project, [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers]).then(
+            gen_settings, project, GEN_OUTS).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group])
         a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])

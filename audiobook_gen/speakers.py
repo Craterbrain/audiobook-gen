@@ -374,6 +374,27 @@ def collapse_to_narrator(segs: list[dict]) -> list[dict]:
     return out
 
 
+def backup_segments(work, keep: int = 10) -> Path | None:
+    """Copy segments.json to segments.backup/segments-<time>.json before something rewrites it (not if it equals the newest copy).
+    Returns the copy, or None."""
+    import shutil
+    from datetime import datetime
+    work = Path(work)
+    src = work / "segments.json"
+    if not src.exists():
+        return None
+    d = work / "segments.backup"
+    old = sorted(d.glob("segments-*.json")) if d.exists() else []
+    if old and old[-1].read_bytes() == src.read_bytes():
+        return None
+    d.mkdir(exist_ok=True)
+    dst = d / f"segments-{datetime.now():%Y%m%d-%H%M%S-%f}.json"
+    shutil.copy2(src, dst)
+    for f in sorted(d.glob("segments-*.json"))[:-keep]:
+        f.unlink()
+    return dst
+
+
 def parse_book(work: Path, aliases: dict | None = None, llm: tuple[str, str] | None = None,
                phrase_roles: dict | None = None, judge=None, progress=None, genders: dict | None = None) -> list[dict]:
     """progress(fraction 0..1, description) is called as chapters (and ambiguous quotes) are processed."""
@@ -400,5 +421,6 @@ def parse_book(work: Path, aliases: dict | None = None, llm: tuple[str, str] | N
         print(f"[judge] asked about {ctx['judge_stats'][0]} uncertain quotes, changed {ctx['judge_stats'][1]} labels")
     if llm:
         segs = llm_refine(segs, *llm)
+    backup_segments(work)                                  # parsing again replaces every line you moved or merged
     (work / "segments.json").write_text(json.dumps(segs, indent=2, ensure_ascii=False))
     return segs

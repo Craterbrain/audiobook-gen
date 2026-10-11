@@ -501,7 +501,7 @@ def test_gui_reconnects_to_a_running_job(tmp_path, monkeypatch):
     assert r["title"] == "Running book" and r["pct"] == 25 and r["since_clip"] < 60
     assert "Making “Running book”" in gui.queue_now() and "25%" in gui.queue_now()
     out = gui.reconnect_on_load("")                          # nothing open: it opens the running book
-    assert len(out) == 23 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
+    assert len(out) == 29 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
     assert out[1]["Include"].all()                           # every chapter ticked, as it was queued
     assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(str(p)))     # a book is already open: leave it alone
     jq.update(job["id"], status="done")
@@ -586,7 +586,7 @@ def test_chatterbox_workers_toggle(tmp_path, monkeypatch):
     for toggle, want in ((True, 2), (False, 1)):
         gui.generate_queued(str(p), chap, "B", "A", "", 60, 350, 700, 250, 4, True, True, 0.0, list(gui.LEX_MODES)[0], 140, 120, toggle)
         assert yaml.safe_load((p / "config.yaml").read_text())["workers"]["chatterbox"] == want
-    assert gui.gen_settings(str(p))[-1] is False                       # the toggle shows what is saved
+    assert gui.gen_settings(str(p))[5] is False                       # the toggle shows what is saved
 
 
 def test_stop_and_start_the_queue_runner(tmp_path, monkeypatch):
@@ -2232,3 +2232,63 @@ def test_the_quality_check_note_says_how_many_clips(tmp_path, monkeypatch):
     (work / "clips_meta.json").write_text(json.dumps({f"c{i}.wav": {} for i in range(1234)}))
     assert jq.Runner._clip_count(None, {"work": str(work)}) == " (1,234 clips)"
     assert jq.Runner._clip_count(None, {"work": str(tmp_path / "nowhere")}) == ""
+
+
+def test_reopened_book_shows_its_saved_generate_settings(tmp_path):
+    import yaml
+    from audiobook_gen import gui
+    p = _assistant_project(tmp_path)
+    cfg = yaml.safe_load((p / "config.yaml").read_text())
+    cfg.update(crossfade_ms=90, f5_precision="float32", pacing_ms={"sentence": 400, "paragraph": 900, "speaker_change": 300},
+               workers={"kokoro": 2, "chatterbox": 1})
+    (p / "config.yaml").write_text(yaml.safe_dump(cfg))
+    g = gui.gen_settings(str(p))
+    assert len(g) == 12 and g[6:] == (90, 400, 900, 300, 2, False)
+
+
+def test_saving_a_stale_lexicon_table_keeps_what_the_name_check_wrote(tmp_path):
+    import json, pandas as pd
+    from audiobook_gen import gui
+    p = _assistant_project(tmp_path)
+    snap = gui.lex_snapshot(str(p))
+    table = pd.DataFrame([{"term": "Weena", "ipa": "", "respell": "", "lang": ""}])      # loaded while Weena had no respelling
+    lex = json.loads((p / "lexicon.json").read_text()); lex[0]["respell"] = "wee-nah"; lex[0]["respell_src"] = "namecheck"
+    (p / "lexicon.json").write_text(json.dumps(lex))                           # the name check finishes meanwhile
+    gui.save_lexicon(str(p), table, snap)
+    e = json.loads((p / "lexicon.json").read_text())[0]
+    assert e["respell"] == "wee-nah" and e.get("respell_src") == "namecheck"
+    table.loc[0, "ipa"] = "wiːnə"                                              # a real edit still saves
+    gui.save_lexicon(str(p), table, snap)
+    e = json.loads((p / "lexicon.json").read_text())[0]
+    assert e["ipa"] == "wiːnə" and e["respell"] == "wee-nah" and e["source"] == "user"
+
+
+def test_a_book_is_queued_once_and_rebuild_keeps_its_settings(tmp_path, monkeypatch):
+    from audiobook_gen import gui, jobqueue as jq
+    monkeypatch.setattr(jq, "QUEUE", tmp_path / "queue"); monkeypatch.setattr(jq, "JOBS", tmp_path / "queue" / "jobs.json")
+    monkeypatch.setattr(jq, "ensure_supervisor", lambda: False)
+    p = _assistant_project(tmp_path)
+    a, upd = gui._enqueue(p, "T", "A", "", [1], "", "", "")
+    b, upd2 = gui._enqueue(p, "T2", "A", "", None, "", "23:00-06:30", "")
+    assert not upd and upd2 and a["id"] == b["id"] and len(jq.load()) == 1
+    assert jq.load()[0]["title"] == "T2" and jq.load()[0]["window"] == "23:00-06:30"
+    jq.update(a["id"], status="done", chapters=[1])
+    assert "Queued" in gui.corr_rebuild(str(p)) and len(jq.load()) == 2
+    assert jq.load()[-1]["chapters"] == [1] and jq.load()[-1]["title"] == "T2" and jq.load()[-1]["send_to"] == ""
+    (p / "prep.json").unlink()                                                 # not prepared: refused, not queued
+    import pytest, gradio as gr
+    with pytest.raises(gr.Error):
+        gui._enqueue(p, "T", "A", "", None, "", "", "")
+
+
+def test_segments_are_backed_up_and_extras_survive_prepare(tmp_path):
+    import json
+    from audiobook_gen import gui, music, prep
+    from audiobook_gen.speakers import backup_segments
+    p = _assistant_project(tmp_path)
+    assert backup_segments(p) and backup_segments(p) is None                   # a second identical copy is not made
+    (p / "segments.json").write_text(json.dumps([{"speaker": "Bob", "kind": "dialogue", "text": "Hi.", "id": 1, "chapter": 1}]))
+    assert backup_segments(p) and len(list((p / "segments.backup").glob("*.json"))) == 2
+    plan = music.load_plan(p); plan["enabled"] = True; plan["intro"].update(track="x", title="A Tale"); music.save_plan(p, plan)
+    gui._reapply_extras(p)
+    assert any(c.get("opening") for c in json.loads((p / "chapters.json").read_text())["chapters"]) and prep.status(p)["ready"]

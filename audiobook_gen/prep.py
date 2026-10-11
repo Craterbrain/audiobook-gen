@@ -88,6 +88,17 @@ def mark_done(work, steps: list[str] | None = None, source: str = "") -> None:
                                        "chapters": _fingerprint(work), **({"source": source} if source else {})}, indent=1))
 
 
+def restamp(work) -> None:
+    """After a step you trust changed only chapters.json (the spoken opening, section titles): keep the book 'prepared'."""
+    work = Path(work)
+    try:
+        info = json.loads(_path(work).read_text())
+    except (OSError, ValueError):
+        return
+    info["chapters"] = _fingerprint(work)
+    _path(work).write_text(json.dumps(info, indent=1))
+
+
 def describe(work) -> str:
     """One line for the Generate tab."""
     st = status(work)
