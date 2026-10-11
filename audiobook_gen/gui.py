@@ -1643,7 +1643,7 @@ def _need_gpu_real() -> None:
         jobqueue.lease_touch()
         return
     run = jobqueue.now_running()
-    if run and run["note"] in ("making the speech", "checking the clips"):
+    if run and run["note"].startswith(("making the speech", "checking the clips")):
         raise gr.Error(f"“{run['title']}” is being made on the GPU. Press “Pause the book and use the GPU” at the top of the page, then try again. "
                        f"It carries on by itself about {LEASE_IDLE // 60} minutes after you stop (reloading takes about 1½ minutes).")
     other = jobqueue.lease_holder()
@@ -1661,7 +1661,7 @@ def gpu_banner() -> str:
         left = max(0, LEASE_IDLE - int(jobqueue.lease_idle()))
         return f"🟢 **You have the GPU.** The queue is paused and carries on by itself {left // 60} min {left % 60:02d} s after you stop using a model here."
     run = jobqueue.now_running()
-    if run and run["note"] in ("making the speech", "checking the clips"):
+    if run and run["note"].startswith(("making the speech", "checking the clips")):
         return f"⏳ **“{run['title']}” is being made on the GPU.** Pausing it frees the GPU for hearing voices or remaking clips here."
     other = jobqueue.lease_holder()
     return f"🔒 {other} has the GPU." if other else "⚪ The GPU is free."

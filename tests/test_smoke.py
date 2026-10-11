@@ -2224,3 +2224,11 @@ def test_the_clip_count_is_full_once_the_speech_stage_is_over(tmp_path, monkeypa
     jq.update(j["id"], progress="")
     jq.Runner._speech_complete(None, j)                                      # nothing to complete: left alone
     assert next(x for x in jq.load() if x["id"] == j["id"])["progress"] == ""
+
+
+def test_the_quality_check_note_says_how_many_clips(tmp_path, monkeypatch):
+    import json
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    (work / "clips_meta.json").write_text(json.dumps({f"c{i}.wav": {} for i in range(1234)}))
+    assert jq.Runner._clip_count(None, {"work": str(work)}) == " (1,234 clips)"
+    assert jq.Runner._clip_count(None, {"work": str(tmp_path / "nowhere")}) == ""

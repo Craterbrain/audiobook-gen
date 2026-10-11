@@ -749,6 +749,13 @@ class Runner:
             pass
         return ""
 
+    def _clip_count(self, job: dict) -> str:
+        """" (996 clips)" for the quality check's note, "" if the count is not known."""
+        try:
+            return f" ({len(json.loads((Path(job['work']) / 'clips_meta.json').read_text())):,} clips)"
+        except (OSError, ValueError):
+            return ""
+
     def _speech_complete(self, job: dict) -> None:
         """The speech stage is over, so every clip is there: the count reads "997/997" for the later stages, not the "0/997" a book whose
         clips were all made earlier last printed."""
@@ -854,6 +861,11 @@ class Runner:
             if stage in ("synth", "qc", "names") and lease_holder():                    # the app asked for the GPU: give it up, come back later
                 _kill_group(proc)
                 return "lease"
+            if stage == "names":                                                       # "judging clips 301/793" from the pass itself
+                detail = (activity_get() or {}).get("detail", "")
+                text = "checking how names are pronounced" + (f" — {detail}" if detail else "")
+                if detail and text != cur.get("note"):
+                    update(job["id"], note=text)
             if stage == "synth":
                 prog = self._progress(job)
                 if prog and prog != cur.get("progress"):
@@ -928,7 +940,7 @@ class Runner:
                 if stage == "synth" and not in_window(job.get("window", ""), self.now()):
                     update(job["id"], status="paused", note="waiting for its daily window")
                     return
-                update(job["id"], note={"synth": "making the speech", "qc": "checking the clips", "names": "checking how names are pronounced", "assemble": "building the audiobook"}[stage])
+                update(job["id"], note={"synth": "making the speech", "qc": f"checking the clips{self._clip_count(job)}", "names": "checking how names are pronounced", "assemble": "building the audiobook"}[stage])
                 proc = self._spawn(cmd, job)
                 result = self._watch(job, proc, stage)
                 if result == "ok":
