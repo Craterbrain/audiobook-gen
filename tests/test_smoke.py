@@ -2361,3 +2361,11 @@ def test_section_titles_are_spoken_by_default(tmp_path, monkeypatch):
     (work / "music.json").write_text(json.dumps({"titles": {"speak": False}}))     # a book that opts out keeps its plan
     prep.run(work, [])
     assert [s["id"] for s in json.loads((work / "segments.json").read_text())] == ["001-00000"]
+
+
+def test_spoken_titles_read_roman_numbers_and_book_headings():
+    from audiobook_gen import titles
+    assert titles.spoken("BOOK ONE THE COMING OF THE MARTIANS") == "Book one. The Coming of the Martians."
+    assert titles.spoken("II. THE FALLING STAR.") == "Two. The Falling Star."
+    assert titles.spoken("XVII. THE “THUNDER CHILD”.") == "Seventeen. The “Thunder Child”."
+    assert titles.spoken("Book of Kells") == "Book of Kells." and titles.spoken("CHAPTER IV") == "Chapter four."

@@ -9,13 +9,14 @@ import re
 from pathlib import Path
 
 PAUSE_S = 2.8
-SMALL = {"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to"}
+SMALL = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
 
 
 def _cap(t: str) -> str:
     """ALL-CAPS heading to title case, keeping small words lower-case (the first word is always capitalised)."""
+    up = lambda w: re.sub(r"[a-z]", lambda m: m[0].upper(), w, count=1)         # capitalise the first letter, past an opening quote
     words = t.lower().split(" ")
-    return " ".join(w.capitalize() if i == 0 or w not in SMALL else w for i, w in enumerate(words))
+    return " ".join(up(w) if i == 0 or w.strip("“”\"'(") not in SMALL else w for i, w in enumerate(words))
 
 
 def _roman(r: str) -> int:
@@ -24,10 +25,29 @@ def _roman(r: str) -> int:
     return sum(-a if a < b else a for a, b in zip(n, n[1:] + [0]))
 
 
+WORDS = ("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen "
+         "twenty").split()
+
+
+def _body(t: str) -> str:
+    """The words of a title: an ALL-CAPS heading would be read letter by letter, so it becomes title case."""
+    t = re.sub(r"\bEsq\b\.?", "Esquire", t, flags=re.I)
+    if t.isupper():
+        return _cap(t)
+    return re.sub(r"\b[A-Z]{2,}\b", lambda x: x[0].capitalize(), t)
+
+
 def spoken(title: str) -> str:
     """How a chapter title is read: numbers in words, a full stop after each part."""
     from num2words import num2words
     t = " ".join(title.split())
+    lead = re.match(r"^([IVXLC]+)\.\s+(\S.*)$", t)                   # "II. THE FALLING STAR." -> "Two. The Falling Star."
+    if lead:
+        return f"{num2words(_roman(lead[1])).capitalize()}. {_body(lead[2]).rstrip('.')}."
+    wb = re.match(r"^(book|part|chapter|section)\s+(" + "|".join(WORDS) + r"|[IVXLC]+)\s+(?=\w)(.+)$", t, re.I)    # "BOOK ONE THE COMING OF ..."
+    if wb:
+        num = wb[2].lower() if wb[2].lower() in WORDS else num2words(_roman(wb[2].upper()))
+        return f"{wb[1].capitalize()} {num}. {_body(wb[3]).rstrip('.')}."
     r = re.match(r"^(part|chapter|book|section)\s+([IVXLC]+)\.?$", t, re.I)
     if r and r[2].upper() == r[2]:                        # "CHAPTER IV" -> "Chapter 4"
         t = f"{r[1]} {_roman(r[2])}"
