@@ -1943,6 +1943,25 @@ def fix_reports(project):
     return "\n\n".join(out)
 
 
+def weak_names(project):
+    """The names the check still found weak, for the 'sounds right' picker."""
+    try:
+        rows = json.loads((_wd(project) / "name_report.json").read_text())["per_name"]
+    except Exception:
+        return gr.update(choices=[], value=None)
+    return gr.update(choices=[f"{r['name']} — {r['below_good']} of {r['clips']} clips" for r in rows if r.get("below_good")], value=None)
+
+
+def name_sounds_right(project, pick):
+    from . import namecheck
+    if not pick:
+        raise gr.Error("Choose a name first.")
+    name = pick.split(" — ")[0]
+    if not namecheck.mark_ok(_wd(project), name, manual=True):
+        raise gr.Error(f"“{name}” is not in this book's lexicon.")
+    return f"“{name}” will be left out of the name check from now on (in this book).", weak_names(project)
+
+
 def export_epub(project):
     """A text-only epub of the book as prepared (what the audiobook says), for reading along."""
     from . import epubout
@@ -2338,6 +2357,10 @@ def build_ui() -> gr.Blocks:
                 with gr.Accordion("Reports and export", open=False):
                     fix_md = gr.Markdown()
                     with gr.Row():
+                        weak_dd = gr.Dropdown(label="Names still weak", choices=[], scale=3)
+                        weak_btn = gr.Button("Sounds right: stop checking it", size="sm", scale=1)
+                    weak_msg = gr.Markdown()
+                    with gr.Row():
                         ex_btn = gr.Button("Make an EPUB of the text", size="sm", scale=1)
                         ex_file = gr.File(label="EPUB", scale=3)
                 gpu_bar()
@@ -2398,7 +2421,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     q_hold = gr.Button("⏸ Pause / save for later"); q_resume = gr.Button("▶️ Resume")
                     q_cancel = gr.Button("Cancel"); q_remove = gr.Button("Remove from list")
-                    q_open = gr.Button("Open in the other tabs")
+                    q_open = gr.Button("Open this book")
                 with gr.Row():
                     q_send = gr.Button("📱 Send to my phone when done"); q_nosend = gr.Button("Don’t send to my phone")
                 with gr.Accordion("Change the schedule of the ticked books", open=False):
@@ -2639,6 +2662,8 @@ def build_ui() -> gr.Blocks:
         cr_use.click(corr_use, [project, cr_file, cr_text, cr_exag, cr_cfg, cr_seed, cr_take_path], [cr_out, cr_file])
         cr_back.click(corr_revert, [project, cr_file], cr_out)
         ex_btn.click(export_epub, project, ex_file)
+        weak_btn.click(name_sounds_right, [project, weak_dd], [weak_msg, weak_dd])
+        q_timer.tick(weak_names, project, weak_dd)
         ui.load(fix_reports, project, fix_md)
         cr_rebuild.click(corr_rebuild, [project, cr_send, g_dev], cr_out)
         q_ntfy_save.click(alerts_save, [q_ntfy], q_alert_msg)

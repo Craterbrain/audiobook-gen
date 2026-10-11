@@ -160,3 +160,13 @@ def test_fix_reports_and_epub_export(tmp_path):
     (w / "name_report.json").write_text(json.dumps({"names": 3, "good": 0.7, "clips_below_good": 4, "respelled": ["a"], "per_name": []}))
     txt = gui.fix_reports(str(w))
     assert "10 clips listened to" in txt and "1 still flagged" in txt and "4 clips still under 70%" in txt
+
+
+def test_weak_names_listed_and_marked_right(tmp_path):
+    from audiobook_gen import gui
+    w = make_book(tmp_path)
+    (w / "lexicon.json").write_text(json.dumps([{"term": "Zorbax", "kind": "name", "count": 4}]))
+    (w / "name_report.json").write_text(json.dumps({"per_name": [{"name": "Zorbax", "clips": 4, "below_good": 3}, {"name": "Bob", "clips": 2, "below_good": 0}]}))
+    assert gui.weak_names(str(w))["choices"] == ["Zorbax — 3 of 4 clips"]
+    msg, upd = gui.name_sounds_right(str(w), "Zorbax — 3 of 4 clips")
+    assert "left out" in msg and json.loads((w / "lexicon.json").read_text())[0]["name_ok"]["manual"] is True
