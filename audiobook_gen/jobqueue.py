@@ -749,6 +749,16 @@ class Runner:
             pass
         return ""
 
+    def _speech_complete(self, job: dict) -> None:
+        """The speech stage is over, so every clip is there: the count reads "997/997" for the later stages, not the "0/997" a book whose
+        clips were all made earlier last printed."""
+        cur = next((j for j in load() if j["id"] == job["id"]), job)
+        try:
+            total = int(str(cur.get("progress", "")).split("/")[1])
+        except (IndexError, ValueError):
+            return
+        update(job["id"], progress=f"{total}/{total}")
+
     def _qc_summary(self, job: dict) -> None:
         try:
             r = json.loads((Path(job["work"]) / "qc_report.json").read_text())
@@ -922,6 +932,8 @@ class Runner:
                 proc = self._spawn(cmd, job)
                 result = self._watch(job, proc, stage)
                 if result == "ok":
+                    if stage == "synth":
+                        self._speech_complete(job)
                     if stage == "qc":
                         self._qc_summary(job)
                     break

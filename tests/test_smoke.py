@@ -2213,3 +2213,14 @@ def test_titles_ranks_and_states_are_spelled_out_before_synthesis():
     assert normalize("U. S. GRANT, Lieut.-General. At Memphis, Tenn., and Malden, W. Va. He") == "U. S. GRANT, Lieutenant General. At Memphis, Tennessee, and Malden, West Virginia He"
     assert normalize("John Melbourne, Esq., and Smith, Esq. He, etc., came, i.e., late.") == "John Melbourne, Esquire, and Smith, Esquire. He, et cetera, came, that is, late."
     assert normalize("the mass. No. 5 in Massachusetts.") == "the mass. No. 5 in Massachusetts."
+
+
+def test_the_clip_count_is_full_once_the_speech_stage_is_over(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    j = jq.add(str(work), "Book", out=str(tmp_path / "b.m4b"))
+    jq.update(j["id"], status="running", progress="0/997")
+    jq.Runner._speech_complete(None, j)
+    assert next(x for x in jq.load() if x["id"] == j["id"])["progress"] == "997/997"
+    jq.update(j["id"], progress="")
+    jq.Runner._speech_complete(None, j)                                      # nothing to complete: left alone
+    assert next(x for x in jq.load() if x["id"] == j["id"])["progress"] == ""
