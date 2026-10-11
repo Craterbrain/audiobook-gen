@@ -2534,3 +2534,32 @@ def test_any_audio_format_can_be_a_clone_reference(tmp_path, monkeypatch):
     bad = tmp_path / "notaudio.m4a"; bad.write_bytes(b"hello world" * 200)
     with pytest.raises(ValueError, match="could not be read"):
         audio_io.to_wav(bad)
+
+
+def test_contents_list_headings_in_a_txt_are_not_chapters(tmp_path):
+    from audiobook_gen import extract
+    body = "It was the best of times, it was the worst of times. " * 6
+    t = tmp_path / "book.txt"
+    t.write_text("My Book\n\nCONTENTS\n\nChapter 1. The Start\nChapter 2. The End\n\n" f"Chapter 1. The Start\n\n{body}\n\nChapter 2. The End\n\n{body}\n")
+    d = extract.extract(str(t), str(tmp_path / "w"))
+    assert [c["title"] for c in d["chapters"]] == ["Chapter 1. The Start", "Chapter 2. The End"] and [c["index"] for c in d["chapters"]] == [1, 2]
+
+
+def test_other_formats_are_converted_by_calibre_when_it_is_installed(tmp_path):
+    import shutil, subprocess
+    import pytest
+    from audiobook_gen import extract
+    exe = shutil.which("ebook-convert")
+    if not exe:
+        pytest.skip("calibre is not installed")
+    body = "The harbour was quiet and the tide was going out over the mud. " * 8
+    html = tmp_path / "b.html"
+    html.write_text(f"<html><head><title>Rtf Book</title></head><body><h1>One</h1><p>{body}</p><h1>Two</h1><p>{body}</p></body></html>")
+    rtf = tmp_path / "b.rtf"
+    subprocess.run([exe, str(html), str(rtf)], check=True, capture_output=True)
+    d = extract.extract(str(rtf), str(tmp_path / "w"))
+    assert len(d["chapters"]) >= 1 and "harbour was quiet" in d["chapters"][0]["text"] and ".rtf" in extract.TEXT_EXTS      # RTF has no heading styles, so how it splits is up to calibre
+    junk = tmp_path / "broken.pdf"; junk.write_bytes(b"not a pdf at all")
+    import pytest
+    with pytest.raises(ValueError, match="could not convert|No readable text"):
+        extract.extract(str(junk), str(tmp_path / "w2"))

@@ -2216,7 +2216,7 @@ def build_ui() -> gr.Blocks:
             with gr.Tab("① Book", id="book"):
                 banner("book")
                 with gr.Row():
-                    book = gr.File(label="EPUB, TXT, Markdown, HTML or DOCX", file_types=TEXT_EXTS)
+                    book = gr.File(label="EPUB, TXT, Markdown, HTML, DOCX (PDF, MOBI, AZW3, FB2, RTF with calibre installed)", file_types=TEXT_EXTS)
                     with gr.Column():
                         maxch = gr.Number(label="Only first N chapters (0 = all)", value=0, precision=0)
                         load_btn = gr.Button("Load book", variant="primary")

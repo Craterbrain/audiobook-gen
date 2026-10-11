@@ -1,6 +1,9 @@
 """Module 1a: raw text + chapter structure from .epub / .txt / .md / .html / .docx."""
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 VERSE_RE = re.compile(r"(?<!\d)(\d{1,3}):(\d{1,3})\s+")
@@ -80,8 +83,10 @@ def extract_txt(path: Path) -> dict:
     chapters = []
     for i, m in enumerate(heads):
         end = heads[i + 1].start() if i + 1 < len(heads) else len(raw)
-        chapters.append({"index": i + 1, "title": m.group(1).strip(),
+        chapters.append({"index": len(chapters) + 1, "title": m.group(1).strip(),
                          "text": _clean(raw[m.end():end])})
+    kept = [c for c in chapters if len(c["text"]) >= 40]             # a contents list is headings with nothing under them
+    chapters = [{**c, "index": n} for n, c in enumerate(kept or chapters, 1)]
     return {"title": title, "author": "", "cover": None, "chapters": chapters}
 
 
@@ -233,7 +238,31 @@ def extract_epub(path: Path, out_dir: Path) -> dict:
             "cover": str(cover) if cover else None, "chapters": chapters}
 
 
-TEXT_EXTS = [".epub", ".txt", ".text", ".md", ".markdown", ".html", ".htm", ".docx"]
+NATIVE_EXTS = [".epub", ".txt", ".text", ".md", ".markdown", ".html", ".htm", ".docx"]
+CALIBRE_EXTS = [".pdf", ".mobi", ".azw", ".azw3", ".fb2", ".rtf", ".odt", ".htmlz", ".lit", ".lrf", ".pdb", ".prc"]   # only calibre reads these
+TEXT_EXTS = NATIVE_EXTS + (CALIBRE_EXTS if shutil.which("ebook-convert") else [])
+
+
+def extract_via_calibre(path: Path, out_dir: Path) -> dict:
+    """Formats we do not read ourselves (pdf, mobi, azw3, fb2, rtf, odt ...): calibre's ebook-convert makes an epub of them,
+    and that goes through the same epub reader as any other book (footnotes, clean-up, Gutenberg header)."""
+    exe = shutil.which("ebook-convert")
+    if not exe:
+        raise ValueError(f"Reading {path.suffix} files needs calibre (ebook-convert). Install calibre, or convert the file to epub or txt first.")
+    tmp = Path(tempfile.mkdtemp(prefix="calibre_in_"))
+    try:
+        epub = tmp / (path.stem[:60] + ".epub")
+        r = subprocess.run([exe, str(path), str(epub)], capture_output=True, text=True, timeout=900)
+        if r.returncode != 0 or not epub.exists():
+            tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["no output"]
+            raise ValueError(f"calibre could not convert {path.name}: {tail[0][:160]}")
+        d = extract_epub(epub, out_dir)
+        if not d["chapters"]:
+            raise ValueError(f"No readable text was found in {path.name} (a scanned PDF has pictures of pages, not text, and needs OCR first).")
+        d["title"] = d["title"] if d["title"] and d["title"] != epub.stem else path.stem
+        return d
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _pretty(stem: str) -> str:
@@ -370,9 +399,9 @@ def extract(path: str, out_dir: str, max_chapters: int | None = None) -> dict:
     path, out_dir = Path(path), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ext = path.suffix.lower()
-    if ext not in TEXT_EXTS:
-        raise ValueError(f"Cannot read {path.suffix or 'that file'}: use one of {', '.join(TEXT_EXTS)}.")
-    data = (extract_epub(path, out_dir) if ext == ".epub" else extract_markdown(path) if ext in (".md", ".markdown") else
+    if ext not in NATIVE_EXTS + CALIBRE_EXTS:
+        raise ValueError(f"Cannot read {path.suffix or 'that file'}: use one of {', '.join(NATIVE_EXTS + CALIBRE_EXTS)}.")
+    data = (extract_via_calibre(path, out_dir) if ext in CALIBRE_EXTS else extract_epub(path, out_dir) if ext == ".epub" else extract_markdown(path) if ext in (".md", ".markdown") else
             extract_html(path) if ext in (".html", ".htm") else extract_docx(path) if ext == ".docx" else extract_txt(path))
     if max_chapters:
         data["chapters"] = data["chapters"][:max_chapters]
