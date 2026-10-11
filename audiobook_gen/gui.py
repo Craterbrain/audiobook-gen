@@ -66,6 +66,17 @@ def _cfg(project: str) -> dict:
 
 
 # ---------- Book ----------
+def parse_note(report) -> str:
+    """One or two lines under the load message: which reader was used, and anything about the result that looks off."""
+    if not report:
+        return ""
+    how = {"play": "a play", "verse": "chapter:verse scripture", "chapters": "chapter headings", "single": "one block of text"}.get(report.get("reader", ""), report.get("reader", ""))
+    line = f"  \nRead as {how}." if how else ""
+    if report.get("notes"):
+        line += "  \n⚠️ " + "  \n⚠️ ".join(report["notes"]) + "  \nIf that is not right, tick the chapters you want or fix the headings in the file and load it again."
+    return line
+
+
 def load_book(file, max_chapters):
     if file is None:
         raise gr.Error("Choose an .epub, .txt, .md, .html or .docx file.")
@@ -77,7 +88,7 @@ def load_book(file, max_chapters):
         raise gr.Error(str(e))
     rows = [[True, c["index"], c["title"], len(c["text"])] for c in data["chapters"]]
     return (str(work), pd.DataFrame(rows, columns=CHAP_COLS), data["title"], data["author"] or "",
-            data["cover"], f"Loaded **{data['title']}**: {len(rows)} chapters → `{work}`")
+            data["cover"], f"Loaded **{data['title']}**: {len(rows)} chapters → `{work}`" + parse_note(data.get("parse_report")))
 
 
 # ---------- Text preparation (Book tab) ----------

@@ -57,41 +57,38 @@ def extract_txt(path: Path) -> dict:
 
 
 def extract_raw(raw: str, title: str = "") -> dict:
-    """Chapters from plain text: a play, Bible-style chapter:verse text, or 'Chapter N' headings (a given title overrides the first line)."""
+    """Chapters from plain text. parsecheck.kind() decides which reader fits (a play, chapter:verse scripture, standalone 'Chapter N'
+    headings, or one block); a given title overrides the first line. The decision and its reasons are kept in "parse_report"."""
+    from . import parsecheck
     title = title or raw.strip().splitlines()[0].strip()
-    if len(SPEAKER_LINE.findall(raw)) > 50 and re.search(r"^SCENE [IVX]+\.", raw, re.M):
+    k = parsecheck.kind(raw)
+    if k["kind"] == "play":
         m = re.search(r"Title:\s*(.+)", raw)
         author = re.search(r"Author:\s*(.+)", raw)
         d = extract_play(raw, m.group(1).strip() if m else title)
         d["author"] = author.group(1).strip() if author else ""
-        return d
-    # Bible-style "chapter:verse" text (the KJV sample): chapter = number before the colon.
-    if len(VERSE_RE.findall(raw)) > 20:
-        chapters, cur = {}, None
+    elif k["kind"] == "verse":                       # Bible-style "chapter:verse" text: chapter = the number before the colon
+        chapters = {}
         pieces = VERSE_RE.split(raw)  # [pre, ch, v, text, ch, v, text, ...]
         for i in range(1, len(pieces) - 2, 3):
-            ch = int(pieces[i])
-            body = re.sub(r"\s+", " ", pieces[i + 2]).strip()
-            chapters.setdefault(ch, []).append(body)
-        return {
-            "title": title, "author": "", "cover": None,
-            "chapters": [
-                {"index": n, "title": f"Chapter {n}", "text": "\n\n".join(v)}
-                for n, v in sorted(chapters.items())
-            ],
-        }
-    heads = list(HEADING_RE.finditer(raw))
-    if not heads:
-        return {"title": title, "author": "", "cover": None,
-                "chapters": [{"index": 1, "title": title, "text": _clean(raw)}]}
-    chapters = []
-    for i, m in enumerate(heads):
-        end = heads[i + 1].start() if i + 1 < len(heads) else len(raw)
-        chapters.append({"index": len(chapters) + 1, "title": m.group(1).strip(),
-                         "text": _clean(raw[m.end():end])})
-    kept = [c for c in chapters if len(c["text"]) >= 40]             # a contents list is headings with nothing under them
-    chapters = [{**c, "index": n} for n, c in enumerate(kept or chapters, 1)]
-    return {"title": title, "author": "", "cover": None, "chapters": chapters}
+            chapters.setdefault(int(pieces[i]), []).append(re.sub(r"\s+", " ", pieces[i + 2]).strip())
+        d = {"title": title, "author": "", "cover": None,
+             "chapters": [{"index": n, "title": f"Chapter {n}", "text": "\n\n".join(v)} for n, v in sorted(chapters.items())]}
+    elif k["kind"] == "chapters":
+        heads = parsecheck.headings(raw)
+        chapters = []
+        for i, m in enumerate(heads):
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(raw)
+            chapters.append({"index": len(chapters) + 1, "title": m.group(1).strip(), "text": _clean(raw[m.end():end])})
+        pre = _clean(raw[:heads[0].start()])
+        kept = [c for c in chapters if len(c["text"]) >= 40]             # a contents list is headings with nothing under them
+        chapters = [{**c, "index": n} for n, c in enumerate(kept or chapters, 1)]
+        d = {"title": title, "author": "", "cover": None, "chapters": chapters}
+    else:                                            # "single" (and headings that were not on lines of their own)
+        d = {"title": title, "author": "", "cover": None, "chapters": [{"index": 1, "title": title, "text": _clean(raw)}]}
+    d["parse_report"] = {"reader": k["kind"], "confidence": round(k["confidence"], 2), "reasons": k["reasons"],
+                         **parsecheck.validate(d, len(raw), k["kind"])}
+    return d
 
 
 GUTENBERG_END = re.compile(r"THE FULL PROJECT GUTENBERG|\*\*\* ?END OF (?:THE |THIS )?PROJECT GUTENBERG", re.I)
@@ -534,6 +531,9 @@ def extract(path: str, out_dir: str, max_chapters: int | None = None) -> dict:
         raise ValueError(f"Cannot read {path.suffix or 'that file'}: use one of {', '.join(NATIVE_EXTS + CALIBRE_EXTS)}.")
     data = (extract_pdf(path, out_dir) if ext == ".pdf" else extract_via_calibre(path, out_dir) if ext in CALIBRE_EXTS else extract_epub(path, out_dir) if ext == ".epub" else extract_markdown(path) if ext in (".md", ".markdown") else
             extract_html(path) if ext in (".html", ".htm") else extract_docx(path) if ext == ".docx" else extract_txt(path))
+    from . import parsecheck
+    if "parse_report" not in data:                                       # the other readers: check what came out
+        data["parse_report"] = {"reader": ext.lstrip("."), **parsecheck.validate(data)}
     if max_chapters:
         data["chapters"] = data["chapters"][:max_chapters]
     (out_dir / "chapters.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))

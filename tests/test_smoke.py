@@ -2610,3 +2610,28 @@ def test_pdf_books_are_read_with_poppler_and_scans_without_text_are_refused(tmp_
     subprocess.run(["ebook-convert", str(pics), str(blank)], check=True, capture_output=True)
     with pytest.raises(ValueError, match="mostly pictures|No readable text|Only"):
         extract.extract(str(blank), str(tmp_path / "w2"))
+
+
+def test_parser_check_picks_the_reader_that_fits_and_says_when_a_result_looks_wrong(tmp_path):
+    from audiobook_gen import extract, parsecheck
+    body = "It was the best of times, it was the worst of times, and the rain would not stop. " * 12
+    # chapter headings on lines of their own are headings; sentences that merely begin with "Part" are not
+    prose = f"My Book\n\nChapter 1. The Start\n\n{body}\nPart of the company talked of Moscow, while the rest were quiet.\n\nChapter 2. The End\n\n{body}\n"
+    d = extract.extract_raw(prose)
+    assert [c["title"] for c in d["chapters"]] == ["Chapter 1. The Start", "Chapter 2. The End"] and d["parse_report"]["reader"] == "chapters"
+    assert "Part of the company" in d["chapters"][0]["text"] and d["parse_report"]["level"] == "ok"
+    # times of day are not verses: 20+ of them but not in sequence
+    clock = "\n".join(f"The train leaves at {h}:{m:02d} and arrives soon after that." for h, m in [(9, 15), (3, 40), (11, 5), (7, 30)] * 8)
+    k = parsecheck.kind(clock)
+    assert k["kind"] == "single" and "times or ratios" in " ".join(k["reasons"])
+    real = " ".join(f"{c}:{v} In the beginning was the word and it was good." for c in (1, 2) for v in range(1, 15))
+    assert parsecheck.kind(real)["kind"] == "verse"
+    # a long book that came out as one chapter, and one cut into scraps, both get a note
+    one = {"chapters": [{"index": 1, "title": "T", "text": "word " * 20000}]}
+    assert parsecheck.validate(one)["level"] == "check" and "one chapter" in parsecheck.validate(one)["notes"][0]
+    scraps = {"chapters": [{"index": i, "title": f"Chapter {i % 2}", "text": "tiny text " * 4} for i in range(12)]}
+    r = parsecheck.validate(scraps)
+    assert r["level"] == "bad" and any("tiny" in n for n in r["notes"]) and any("share a title" in n for n in r["notes"])
+    # other readers get a report too, saved in chapters.json
+    md = tmp_path / "b.md"; md.write_text("## One\n\n" + body * 2 + "\n\n## Two\n\n" + body * 2)
+    assert json.loads((tmp_path / "w" / "chapters.json").read_text() if extract.extract(str(md), str(tmp_path / "w")) else "")["parse_report"]["reader"] == "md"

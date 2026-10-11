@@ -178,7 +178,10 @@ def stage_status(work: Path | None, jobs: list[dict] | None = None, ticks: set[i
     elif ticks is not None and {t for t in ticks} != chapters:
         book = Stage("book", LABELS["book"], "stale", "ticks changed", "The ticked chapters differ from the prepared ones: press Prepare again.")
     else:
-        book = Stage("book", LABELS["book"], "done", "prepared", f"Prepared {st.get('at', '')}.".replace(" .", "."))
+        rep = (meta.get("parse_report") or {})
+        warn = f" ⚠️ {rep['notes'][0]}" if rep.get("notes") else ""
+        book = Stage("book", LABELS["book"], "done", "prepared" if not warn else "prepared, check parse",
+                     f"Prepared {st.get('at', '')}.".replace(" .", ".") + warn)
     blocked = "" if book.state in ("done", "busy") else "book"
 
     # 2 Voices
