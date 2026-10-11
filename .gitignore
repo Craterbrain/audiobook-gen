@@ -48,3 +48,4 @@ nohup.out
 books/
 tools/wait_for.py
 *.ogg
+archive/

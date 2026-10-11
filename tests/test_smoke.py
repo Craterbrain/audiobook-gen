@@ -2440,3 +2440,38 @@ def test_deleting_the_earlier_jobs_work_folder_is_guarded(tmp_path, monkeypatch)
     d = jq.add(str(outside), "T3")
     msg, _ = gui.dup_remove([d["id"]], "", delete=True)                      # not under work/: kept
     assert outside.exists()
+
+
+def test_done_tab_rates_books_and_cleans_up_work_folders(tmp_path, monkeypatch):
+    import json, zipfile
+    import pytest, gradio as gr
+    from audiobook_gen import gui, jobqueue as jq, library
+    jq_, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "ROOT", tmp_path); monkeypatch.setattr(library, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "RATINGS", tmp_path / "out" / "ratings.json"); monkeypatch.setattr(library, "ARCHIVE", tmp_path / "archive")
+    (tmp_path / "work").mkdir(); book = tmp_path / "work" / "mybook"; (book / "clips").mkdir(parents=True)
+    (book / "segments.json").write_text("[]"); (book / "chapters.json").write_text("{}"); (book / "clips" / "a.wav").write_bytes(b"x" * 5000)
+    (tmp_path / "out").mkdir(); (tmp_path / "out" / "mybook.m4b").write_bytes(b"audio")
+    j = jq.add(str(book), "My Book"); jq.update(j["id"], status="done", finished="2026-10-11 12:00")
+    tbl = gui.done_table()
+    assert list(tbl["Book"]) == ["My Book"] and tbl.loc[0, "State"] == "work folder" and tbl.loc[0, "Rating"] == "not rated"
+    tbl.loc[0, "✔"] = True
+    msg, tbl = gui.done_rate(tbl, "★★★★", "great")
+    assert "★★★★☆" in msg and library.rating("mybook")["stars"] == 4 and tbl.loc[0, "Rating"] == "★★★★☆"
+    show, text, pending = gui.done_ask(tbl.assign(**{"✔": [True]}), "zip")                  # asks first; nothing is touched
+    assert show["visible"] is True and "zipped" in text and book.exists()
+    msg, box, _ = gui.done_do(pending)
+    z = tmp_path / "archive" / "mybook.zip"
+    assert "zipped to archive/mybook.zip" in msg and z.exists() and not book.exists() and (tmp_path / "out" / "mybook.m4b").exists()
+    names = zipfile.ZipFile(z).namelist()
+    assert "mybook/segments.json" in names and not any("clips" in n for n in names)          # clips are left out
+    assert gui.done_table().loc[0, "State"] == "archived (zip)" and library.rating("mybook")["stars"] == 4   # the rating outlives the folder
+    assert "Restored" in gui.done_restore("mybook.zip") and (book / "segments.json").exists() and not (book / "clips").exists()
+    z.unlink()
+    j2 = jq.add(str(book), "Again")                                                         # a waiting job on the folder blocks any cleanup
+    with pytest.raises(gr.Error, match="still has a job"):
+        gui.done_ask(gui.done_table().assign(**{"✔": [True]}), "delete")
+    jq.remove_many([j2["id"]])
+    _, _, pending = gui.done_ask(gui.done_table().assign(**{"✔": [True]}), "delete")
+    msg, *_ = gui.done_do(pending)
+    assert "folder deleted" in msg and not book.exists() and (tmp_path / "out" / "mybook.m4b").exists()

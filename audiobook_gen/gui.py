@@ -18,7 +18,7 @@ from .extract import extract
 from .lexicon import MACBETH_SEED, MONTE_CRISTO_SEED, autofill, build_lexicon, fill_respell, seed
 from .speakers import NARRATOR, backup_segments, parse_book
 from . import casting
-from . import prep, workflow
+from . import library, prep, workflow
 from . import m4b as m4blib
 from . import sync as synclib
 from . import voicepack as vpk
@@ -1295,6 +1295,92 @@ def dup_remove(ids, project="", delete=False):
     return msg, gr.update(visible=False)
 
 
+# ---------- Done: rate finished books, clean up their folders ----------
+DONE_COLS = ["✔", "Book", "Rating", "Finished", "Folder", "Clips", "State", "id"]
+STAR_CHOICES = ["★", "★★", "★★★", "★★★★", "★★★★★"]
+
+
+def done_table(picked=None):
+    rows = []
+    zips = {z.stem for z in library.archived()}
+    for b in library.done_books():
+        state = "work folder" if b["folder"] else ("archived (zip)" if b["name"] in zips else "folder gone")
+        rows.append([b["name"] in set(picked or []), b["title"], library.stars_text(b["stars"]), b["finished"],
+                     library.human(b["bytes"]) if b["folder"] else "", library.human(b["clip_bytes"]) if b["folder"] else "", state, b["name"]])
+    return pd.DataFrame(rows, columns=DONE_COLS)
+
+
+def done_ticked(df) -> list:
+    try:
+        return [str(r["id"]) for _, r in df.iterrows() if r["✔"] in (True, "true", "True")]
+    except Exception:
+        return []
+
+
+def done_refresh(df=None):
+    return done_table(done_ticked(df) if df is not None else None), gr.update(choices=[z.name for z in library.archived()], value=None)
+
+
+def done_rate(df, stars, note):
+    names = done_ticked(df)
+    if not names:
+        raise gr.Error("Tick the books to rate first.")
+    n = len(stars or "")
+    for name in names:
+        library.rate(name, n, note or "")
+    return (f"Rated {len(names)} book(s): {library.stars_text(n)}." if n else f"Cleared the rating of {len(names)} book(s)."), done_table(names)
+
+
+def done_ask(df, mode):
+    names = done_ticked(df)
+    if not names:
+        raise gr.Error("Tick the books to clean up first.")
+    books = {b["name"]: b for b in library.done_books()}
+    lines = []
+    for n in names:
+        b = books.get(n)
+        if not b or not b["folder"]:
+            raise gr.Error(f"“{n}” has no work folder (it may already be archived or deleted).")
+        try:
+            library.check_cleanable(Path(b["work"]))
+        except ValueError as e:
+            raise gr.Error(str(e))
+        lines.append(f"“{b['title']}” — {library.human(b['bytes'])} in the folder, {library.human(b['clip_bytes'])} of it clips")
+    if mode == "zip":
+        head = ("**Delete the clips and zip the rest?** Everything except the clips is zipped into `archive/`, then the folder is removed. "
+                "The finished audiobook stays. Building the book again later means making the clips again.")
+    else:
+        head = "**Delete the whole folder?** The clips, text, lexicon, music plan and settings are gone for good. The finished audiobook stays."
+    return gr.update(visible=True), head + "  \n" + "  \n".join(lines), (mode, names)
+
+
+def done_do(pending):
+    mode, names = pending or ("", [])
+    books = {b["name"]: b for b in library.done_books()}
+    out = []
+    for n in names:
+        b = books.get(n)
+        try:
+            if mode == "zip":
+                dest, freed = library.archive_without_clips(Path(b["work"]))
+                out.append(f"“{b['title']}”: zipped to archive/{dest.name}, freed {library.human(freed)}.")
+            else:
+                out.append(f"“{b['title']}”: folder deleted, freed {library.human(library.delete_folder(Path(b['work'])))}.")
+        except (ValueError, OSError, AttributeError) as e:
+            out.append(f"“{n}”: not cleaned up — {e}")
+    return "  \n".join(out), gr.update(visible=False), ""
+
+
+def done_restore(zip_name):
+    if not zip_name:
+        raise gr.Error("Choose an archive first.")
+    try:
+        t = library.restore(library.ARCHIVE / zip_name)
+    except (ValueError, OSError) as e:
+        raise gr.Error(str(e))
+    return f"Restored work/{t.name}. The clips were not archived, so building it again makes them again."
+
+
 def gen_stop(project):
     from . import jobqueue
     work = str(_wd(project).resolve())
@@ -2550,6 +2636,30 @@ def build_ui() -> gr.Blocks:
                         qs_asap = gr.Button("Start as soon as possible, any time")
                 q_timer = gr.Timer(10)
 
+            with gr.Tab("Done", id="done") as done_tab:
+                gr.Markdown("Finished books. **Rate** how well each came out, and **clean up** its work folder to free disk space. "
+                            "The finished audiobook in `out/` is never touched, and ratings are kept even after a folder is cleaned up.")
+                done_tbl = gr.Dataframe(value=pd.DataFrame(columns=DONE_COLS), headers=DONE_COLS, interactive=True, wrap=True, max_height=420,
+                                        datatype=["bool"] + ["str"] * (len(DONE_COLS) - 1), static_columns=list(range(1, len(DONE_COLS))),
+                                        label="Tick the books you want to rate or clean up")
+                with gr.Row():
+                    done_stars = gr.Radio(STAR_CHOICES, label="How well was it generated? (out of five; none = clear)", scale=3)
+                    done_note = gr.Textbox(label="Note (optional)", scale=3)
+                    done_rate_btn = gr.Button("Save rating", variant="primary", scale=1)
+                with gr.Row():
+                    done_zip_btn = gr.Button("Delete the clips and zip the rest…")
+                    done_del_btn = gr.Button("Delete the whole folder…", variant="stop")
+                with gr.Group(visible=False) as done_box:
+                    done_md = gr.Markdown()
+                    with gr.Row():
+                        done_yes = gr.Button("Yes, do it", variant="stop"); done_no = gr.Button("No, leave it")
+                done_pending = gr.State(None)
+                done_msg = gr.Markdown()
+                with gr.Accordion("Archived books (zips without clips)", open=False):
+                    with gr.Row():
+                        done_zips = gr.Dropdown(label="Archive", choices=[z.name for z in library.archived()], scale=3)
+                        done_restore_btn = gr.Button("Restore into work/", scale=1)
+
             with gr.Tab("🎙 Voice lab", elem_id="clone-tab", id="lab"):
                 gpu_bar()
                 gr.Markdown("Clone a voice from a short clean clip (5–12 s, one speaker, no music), compare the takes, then save it. "
@@ -2807,6 +2917,13 @@ def build_ui() -> gr.Blocks:
         q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
+        done_tab.select(done_refresh, None, [done_tbl, done_zips])
+        done_rate_btn.click(done_rate, [done_tbl, done_stars, done_note], [done_msg, done_tbl])
+        done_zip_btn.click(lambda df: done_ask(df, "zip"), done_tbl, [done_box, done_md, done_pending])
+        done_del_btn.click(lambda df: done_ask(df, "delete"), done_tbl, [done_box, done_md, done_pending])
+        done_no.click(lambda: (gr.update(visible=False), ""), None, [done_box, done_md])
+        done_yes.click(done_do, done_pending, [done_msg, done_box, done_md]).then(done_refresh, done_tbl, [done_tbl, done_zips])
+        done_restore_btn.click(done_restore, done_zips, done_msg).then(done_refresh, done_tbl, [done_tbl, done_zips])
         q_tbl.input(ticked_ids, q_tbl, q_pick)
         q_timer.tick(lambda df: queue_refresh(ticked_ids(df)), q_tbl, QOUT)
         q_timer.tick(refresh_flow, [project, chap_df], FLOW_OUTS)
