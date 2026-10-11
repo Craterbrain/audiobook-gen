@@ -2563,3 +2563,50 @@ def test_other_formats_are_converted_by_calibre_when_it_is_installed(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="could not convert|No readable text"):
         extract.extract(str(junk), str(tmp_path / "w2"))
+
+
+def test_gutenberg_header_blocks_and_contents_lists_from_mobi_are_dropped():
+    from audiobook_gen import extract
+    body = "It was a dark and stormy night and the rain fell in torrents. " * 8
+    head = {"index": 1, "title": "The Project Gutenberg eBook of Frank", "text": "This ebook is for the use of anyone anywhere.\n\n*** Start of This Project Gutenberg Ebook ***\n\nFrank\n\nby Someone"}
+    toc = {"index": 3, "title": "Chapter 32", "text": "\n\n".join(["Frank"] + [f"Chapter {i}" for i in range(1, 12)])}
+    ch = [head, {"index": 2, "title": "Chapter 1", "text": f"Chapter 1\n\n{body}"}, toc]
+    out = extract.strip_gutenberg(ch)
+    assert [c["title"] for c in out] == ["Chapter 1"] and out[0]["index"] == 1
+    assert extract.looks_like_contents(toc["text"]) and not extract.looks_like_contents(body + "\n\nAnd so it went.")
+
+
+def test_pdf_text_loses_running_headers_page_numbers_and_hyphens():
+    from audiobook_gen import extract
+    pages = []
+    for n in range(1, 11):
+        word = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"][n - 1]
+        body = "\n".join(f"Line {k} of page {word} runs on across the whole width of the page and then some more words." for k in range(6))
+        pages.append(f"THE TEST BOOK\n\n{body}\npage {word} until it reaches the infor-\nmation that is hyphenated here on page {word}. Then a short end.\nThe next paragraph of page {word} starts here and also runs on across the whole width of the line.\n\n{n + 20}\n")
+    pages[3] = pages[3].replace("Line 0 of page delta", "CHAPTER II.\nLine 0 of page delta")
+    text = extract.pdf_pages_to_text(pages)
+    assert "THE TEST BOOK" not in text and "information that is hyphenated here on page delta" in text
+    assert not any(l.strip().isdigit() for l in text.split("\n"))
+    assert "\n\nCHAPTER II.\n\n" in text                                       # a chapter heading stands on its own
+    assert text.count("Then a short end.") == 10 and "The next paragraph of page delta" in text
+
+
+def test_pdf_books_are_read_with_poppler_and_scans_without_text_are_refused(tmp_path):
+    import shutil, subprocess
+    import pytest
+    from audiobook_gen import extract
+    if not (shutil.which("pdftotext") and shutil.which("ebook-convert")):
+        pytest.skip("poppler and calibre are needed to make the test PDF")
+    para = "The harbour was quiet and the tide was going out slowly over the grey mud, while the gulls wheeled and cried above the empty boats. " * 12
+    html = tmp_path / "b.html"
+    html.write_text("<html><head><title>Pdf Book</title></head><body>" + "".join(f"<h1>Chapter {i}</h1><p>{para}</p><p>{para}</p>" for i in (1, 2)) + "</body></html>")
+    pdf = tmp_path / "b.pdf"
+    subprocess.run(["ebook-convert", str(html), str(pdf)], check=True, capture_output=True)
+    d = extract.extract(str(pdf), str(tmp_path / "w"))
+    assert len(d["chapters"]) == 2 and [c["title"] for c in d["chapters"]] == ["Chapter 1", "Chapter 2"] and "harbour was quiet" in d["chapters"][0]["text"]
+    blank = tmp_path / "blank.pdf"
+    subprocess.run(["ebook-convert", str(tmp_path / "empty.html"), str(blank)], capture_output=True)   # no such input: nothing made
+    pics = tmp_path / "pics.html"; pics.write_text("<html><body><h1>Only a picture</h1></body></html>")
+    subprocess.run(["ebook-convert", str(pics), str(blank)], check=True, capture_output=True)
+    with pytest.raises(ValueError, match="mostly pictures|No readable text|Only"):
+        extract.extract(str(blank), str(tmp_path / "w2"))

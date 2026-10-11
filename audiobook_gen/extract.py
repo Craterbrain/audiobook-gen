@@ -53,8 +53,12 @@ def extract_play(raw: str, title: str) -> dict:
 
 
 def extract_txt(path: Path) -> dict:
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    title = raw.strip().splitlines()[0].strip()
+    return extract_raw(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def extract_raw(raw: str, title: str = "") -> dict:
+    """Chapters from plain text: a play, Bible-style chapter:verse text, or 'Chapter N' headings (a given title overrides the first line)."""
+    title = title or raw.strip().splitlines()[0].strip()
     if len(SPEAKER_LINE.findall(raw)) > 50 and re.search(r"^SCENE [IVX]+\.", raw, re.M):
         m = re.search(r"Title:\s*(.+)", raw)
         author = re.search(r"Author:\s*(.+)", raw)
@@ -97,6 +101,18 @@ FRONT_TITLES = re.compile(r"^\s*(contents|table of contents|illustrations|list o
                           r"copyright|transcriber.s note|footnotes)\s*\.?\s*$", re.I)
 
 
+GUTENBERG_START = re.compile(r"\*\*\* ?START OF (?:THE |THIS )?PROJECT GUTENBERG[^\n]*\*\*\*", re.I)
+
+
+def looks_like_contents(text: str) -> bool:
+    """A list of short lines with no sentences in it (a table of contents that came out as its own chapter)."""
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) < 6:
+        return False
+    short = sum(1 for l in lines if len(l) <= 50 and not l.endswith((".", "?", "!", "”", '"', "’")))
+    return short / len(lines) >= 0.9
+
+
 def strip_gutenberg(chapters: list[dict]) -> list[dict]:
     """Remove Project Gutenberg's header and licence text, and contents/illustration pages, so none of it is read aloud."""
     out = []
@@ -108,10 +124,15 @@ def strip_gutenberg(chapters: list[dict]) -> list[dict]:
             while k < len(lines) and (not lines[k].strip() or HEAD_LINE.match(lines[k].strip())):
                 k += 1
             text = "\n".join(lines[k:])
+        start = GUTENBERG_START.search(text[:4000])
+        if start:                                             # a header kept as a text block (mobi, azw3): everything up to the marker goes
+            text = text[start.end():]
         m = GUTENBERG_END.search(text)
         if m:
             text = text[:m.start()]
         text = text.strip()
+        if looks_like_contents(text):
+            continue
         body = re.sub(r"^\s*" + re.escape(ch["title"]) + r"\s*", "", text, flags=re.I)
         if len(text) < 200 or FRONT_TITLES.match(ch["title"]) or re.match(r"\s*(table of )?contents\s*\n", body, re.I):
             continue
@@ -240,7 +261,112 @@ def extract_epub(path: Path, out_dir: Path) -> dict:
 
 NATIVE_EXTS = [".epub", ".txt", ".text", ".md", ".markdown", ".html", ".htm", ".docx"]
 CALIBRE_EXTS = [".pdf", ".mobi", ".azw", ".azw3", ".fb2", ".rtf", ".odt", ".htmlz", ".lit", ".lrf", ".pdb", ".prc"]   # only calibre reads these
-TEXT_EXTS = NATIVE_EXTS + (CALIBRE_EXTS if shutil.which("ebook-convert") else [])
+CALIBRE_TIMEOUT = 900                    # seconds
+TEXT_EXTS = NATIVE_EXTS + [e for e in CALIBRE_EXTS if shutil.which("ebook-convert") or (e == ".pdf" and shutil.which("pdftotext"))]
+
+
+def _norm_line(l: str) -> str:
+    return re.sub(r"\d+", "#", l.strip().lower())
+
+
+PDF_HEADING = re.compile(r"(?:chapter|book|part|section|letter)\s+[IVXLC\d]+[.:]?", re.I)
+
+
+def _midsentence_starts(text: str) -> float:
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if len(b.strip()) > 3]
+    return sum(1 for b in blocks if b[0].islower()) / len(blocks) if blocks else 0.0
+
+
+def pdf_pages_to_text(pages: list[str]) -> str:
+    """Plain text from the pages poppler gave us: running headers/footers and page numbers removed, hyphenated line ends joined,
+    lines of a paragraph joined (a short line that ends a sentence ends the paragraph)."""
+    pages = [[l.rstrip() for l in pg.split("\n")] for pg in pages]
+    edge: dict[str, int] = {}
+    for pg in pages:
+        lines = [l for l in pg if l.strip()]
+        for l in set(map(_norm_line, lines[:3] + lines[-3:])):
+            edge[l] = edge.get(l, 0) + 1
+    many = max(3, int(0.2 * len(pages)))
+    junk = {k for k, n in edge.items() if n >= many and len(k) < 80}
+    out: list[str] = []
+    for pg in pages:
+        lines = [l for l in pg]
+        keep = []
+        nonblank = [i for i, l in enumerate(lines) if l.strip()]
+        edges = set(nonblank[:3] + nonblank[-3:])
+        for i, l in enumerate(lines):
+            if i in edges and l.strip() and (_norm_line(l) in junk or re.fullmatch(r"\s*(\d{1,4}|[ivxlc]{1,6}|[-–—]\s*\d{1,4}\s*[-–—])\s*", l, re.I)):
+                continue
+            keep.append(l)
+        widths = sorted(len(l) for l in keep if len(l.strip()) > 20)
+        full = widths[int(len(widths) * 0.8)] if widths else 60
+        para: list[str] = []
+
+        def flush():
+            if para:
+                out.append(" ".join(para))
+                para.clear()
+        for l in keep:
+            t = l.strip()
+            if not t:
+                flush()
+                continue
+            if PDF_HEADING.fullmatch(t):
+                flush()
+                out.append(t)                                   # "CHAPTER XV." stands alone so the chapter split can see it
+                continue
+            if para and para[-1].endswith("-") and t[:1].islower():
+                para[-1] = para[-1][:-1] + t                    # "informa-" + "tion"
+            else:
+                para.append(t)
+            if len(t) < 0.7 * full and re.search(r"[.?!:”\"’']$", t):
+                flush()                                         # a short last line of a paragraph
+        flush()
+    text = "\n\n".join(out)
+    return _clean(text)
+
+
+def extract_pdf(path: Path, out_dir: Path) -> dict:
+    """PDFs are read with poppler's pdftotext (fast, deterministic) and cleaned of page furniture. calibre is the fallback."""
+    exe = shutil.which("pdftotext")
+    if not exe:
+        return extract_via_calibre(path, out_dir)
+    texts = {}
+    for mode in ([], ["-raw"]):                                  # by position on the page, and in the order the file stores the text
+        try:
+            r = subprocess.run([exe, *mode, "-enc", "UTF-8", str(path), "-"], capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise ValueError(f"Reading {path.name} took more than five minutes and was stopped.")
+        texts[bool(mode)] = r.stdout.decode("utf-8", errors="replace")
+    # An OCR'd scan is stored in reading order but its words are scattered by position (lines of one block get mixed up, and chunks start
+    # in the middle of a sentence); so prefer the stored order when it has clearly fewer chunks that start with a lower-case letter.
+    scrambled = _midsentence_starts(texts[False])
+    text = texts[True] if scrambled > 0.4 and _midsentence_starts(texts[True]) < 0.5 * scrambled else texts[False]
+    if len(re.sub(r"\W", "", text)) < 500:
+        raise ValueError(f"No readable text was found in {path.name} (a scanned PDF has pictures of pages, not text, and needs OCR first).")
+    n_pages = max(1, text.count("\f"))
+    words = re.findall(r"[A-Za-z][A-Za-z’']{2,}", text)
+    if len(words) / n_pages < 40:
+        raise ValueError(f"Only {len(words):,} words were found in {n_pages} pages of {path.name}: it is mostly pictures, or its text layer is "
+                         "missing or unreadable. It needs OCR (or a text version of the book) first.")
+    try:
+        from wordfreq import zipf_frequency
+        real = sum(1 for w in words[:20000] if zipf_frequency(w.lower().replace("’", "'"), "en") > 0) / min(len(words), 20000)
+        if real < 0.7:
+            raise ValueError(f"The text layer of {path.name} looks like poor OCR (only {real:.0%} of its words are real words). It needs better OCR first.")
+    except ImportError:
+        pass
+    info = {}
+    if shutil.which("pdfinfo"):
+        for line in subprocess.run(["pdfinfo", str(path)], capture_output=True, text=True).stdout.splitlines():
+            k, _, v = line.partition(":")
+            info[k.strip().lower()] = v.strip()
+    title = info.get("title", "")
+    d = extract_raw(pdf_pages_to_text(text.split("\f")), title if len(title) > 2 else "")
+    if not title or len(title) <= 2:
+        d["title"] = _pretty(path.stem) if d["title"] == "" or len(d["title"]) > 90 else d["title"]
+    d["author"] = info.get("author", "")
+    return d
 
 
 def extract_via_calibre(path: Path, out_dir: Path) -> dict:
@@ -252,11 +378,16 @@ def extract_via_calibre(path: Path, out_dir: Path) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="calibre_in_"))
     try:
         epub = tmp / (path.stem[:60] + ".epub")
-        r = subprocess.run([exe, str(path), str(epub)], capture_output=True, text=True, timeout=900)
+        try:
+            r = subprocess.run([exe, str(path), str(epub)], capture_output=True, text=True, timeout=CALIBRE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise ValueError(f"calibre needed more than {CALIBRE_TIMEOUT // 60} minutes for {path.name} and was stopped "
+                             "(a long scanned PDF is mostly page images; try a text version of the book instead).")
         if r.returncode != 0 or not epub.exists():
             tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["no output"]
             raise ValueError(f"calibre could not convert {path.name}: {tail[0][:160]}")
         d = extract_epub(epub, out_dir)
+        d["chapters"] = [{**c, "index": n} for n, c in enumerate([c for c in d["chapters"] if not looks_like_contents(c["text"])], 1)]
         if not d["chapters"]:
             raise ValueError(f"No readable text was found in {path.name} (a scanned PDF has pictures of pages, not text, and needs OCR first).")
         d["title"] = d["title"] if d["title"] and d["title"] != epub.stem else path.stem
@@ -401,7 +532,7 @@ def extract(path: str, out_dir: str, max_chapters: int | None = None) -> dict:
     ext = path.suffix.lower()
     if ext not in NATIVE_EXTS + CALIBRE_EXTS:
         raise ValueError(f"Cannot read {path.suffix or 'that file'}: use one of {', '.join(NATIVE_EXTS + CALIBRE_EXTS)}.")
-    data = (extract_via_calibre(path, out_dir) if ext in CALIBRE_EXTS else extract_epub(path, out_dir) if ext == ".epub" else extract_markdown(path) if ext in (".md", ".markdown") else
+    data = (extract_pdf(path, out_dir) if ext == ".pdf" else extract_via_calibre(path, out_dir) if ext in CALIBRE_EXTS else extract_epub(path, out_dir) if ext == ".epub" else extract_markdown(path) if ext in (".md", ".markdown") else
             extract_html(path) if ext in (".html", ".htm") else extract_docx(path) if ext == ".docx" else extract_txt(path))
     if max_chapters:
         data["chapters"] = data["chapters"][:max_chapters]
