@@ -2296,7 +2296,7 @@ def build_ui() -> gr.Blocks:
                                 mu_interval = gr.Slider(8, 90, 25, step=1, label="Recommend a bridge about every (minutes)")
                             mu_listen = gr.Audio(label="Preview of the piece", interactive=False)
                             with gr.Row():
-                                mu_speak = gr.Checkbox(label="Read each section's title aloud (\"Part one. The Word Became Flesh.\")", value=False, scale=3)
+                                mu_speak = gr.Checkbox(label="Read each section's title aloud (\"Part one. The Word Became Flesh.\")", value=True, scale=3)
                                 mu_speak_pause = gr.Slider(0, 6, 2.8, step=0.2, label="Pause before and after each title (s)", scale=2)
                             gr.Markdown("### 3 · Sections that get a bridge")
                             mu_note = gr.Markdown()

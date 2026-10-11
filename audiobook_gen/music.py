@@ -45,7 +45,7 @@ DEFAULT_PLAN = {
     # the ending: the music fades in under the last `before` seconds of speech, stays turned down for `hold` s after the last word, swells, carries on for `after`
     # seconds and fades out over the last `fade_out` of them
     "outro": {"track": "", "start": 0.0, "before": 20.0, "after": 9.0, "fade_out": 5.0, "under_db": -11.0, "hold": 1.0},
-    "titles": {"speak": False, "pause": 2.8},   # read each section's title aloud, with this pause before and after (see titles.py)
+    "titles": {"speak": True, "pause": 2.8},   # read each section's title aloud, with this pause before and after (see titles.py)
     "interval_min": 25,                      # recommended: one bridge about this many minutes apart, at the nearest section start
     "chapters": {},                          # "<chapter index>": "on" | "off" (a person's choice); missing = follow the recommendation
 }

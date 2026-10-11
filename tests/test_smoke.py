@@ -1977,8 +1977,9 @@ def test_prepare_runs_only_the_ticked_steps_in_order_and_asks_for_the_gpu_only_f
     calls, lease = [], []
     def fake_parse(*a, **k):
         calls.append("segments")
-        (work / "segments.json").write_text("[1]")
-        return [1]
+        seg = [{"id": "001-00000", "speaker": "Narrator", "kind": "narration", "text": "Hello.", "chapter": 1}]
+        (work / "segments.json").write_text(json.dumps(seg))
+        return seg
     monkeypatch.setattr(speakers, "parse_book", fake_parse)
     monkeypatch.setattr(lexicon, "build_lexicon", lambda *a, **k: calls.append("lexicon") or [])
     monkeypatch.setattr(pronounce, "fill_lexicon", lambda *a, **k: calls.append("ipa") or {"found": 0, "asked": 0})
@@ -2343,3 +2344,20 @@ def test_override_is_ignored_when_the_line_has_moved(tmp_path, monkeypatch):
         return [m["text"] for m in json.loads((work / "clips_meta.json").read_text()).values()]
     assert spoken("Old line.") == ["Fixed text."]                         # the same line: the correction applies
     assert spoken("A new line took its place.") == ["A new line took its place."]      # another line now: it does not
+
+
+def test_section_titles_are_spoken_by_default(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import music, prep, speakers
+    work = tmp_path / "w"; work.mkdir()
+    (work / "chapters.json").write_text(json.dumps({"title": "T", "chapters": [{"index": 1, "title": "Chapter 1", "text": "Hello."}]}))
+    (work / "lexicon.json").write_text("[]")
+    seg = [{"id": "001-00000", "speaker": "Narrator", "kind": "narration", "text": "Hello.", "chapter": 1}]
+    monkeypatch.setattr(speakers, "parse_book", lambda *a, **k: ((work / "segments.json").write_text(json.dumps(seg)), seg)[1])
+    assert music.load_plan(work)["titles"]["speak"] is True
+    r = prep.run(work, [])
+    ids = [s["id"] for s in json.loads((work / "segments.json").read_text())]
+    assert ids == ["001-title", "001-00000"] and "section titles" in r["notes"]["titles"]
+    (work / "music.json").write_text(json.dumps({"titles": {"speak": False}}))     # a book that opts out keeps its plan
+    prep.run(work, [])
+    assert [s["id"] for s in json.loads((work / "segments.json").read_text())] == ["001-00000"]

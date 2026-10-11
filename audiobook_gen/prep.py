@@ -171,6 +171,11 @@ def run(work, selected: list[str] | None = None, progress=lambda f, d: None, lan
         if ai:
             jobqueue.lease_give_back()
         jobqueue.activity_clear()
+    from . import music, titles
+    t = music.load_plan(work).get("titles") or {}
+    if t.get("speak"):                                                     # each section's title is read aloud unless the plan says not to
+        n = titles.apply(work, True, float(t.get("pause", titles.PAUSE_S)))
+        notes["titles"] = f"{n} section titles"
     mark_done(work, [s for s in RUN_ORDER if s in sel] + (["speaker_ai"] if "speaker_ai" in sel else []))
     progress(1.0, "Prepared")
     return {"ran": steps, "notes": notes}
