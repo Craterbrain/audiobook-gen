@@ -2834,3 +2834,14 @@ def test_chosen_sections_get_a_bridge_of_their_own_and_only_those(tmp_path, monk
     n5 = len(music.wrap(speech, 5, [1, 2, 3, 4, 5, 6], plan, guess, sr)) / sr
     assert abs(n4 - 10) < 0.01 and abs(n3 - 30) < 0.01 and abs(n5 - 50) < 0.01      # 20 s and 40 s of music before the speech; none before section 4
     assert music.credits(plan) == ["credit a", "credit b"]
+
+
+def test_a_recording_from_outside_commons_can_be_added_with_its_source(tmp_path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+    from audiobook_gen import music
+    monkeypatch.setattr(music, "LIB", tmp_path / "lib"); monkeypatch.setattr(music, "INDEX", tmp_path / "lib" / "index.json")
+    src = tmp_path / "old.wav"; sf.write(src, (np.sin(np.arange(24000 * 3) * 0.05) * 0.3).astype(np.float32), 24000)
+    e = music.add_url(src.as_uri(), "The Battle Cry of Freedom", "W. Van Brunt", "1916", "https://example.org/cylinder6576")
+    assert e["id"] == "the-battle-cry-of-freedom" and e["seconds"] == 3 and "example.org/cylinder6576" in e["credit"] and (tmp_path / "lib" / e["file"]).exists()
+    assert music.add_url(src.as_uri(), "The Battle Cry of Freedom")["id"] == e["id"] and len(music.library()) == 1       # once
