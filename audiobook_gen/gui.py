@@ -487,12 +487,58 @@ def save_hints(project, text):
 
 
 # ---------- Lexicon ----------
-LEX_COLS = ["term", "count", "kind", "known", "lang", "lang_src", "guess", "ipa", "respell"]
+LEX_COLS = ["term", "count", "kind", "known", "lang", "lang_src", "setting", "guess", "ipa", "respell"]
 NAME_KINDS = ("name", "place", "demonym", "foreign")
 
 
 def _lex_df(lex):
-    return pd.DataFrame(lex)[LEX_COLS] if lex else pd.DataFrame(columns=LEX_COLS)
+    """The lexicon as the table shows it. Older lexicons have no 'setting' (where the model placed the name): that column is then empty."""
+    return pd.DataFrame(lex).reindex(columns=LEX_COLS).fillna("") if lex else pd.DataFrame(columns=LEX_COLS)
+
+
+SETTING_FILTERS = {"All names": None, "American English": "us", "British or Irish English": "gb", "Spanish": "es", "French": "fr", "German": "de",
+                   "Italian": "it", "Other (Dutch, Portuguese, Latin ...)": "other", "Not placed yet": ""}
+
+
+def lex_filtered(project, which):
+    """The lexicon table showing only the names the model placed in one setting (see assign_origins). Edits not saved yet are replaced."""
+    try:
+        lex = json.loads((_wd(project) / "lexicon.json").read_text())
+    except (OSError, ValueError):
+        raise gr.Error("Build or load the lexicon first.")
+    want = SETTING_FILTERS.get(which)
+    if want is None:
+        rows = lex
+    elif want == "":
+        rows = [e for e in lex if not e.get("setting")]
+    elif want == "other":
+        rows = [e for e in lex if e.get("setting") in ("nl", "pt", "la", "other")]
+    else:
+        rows = [e for e in lex if e.get("setting") == want]
+    return _lex_df(rows), f"Showing {len(rows):,} of {len(lex):,} names ({which.lower()}). Pressing Save only saves what is shown."
+
+
+def lex_origins(project, progress=gr.Progress()):
+    """Ask the language model where every name is from (American or British English, Spanish, French ...), so each is said the right way.
+    Names you edited yourself are left alone; the old lexicon is kept as lexicon.before_origins.json."""
+    from .lexicon import redo_origins
+    from .refine import MODEL, Scorer
+    work = _wd(project)
+    if not (work / "lexicon.json").exists():
+        raise gr.Error("Build the lexicon first.")
+    _not_while_making(project, "re-check the names")
+    need_gpu()
+    progress(0.0, desc="Loading the language model")
+    scorer = Scorer(_cfg(project).get("origin_model", MODEL), _cfg(project).get("device", "auto"))
+    try:
+        rep = redo_origins(work, scorer, lambda f, d: progress(0.05 + 0.9 * f, desc=d))
+    finally:
+        scorer.close()
+    lex = json.loads((work / "lexicon.json").read_text())
+    by = ", ".join(f"{n} {c}" for c, n in sorted(rep["by_setting"].items(), key=lambda kv: -kv[1]))
+    return (_lex_df(lex), gr.update(choices=[e["term"] for e in lex]),
+            f"Placed {rep['asked']:,} names: {by}. {rep['changed']:,} changed. Look through the table (the **setting** column), fix what is wrong, then Save. "
+            "Clips with changed names are made again the next time the book is made.")
 
 
 def run_lexicon(project, seed_name, lang, use_judge=False, title="", author="", progress=gr.Progress()):
@@ -1330,7 +1376,7 @@ def dup_remove(ids, project="", delete=False):
 
 
 # ---------- Done: rate finished books, clean up their folders ----------
-DONE_COLS = ["✔", "Book", "Rating", "Finished", "Folder", "Clips", "State", "id"]
+DONE_COLS = ["✔", "Book", "Rating", "Finished", "Folder", "Clips", "Unused", "State", "id"]
 STAR_CHOICES = ["★", "★★", "★★★", "★★★★", "★★★★★"]
 
 
@@ -1339,8 +1385,10 @@ def done_table(picked=None):
     zips = {z.stem for z in library.archived()}
     for b in library.done_books():
         state = "work folder" if b["folder"] else ("archived (zip)" if b["name"] in zips else "folder gone")
+        un_n, un_b = library.unused_summary(Path(b["work"])) if b["folder"] else (0, 0)
         rows.append([b["name"] in set(picked or []), b["title"], library.stars_text(b["stars"]), b["finished"],
-                     library.human(b["bytes"]) if b["folder"] else "", library.human(b["clip_bytes"]) if b["folder"] else "", state, b["name"]])
+                     library.human(b["bytes"]) if b["folder"] else "", library.human(b["clip_bytes"]) if b["folder"] else "",
+                     f"{un_n:,} ({library.human(un_b)})" if un_n else "", state, b["name"]])
     return pd.DataFrame(rows, columns=DONE_COLS)
 
 
@@ -1380,7 +1428,17 @@ def done_ask(df, mode):
         except ValueError as e:
             raise gr.Error(str(e))
         lines.append(f"“{b['title']}” — {library.human(b['bytes'])} in the folder, {library.human(b['clip_bytes'])} of it clips")
-    if mode == "zip":
+    if mode == "unused":
+        lines = []
+        for n in names:
+            b = books[n]
+            un_n, un_b = library.unused_summary(Path(b["work"]))
+            if not un_n:
+                raise gr.Error(f"“{b['title']}” has no unused clips (or no stored plan to compare with).")
+            lines.append(f"“{b['title']}” — {un_n:,} unused clips, {library.human(un_b)}")
+        head = ("**Delete the unused clips?** These are clips left over from earlier versions of the book (before a name, voice or text changed). "
+                "Every clip the audiobook uses, and the originals your corrections can go back to, stay.")
+    elif mode == "zip":
         head = ("**Delete the clips and zip the rest?** Everything except the clips is zipped into `archive/`, then the folder is removed. "
                 "The finished audiobook stays. Building the book again later means making the clips again.")
     else:
@@ -1395,7 +1453,12 @@ def done_do(pending):
     for n in names:
         b = books.get(n)
         try:
-            if mode == "zip":
+            if mode == "unused":
+                operations.refuse_while_making(Path(b["work"]), "delete its clips")
+                library.check_cleanable(Path(b["work"]))
+                n_un, freed = library.remove_unused_clips(Path(b["work"]))
+                out.append(f"“{b['title']}”: deleted {n_un:,} unused clips, freed {library.human(freed)}.")
+            elif mode == "zip":
                 dest, freed = library.archive_without_clips(Path(b["work"]))
                 out.append(f"“{b['title']}”: zipped to archive/{dest.name}, freed {library.human(freed)}.")
             else:
@@ -1799,7 +1862,7 @@ def cover_use(project, preview, credit, upload):
 # ---------- Music ----------
 def _track_choices():
     from . import music
-    return [(f"{t['title'][:60]} ({t['seconds'] // 60}:{t['seconds'] % 60:02d}, {t['licence']})", t["id"]) for t in music.library()]
+    return [(f"{t['title'][:60]} ({int(t['seconds']) // 60}:{int(t['seconds']) % 60:02d}, {t['licence']})", t["id"]) for t in music.library()]
 
 
 def music_search(query):
@@ -1839,6 +1902,49 @@ def music_pick(hits, evt: gr.SelectData):
     ch = _track_choices()
     return (gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch),
             str(music.LIB / t["file"]), f"Added “{t['title']}” to your music library ({t['licence']}). Choose it below for the intro, bridges or ending.")
+
+
+def music_sections(project):
+    """The sections a bridge can be previewed before (every section but the first)."""
+    from . import music
+    try:
+        secs = music.chapter_seconds(_wd(project))
+    except Exception:
+        return gr.update(choices=[], value=None)
+    return gr.update(choices=[(f"{i}. {t[:70]}", i) for i, t, _ in secs[1:]], value=None)
+
+
+def music_preview(project, what, section):
+    """Hear the opening, a bridge or the ending as saved for this book, laid into clips that are already made."""
+    from . import music, previews
+    work = _wd(project)
+    kind = {"Opening": "opening", "A bridge": "bridge", "Ending": "ending"}.get(what, "opening")
+    try:
+        mp3, note = previews.make(work, music.load_plan(work), kind, int(section) if section else None, work / "previews")
+    except ValueError as e:
+        raise gr.Error(str(e))
+    return str(mp3), (f"Preview, {note}. It is built from the clips made so far, so the final book will sound a little different; "
+                      "it uses what is saved for this book (press Save first after a change).")
+
+
+def music_add_link(url, title, artist, year, page, checked):
+    """Add a recording from a website other than Wikimedia Commons. Only after you say you checked that it is free to use."""
+    from . import music
+    if not checked:
+        raise gr.Error("Tick the box to say you checked that this recording is free to use (public domain, or yours).")
+    if not (url or "").strip().startswith("https://"):
+        raise gr.Error("The link must start with https:// and point straight at the audio file.")
+    try:
+        t = music.add_url((url or "").strip(), (title or "").strip(), (artist or "").strip(), (year or "").strip(), (page or "").strip(),
+                          "Public domain or free to use (confirmed by you)")
+    except ValueError as e:
+        raise gr.Error(str(e))
+    except Exception as e:
+        raise gr.Error(f"Could not fetch that link: {str(e)[:150]}")
+    ch = _track_choices()
+    return (gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), str(music.LIB / t["file"]),
+            f"Added “{t['title']}” ({t['seconds']} s) to your music library. Choose it above for the intro, bridges or ending. "
+            "The credit names the website you gave.")
 
 
 def music_remove(track_id):
@@ -2367,9 +2473,12 @@ def build_ui() -> gr.Blocks:
                     lookup_btn = gr.Button("Look up IPA online (Wiktionary / WikiPron / Bible dictionary)", scale=2)
                     save_lex_btn = gr.Button("Save lexicon", variant="primary", scale=1)
                 status3 = gr.Markdown()
+                with gr.Row():
+                    lex_filter = gr.Dropdown(list(SETTING_FILTERS), value="All names", label="Show names the model placed in…", scale=2)
+                    origins_btn = gr.Button("Re-check where the names come from (language model, a few minutes on the GPU)", scale=3)
                 lex_df = gr.Dataframe(headers=LEX_COLS, interactive=True, max_height=480,
-                                      datatype=["str", "number", "str", "bool", "str", "str", "str", "str", "str"],
-                                      static_columns=[0, 1, 2, 3, 5, 6])
+                                      datatype=["str", "number", "str", "bool", "str", "str", "str", "str", "str", "str"],
+                                      static_columns=[0, 1, 2, 3, 5, 6, 7])
                 with gr.Accordion("Build & lookup options — language, Bible dictionary, offline", open=False):
                     with gr.Row():
                         lang_tb = gr.Textbox(label="Language of the names (blank = English first; or set fr, it, de, es, la, he…)", scale=2)
@@ -2463,6 +2572,20 @@ def build_ui() -> gr.Blocks:
                             with gr.Row():
                                 mu_lib = gr.Dropdown(label="My music library", choices=_track_choices(), scale=4)
                                 mu_remove = gr.Button("Remove from library", scale=1)
+                            with gr.Accordion("Add a recording from another website (a link)", open=False):
+                                gr.Markdown("For an old recording that is not on Wikimedia Commons (an Edison cylinder, say). Paste the **direct https:// link to the "
+                                            "audio file**, name it, and say where it is from. **Only add recordings that are free to use.** The credit line "
+                                            "names the page you give.")
+                                with gr.Row():
+                                    mu_url = gr.Textbox(label="Link to the audio file (https://…)", scale=3)
+                                    mu_ltitle = gr.Textbox(label="Title", scale=2)
+                                with gr.Row():
+                                    mu_lartist = gr.Textbox(label="Artist", scale=2)
+                                    mu_lyear = gr.Textbox(label="Year", scale=1)
+                                    mu_lpage = gr.Textbox(label="Page it came from (for the credit)", scale=3)
+                                mu_lok = gr.Checkbox(label="I checked that this recording is free to use (public domain, or mine)")
+                                mu_ladd = gr.Button("Add to my music library")
+                                mu_lmsg = gr.Markdown()
                         with gr.Column(scale=3):
                             gr.Markdown("### 2 · This book")
                             mu_on = gr.Checkbox(label="Use music in this book", value=False)
@@ -2498,6 +2621,13 @@ def build_ui() -> gr.Blocks:
                                 mu_level = gr.Slider(-14, 0, -4, step=1, label="Music loudness against the voice (dB)")
                                 mu_interval = gr.Slider(8, 90, 25, step=1, label="Recommend a bridge about every (minutes)")
                             mu_listen = gr.Audio(label="Preview of the piece", interactive=False)
+                            gr.Markdown("**Hear it in the book** — the opening, a bridge or the ending laid into clips that are already made.")
+                            with gr.Row():
+                                mu_pv_what = gr.Radio(["Opening", "A bridge", "Ending"], value="Opening", label="Preview", scale=2)
+                                mu_pv_section = gr.Dropdown(label="…the bridge before section", choices=[], scale=3)
+                                mu_pv_btn = gr.Button("Preview", scale=1)
+                            mu_pv_audio = gr.Audio(label="In the book", interactive=False)
+                            mu_pv_msg = gr.Markdown()
                             with gr.Row():
                                 mu_speak = gr.Checkbox(label="Read each section's title aloud (\"Part one. The Word Became Flesh.\")", value=True, scale=3)
                                 mu_speak_pause = gr.Slider(0, 6, 2.8, step=0.2, label="Pause before and after each title (s)", scale=2)
@@ -2676,6 +2806,7 @@ def build_ui() -> gr.Blocks:
                     done_note = gr.Textbox(label="Note (optional)", scale=3)
                     done_rate_btn = gr.Button("Save rating", variant="primary", scale=1)
                 with gr.Row():
+                    done_unused_btn = gr.Button("Delete unused clips…")
                     done_zip_btn = gr.Button("Delete the clips and zip the rest…")
                     done_del_btn = gr.Button("Delete the whole folder…", variant="stop")
                 with gr.Group(visible=False) as done_box:
@@ -2886,6 +3017,8 @@ def build_ui() -> gr.Blocks:
         save_seg_btn.click(save_segments, [project, seg_df], [roles_state, char_dd, target_dd, status2])
         save_seg_btn.click(show_lines, [project, char_dd], lines_df)
         emo_cb.change(remake_note, REMAKE_IN, remake_md); emo_base.release(remake_note, REMAKE_IN, remake_md)
+        lex_filter.change(lex_filtered, [project, lex_filter], [lex_df, status3])
+        origins_btn.click(lex_origins, project, [lex_df, term_dd, status3]).then(lex_snapshot, project, lex_snap)
         lex_btn.click(run_lexicon, [project, seed_dd, lang_tb, detect_cb, title, author], [lex_df, status3]).then(
             lambda df: gr.update(choices=list(df["term"])), lex_df, term_dd).then(lex_snapshot, project, lex_snap)
         fill_btn.click(lex_autofill, [project, lex_df, lang_tb, known_cb], [lex_df, status3])
@@ -2952,6 +3085,7 @@ def build_ui() -> gr.Blocks:
         ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
         done_tab.select(done_refresh, None, [done_tbl, done_zips])
         done_rate_btn.click(done_rate, [done_tbl, done_stars, done_note], [done_msg, done_tbl])
+        done_unused_btn.click(lambda df: done_ask(df, "unused"), done_tbl, [done_box, done_md, done_pending])
         done_zip_btn.click(lambda df: done_ask(df, "zip"), done_tbl, [done_box, done_md, done_pending])
         done_del_btn.click(lambda df: done_ask(df, "delete"), done_tbl, [done_box, done_md, done_pending])
         done_no.click(lambda: (gr.update(visible=False), ""), None, [done_box, done_md])
@@ -2964,6 +3098,9 @@ def build_ui() -> gr.Blocks:
         mu_outs = [mu_on, mu_intro, mu_bridge, mu_outro, mu_intro_sec, mu_intro_start, mu_bridge_sec, mu_bridge_start, mu_outro_sec, mu_outro_start,
                    mu_level, mu_interval, mu_sections, mu_note, mu_credits, mu_title, mu_lead, mu_tail, mu_fade, mu_duck, mu_under, mu_before, mu_outro_under, mu_tpause, mu_speak, mu_speak_pause]
         extras_tab.select(music_load, project, mu_outs)
+        mu_pv_btn.click(music_preview, [project, mu_pv_what, mu_pv_section], [mu_pv_audio, mu_pv_msg])
+        extras_tab.select(music_sections, project, mu_pv_section)
+        mu_ladd.click(music_add_link, [mu_url, mu_ltitle, mu_lartist, mu_lyear, mu_lpage, mu_lok], [mu_lib, mu_intro, mu_bridge, mu_outro, mu_hear, mu_lmsg])
         mu_search.click(music_search, mu_query, [mu_hits, mu_table, mu_status])
         mu_suggest.click(music_suggest, mu_role, [mu_hits, mu_table, mu_status])
         mu_table.select(music_pick, mu_hits, [mu_lib, mu_intro, mu_bridge, mu_outro, mu_hear, mu_status])

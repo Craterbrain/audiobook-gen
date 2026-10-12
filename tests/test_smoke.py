@@ -2921,7 +2921,7 @@ def test_assistant_requests_run_only_when_applied_and_previews_are_made_from_exi
     T.main(["preview", "bridge", "2"]); out = capsys.readouterr().out
     assert "Preview made: bridge_2.mp3" in out and (scratch / "previews" / "bridge_2.mp3").stat().st_size > 5000 and not (scratch / "previews" / "bridge_2.wav").exists()
     assert [f.name for f in assistant.previews(p)] == ["bridge_2.mp3"]
-    T.main(["preview", "ending"]); capsys.readouterr()
+    T.main(["music", "ending", "song"]); T.main(["preview", "ending"]); capsys.readouterr()
     T.main(["request", "rebuild", "--why", "the lexicon changed"]); T.main(["request", "delete-unused-clips"]); T.main(["request", "rebuild"]); capsys.readouterr()
     assert [a["action"] for a in assistant.actions(p)] == ["rebuild", "delete-unused-clips"]          # asked twice, listed once
     ran = []
@@ -2937,3 +2937,85 @@ def test_assistant_requests_run_only_when_applied_and_previews_are_made_from_exi
     assert r.returncode == 0 and "The Test Book" in r.stdout
     T_bad = subprocess.run(["./tools", "request", "wipe-everything"], cwd=scratch, capture_output=True, text=True)
     assert T_bad.returncode != 0 and "Unknown request" in T_bad.stderr + T_bad.stdout
+
+
+def test_extras_tab_previews_and_adds_a_recording_from_a_link(tmp_path, monkeypatch):
+    import json
+    import pytest, gradio as gr
+    from audiobook_gen import gui, music
+    p, scratch = _tools_project(tmp_path, monkeypatch)
+    music.save_plan(p, {**music.load_plan(p), "enabled": True, "bridges": {"2": {"track": "song", "seconds": 20.0}}, "outro": {**music.DEFAULT_PLAN["outro"], "track": "song"}})
+    secs = gui.music_sections(str(p))
+    assert [c[1] for c in secs["choices"]] == [2, 3]                                   # a bridge goes before every section but the first
+    path, msg = gui.music_preview(str(p), "A bridge", 2)
+    assert path.endswith("previews/bridge_2.mp3") and "Preview," in msg and Path(path).stat().st_size > 5000
+    assert gui.music_preview(str(p), "Ending", None)[0].endswith("ending.mp3")
+    with pytest.raises(gr.Error, match="opening song"):
+        gui.music_preview(str(p), "Opening", None)                                   # no opening song chosen yet
+    with pytest.raises(gr.Error, match="Choose a section"):
+        gui.music_preview(str(p), "A bridge", None)
+    import numpy as np, soundfile as sf
+    src = tmp_path / "old.wav"; sf.write(src, (np.sin(np.arange(24000 * 8) * 0.05) * 0.3).astype(np.float32), 24000)
+    with pytest.raises(gr.Error, match="free to use"):
+        gui.music_add_link("https://example.org/a.mp3", "Battle Cry", "", "", "", False)            # the box must be ticked
+    with pytest.raises(gr.Error, match="https://"):
+        gui.music_add_link(src.as_uri(), "Battle Cry", "", "", "", True)                           # no local files, no http
+    from audiobook_gen import music as m
+    with pytest.raises(ValueError, match="network"):
+        m.add_url("https://127.0.0.1/a.mp3", "Local", "")
+    monkeypatch.setattr(m, "add_url", lambda url, title, artist, year, page, licence: {"id": "x", "title": title, "seconds": 8, "licence": licence, "file": "song.wav"})
+    out = gui.music_add_link("https://example.org/a.mp3", "Battle Cry", "W. Van Brunt", "1916", "https://example.org/page", True)
+    assert "Added “Battle Cry”" in out[-1] and "free to use" not in out[-1][:5]
+
+
+def test_names_tab_shows_where_the_model_placed_each_name_and_rechecks_on_request(tmp_path, monkeypatch):
+    import json
+    import pytest, gradio as gr
+    from audiobook_gen import gui, lexicon, refine
+    p, scratch = _tools_project(tmp_path, monkeypatch)
+    lex = [{"term": "Matamoras", "kind": "place", "count": 5, "source": "auto", "setting": "es", "lang": "es"},
+           {"term": "Hancock", "kind": "name", "count": 9, "source": "auto", "setting": "us"},
+           {"term": "Edgware", "kind": "place", "count": 2, "source": "auto", "setting": "gb"},
+           {"term": "Zorbax", "kind": "name", "count": 1, "source": "auto"}]
+    (p / "lexicon.json").write_text(json.dumps(lex))
+    assert list(gui._lex_df(lex).columns) == gui.LEX_COLS and gui._lex_df([{"term": "Old", "count": 1}]).loc[0, "setting"] == ""      # old lexicons have no setting
+    df, msg = gui.lex_filtered(str(p), "Spanish")
+    assert list(df["term"]) == ["Matamoras"] and "1 of 4" in msg
+    assert list(gui.lex_filtered(str(p), "Not placed yet")[0]["term"]) == ["Zorbax"] and len(gui.lex_filtered(str(p), "All names")[0]) == 4
+    class Fake:
+        def __init__(self, *a, **k): pass
+        def settings(self, requests, title="", author="", progress=None):
+            return [{"us": 0.0, "es": 1.0} if t == "Zorbax" else {"us": 1.0, "es": 0.0} for t, _ in requests]
+        def close(self): pass
+    monkeypatch.setattr(refine, "Scorer", Fake); monkeypatch.setattr(gui, "need_gpu", lambda: None)
+    monkeypatch.setattr(lexicon, "autofill", lambda es, include_known=False: None)
+    df, dd, note = gui.lex_origins(str(p))
+    assert "Placed 4 names" in note and dict(zip(df["term"], df["setting"]))["Zorbax"] == "es" and (p / "lexicon.before_origins.json").exists()
+    from audiobook_gen import jobqueue as jq
+    monkeypatch.setattr(jq, "now_running", lambda: {"title": "The Test Book", "work": str(p)})
+    with pytest.raises(gr.Error, match="being made right now"):
+        gui.lex_origins(str(p))                                                          # not while the book is being made
+
+
+def test_done_tab_lists_and_deletes_unused_clips(tmp_path, monkeypatch):
+    import json
+    import pytest, gradio as gr
+    from audiobook_gen import gui, jobqueue as jq, library
+    jq_, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "ROOT", tmp_path); monkeypatch.setattr(library, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "RATINGS", tmp_path / "out" / "ratings.json"); monkeypatch.setattr(library, "ARCHIVE", tmp_path / "archive")
+    (tmp_path / "work").mkdir(); book = tmp_path / "work" / "b"; (book / "clips").mkdir(parents=True)
+    (book / "segments.json").write_text(json.dumps([{"id": "a", "chapter": 1}])); (book / "chapters.json").write_text("{}")
+    (book / "clips_meta.json").write_text(json.dumps({"keep.wav": {"chapter": 1}})); (book / "clips.json").write_text(json.dumps({"a": ["keep.wav"]}))
+    for n, size in (("keep.wav", 100), ("old1.wav", 4000), ("old2.wav", 6000)):
+        (book / "clips" / n).write_bytes(b"x" * size)
+    j = jq.add(str(book), "My Book"); jq.update(j["id"], status="done", finished="2026-10-12 10:00")
+    tbl = gui.done_table()
+    assert tbl.loc[0, "Unused"] == "2 (10 KB)"
+    tbl.loc[0, "✔"] = True
+    show, text, pending = gui.done_ask(tbl, "unused")
+    assert show["visible"] is True and "2 unused clips" in text and "Every clip the audiobook uses" in text and (book / "clips" / "old1.wav").exists()
+    msg, box, _ = gui.done_do(pending)
+    assert "deleted 2 unused clips" in msg and sorted(f.name for f in (book / "clips").glob("*.wav")) == ["keep.wav"]
+    with pytest.raises(gr.Error, match="no unused clips"):
+        gui.done_ask(gui.done_table().assign(**{"✔": [True]}), "unused")

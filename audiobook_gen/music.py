@@ -115,19 +115,37 @@ def add(file: str) -> dict:
     return entry
 
 
+MAX_ADD_BYTES = 120_000_000
+
+
 def add_url(url: str, title: str, artist: str = "", year: str = "", page: str = "", licence: str = "Public domain (recorded before 1923)") -> dict:
     """Add a recording from outside Wikimedia Commons whose licence you have checked yourself (an old cylinder or disc, say). The credit line
     says where it came from. Returns the library entry."""
     tid = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+    if not tid:
+        raise ValueError("Give the recording a title.")
     entries = library()
     if any(t["id"] == tid for t in entries):
         return next(t for t in entries if t["id"] == tid)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("https", "file") or not parsed.hostname and parsed.scheme == "https":
+        raise ValueError("The link must start with https://")
+    if parsed.scheme == "https" and (parsed.hostname in ("localhost",) or re.fullmatch(r"[\d.]+|\[?[0-9a-f:]+\]?", parsed.hostname or "")):
+        raise ValueError("The link must be to a website, not an address on this network.")
     LIB.mkdir(parents=True, exist_ok=True)
-    ext = Path(urllib.parse.urlparse(url).path).suffix or ".mp3"
+    ext = Path(parsed.path).suffix.lower()
+    ext = ext if ext in (".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".m4a", ".aac") else ".mp3"
     dest = LIB / (tid + ext)
-    dest.write_bytes(urllib.request.urlopen(urllib.request.Request(url, headers=covers.UA), timeout=300).read())
+    with urllib.request.urlopen(urllib.request.Request(url, headers=covers.UA), timeout=300) as r:
+        data = r.read(MAX_ADD_BYTES + 1)
+    if len(data) > MAX_ADD_BYTES:
+        raise ValueError(f"That file is larger than {MAX_ADD_BYTES // 1_000_000} MB: a music track is much smaller.")
+    dest.write_bytes(data)
     secs = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(dest)],
                                 capture_output=True, text=True).stdout.strip() or 0)
+    if secs < 1:
+        dest.unlink(missing_ok=True)
+        raise ValueError("That link did not give an audio recording.")
     credit = f"{title}, {artist or 'unknown artist'}" + (f", {year}" if year else "") + (f". {page}" if page else "") + f" ({licence})"
     entry = {"id": tid, "title": title, "artist": artist, "licence": licence, "seconds": round(secs), "file": dest.name, "credit": credit}
     _save(entries + [entry])

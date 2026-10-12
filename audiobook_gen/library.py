@@ -117,6 +117,12 @@ def unused_clips(work: Path) -> list[Path]:
     return sorted(f for f in d.glob("*.wav") if f.name not in used) if d.is_dir() and used else []
 
 
+def unused_summary(work: Path) -> tuple[int, int]:
+    """(files, bytes) of the unused clips (0, 0 when there is no plan to compare with)."""
+    un = unused_clips(work)
+    return len(un), sum(f.stat().st_size for f in un)
+
+
 def remove_unused_clips(work: Path) -> tuple[int, int]:
     """Delete the unused clips of a book that is not being made. Returns (files, bytes freed)."""
     check_cleanable(work)

@@ -180,66 +180,13 @@ def cmd_music(a):
 
 def cmd_preview(a):
     """A short mp3 of the opening, a bridge or the ending, laid into clips that are already made (the final clips will differ a little)."""
-    import numpy as np
-    import soundfile as sf
-    from . import music
-    w, SR = project(), 24000
-    meta = _load(w / "clips_meta.json", {})
-    clips = [(f, m) for f, m in meta.items() if (w / "clips" / f).exists()]
-    if not clips:
-        sys.exit("No clips are made yet, so there is nothing to build a preview from.")
-    plan = _plan(); plan["enabled"] = True
-    secs = music.chapter_seconds(w); all_ch = [c[0] for c in secs]; names = {c[0]: c[1] for c in secs}
-
-    def load(f):
-        x, sr = sf.read(w / "clips" / f, dtype="float32")
-        x = x if x.ndim == 1 else x.mean(1)
-        if sr != SR:
-            from math import gcd
-            from scipy.signal import resample_poly
-            g = gcd(SR, sr); x = resample_poly(x, SR // g, sr // g).astype(np.float32)
-        return x
-
-    def body(ch, seconds, tail=False, skip=()):
-        rows = [(f, m) for f, m in clips if m.get("chapter") == ch and m["text"].strip().lower() not in skip]
-        rows = rows[::-1] if tail else rows
-        out, total = [], 0.0
-        for f, m in rows:
-            x = load(f); out += [x, np.zeros(int(0.45 * SR), np.float32)]; total += len(x) / SR + 0.45
-            if total >= seconds:
-                break
-        out = out[::-1] if tail else out
-        return np.concatenate(out) if out else np.zeros(0, np.float32)
-
-    def clip_for(text):
-        t = text.strip().lower()
-        return next((load(f) for f, m in clips if m["text"].strip().lower() in (t, t.rstrip(".") + ".")), None)
-
-    note = ""
-    if a.what == "opening":
-        line = (plan["intro"].get("title") or meta_title(w)).splitlines()[0]
-        t = clip_for(line)
-        note = "" if t is not None else " (the spoken title is not made yet: silence stands in for it)"
-        title = np.concatenate([np.zeros(int(0.3 * SR), np.float32), t if t is not None else np.zeros(int(3 * SR), np.float32)])
-        head, tail = music.opening(title, plan, SR)
-        first = secs[0][0]
-        out = np.concatenate([head, music.apply_tail(body(first, 35, skip=(line.lower(),)), tail)])
-    elif a.what == "bridge":
-        ch = int(a.chapter)
-        t = clip_for(names.get(ch, ""))
-        note = "" if t is not None else " (the section title is not made yet: silence stands in for it)"
-        chapter = np.concatenate([np.zeros(int(1.0 * SR), np.float32), t if t is not None else np.zeros(int(3 * SR), np.float32),
-                                  np.zeros(int(2.8 * SR), np.float32), body(ch, 40, skip=(names.get(ch, "").lower(),))])
-        out = music.wrap(chapter, ch, all_ch, plan, secs, SR)
-    else:
-        out = music.ending(body(all_ch[-1], 30, tail=True), plan, SR)
-    d = scratch() / "previews"; d.mkdir(exist_ok=True)
-    name = a.what + (f"_{int(a.chapter)}" if a.what == "bridge" else "")
-    wav, mp3 = d / f"{name}.wav", d / f"{name}.mp3"
-    sf.write(wav, out, SR)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "24000", "-ac", "1", "-b:a", "96k", str(mp3)], check=True)
-    wav.unlink()
-    print(f"Preview made: {mp3.name}, {len(out) / SR:.0f} s{note}. The person can listen to it in the app.")
+    from . import previews
+    plan = _plan()
+    try:
+        mp3, note = previews.make(project(), plan, a.what, int(a.chapter) if a.chapter else None, scratch() / "previews")
+    except ValueError as e:
+        sys.exit(str(e))
+    print(f"Preview made: {mp3.name}, {note}. The person can listen to it in the app.")
 
 
 def meta_title(w: Path) -> str:
