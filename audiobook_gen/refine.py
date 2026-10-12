@@ -81,6 +81,28 @@ def with_question_marks(chunk: str, which: set[int]) -> str:
 class Scorer:
     """Qwen (or another chat model) used as a letter-probability classifier, batched."""
 
+    def settings(self, requests: list[tuple[str, str]], title: str = "", author: str = "", progress=None) -> list[dict[str, float]]:
+        """Where each (name, passage) belongs: {setting code: probability} (see tiebreak.Judge.SETTINGS). Every request is asked with the
+        options in both orders and averaged, which cancels the model's lean towards particular letters. Batched; deterministic."""
+        from .tiebreak import Judge
+        codes, descs = [c for c, _ in Judge.SETTINGS], [d for _, d in Judge.SETTINGS]
+        items = []
+        for term, passage in requests:
+            for order in (range(len(descs)), reversed(range(len(descs)))):
+                order = list(order)
+                listing = "\n".join(f"{LETTERS[k]}. {descs[i]}" for k, i in enumerate(order))
+                items.append((Judge.SYS_SETTING, Judge.setting_question(term, passage, title, author) + f"\n{listing}\nAnswer with a single letter."))
+        probs = self.letters(items, len(descs), progress=progress)
+        out = []
+        for r in range(len(requests)):
+            acc = [0.0] * len(descs)
+            for half, order in enumerate((list(range(len(descs))), list(reversed(range(len(descs)))))):
+                for k, i in enumerate(order):
+                    acc[i] += probs[2 * r + half][k] / 2
+            out.append(dict(zip(codes, acc)))
+        return out
+
+
     def __init__(self, model: str = MODEL, device_pref: str = "auto"):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer

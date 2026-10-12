@@ -143,6 +143,140 @@ def drop_guessed_language(entries: list[dict]) -> int:
     return n
 
 
+ORIGIN_KINDS = ("name", "place", "phrase", "demonym", "foreign")
+ORIGIN_CONTEXTS = 3                # sentences asked about per name: early, middle and late mentions (a general who once served in Mexico is not Spanish)
+NONUS_MIN = 0.6                    # a tradition other than American English needs at least this probability (averaged over the sentences) ...
+NONUS_MIN_KNOWN = 0.9              # ... and this much when the name is in the US English dictionary (Meade, Halleck, Longstreet are, Contreras too)
+GB_MIN = 0.8                       # British English is over-guessed for Anglo-looking American surnames, so it needs more
+
+
+_NO_SPLIT = {"mr", "mrs", "ms", "dr", "gen", "col", "capt", "lieut", "lt", "maj", "brig", "sgt", "st", "mt", "ft", "vs", "no", "jr", "sr", "prof",
+             "hon", "rev", "messrs", "gov", "sen", "rep", "esq", "etc", "viz", "wm", "geo", "chas", "jno", "thos"}
+_SENT_END = re.compile(r"(?:(?<=[.!?])|(?<=[.!?][\"”’']))\s+(?=[\"“‘'(]?[A-Z0-9])")
+
+
+def _split_sentences(par: str) -> list[str]:
+    """Sentences of one paragraph. A full stop after Mr., Gen., Lieut. or a single initial does not end one."""
+    out, start = [], 0
+    for m in _SENT_END.finditer(par):
+        before = par[start:m.start()]
+        last = re.findall(rf"[{LETTER}]+\.?[\"”’']?$", before)
+        word = (last[0].rstrip(".\"”’'").lower() if last else "")
+        if before.rstrip().endswith(".") and (word in _NO_SPLIT or len(word) == 1):
+            continue
+        out.append(par[start:m.start()].strip())
+        start = m.end()
+    out.append(par[start:].strip())
+    return [x for x in out if x]
+
+
+def sentence_context(par: str, pos: int, before: int = 1, after: int = 1, limit: int = 900) -> str:
+    """The sentence of `par` that holds position `pos`, with `before` sentences ahead of it and `after` behind it (so three by default).
+    The same place always gives the same text."""
+    sents, at, idx = _split_sentences(par), 0, 0
+    for i, sent in enumerate(sents):
+        j = par.find(sent, at)
+        if j < 0:
+            continue
+        if j <= pos < j + len(sent) + 1:
+            idx = i
+            break
+        at = j + len(sent)
+    return " ".join(sents[max(0, idx - before): idx + after + 1])[:limit]
+
+
+def _sentences_with(texts: list[str], word: str, k: int = ORIGIN_CONTEXTS, limit: int = 900) -> list[str]:
+    """Up to k passages spread through the book (first, middle, last mention). A passage is the sentence holding the word and the sentence
+    either side of it, even across a paragraph break: three sentences, the same text every time."""
+    import bisect
+    hits = []                                       # (sentences of that chapter, index of the one holding the word)
+    for t in texts:
+        found = [m.start() for m in re.finditer(rf"(?<![{LETTER}]){re.escape(word)}", t)]
+        if not found:
+            continue
+        sents, starts, at = [], [], 0
+        for par in re.split(r"\n\s*\n", t):
+            j = t.find(par, at)
+            at = j + len(par)
+            cur = j
+            for sent in _split_sentences(par):
+                i = t.find(sent, cur)
+                sents.append(sent); starts.append(i); cur = i + len(sent)
+        last = -1
+        for pos in found:
+            i = bisect.bisect_right(starts, pos) - 1
+            if i != last and i >= 0:
+                hits.append((sents, i)); last = i
+        if len(hits) >= 600:
+            break
+    if not hits:
+        return [word]
+    idx = sorted({round(i * (len(hits) - 1) / max(1, k - 1)) for i in range(k)}) if len(hits) > 1 else [0]
+    return [" ".join(hits[i][0][max(0, hits[i][1] - 1): hits[i][1] + 2])[:limit] for i in idx]
+
+
+def _in_us_dictionary(term: str) -> bool:
+    from .pronounce import _ipadict_table
+    table = _ipadict_table("en")
+    words = [w.lower() for w in WORD_RE.findall(term.replace("’s", "").replace("'s", ""))]
+    return bool(words) and all(w in table for w in words)
+
+
+def assign_origins(entries: list[dict], texts: list[str], judge, title: str = "", author: str = "", tick=None) -> dict:
+    """Ask the model, name by name, where each belongs (American English, British English, Spanish, French ...), from a few sentences it
+    appears in and the book it is from. Replaces the guessed book-wide language. Entries you edited (source: user) and the very well known
+    names are left alone. Entries that end up non-English get espeak IPA in their language; the rest lose any IPA/respelling made from a
+    wrong language. Anything but American English must be convincing (see NONUS_MIN...). Returns {"asked", "changed", "by_setting"}."""
+    todo = [e for e in entries if e.get("kind") in ORIGIN_KINDS and e.get("source") != "user" and not e.get("known")]
+    by: Counter = Counter()
+    changed = 0
+    passages = [_sentences_with(texts, e["term"]) for e in todo]
+    requests = [(e["term"], p) for e, ps in zip(todo, passages) for p in ps]
+    answers = judge.settings(requests, title, author,
+                             (lambda d, t: tick(d / max(1, t), f"Asking where each name is from ({int(d / max(1, t) * len(todo))}/{len(todo)})")) if tick else None)
+    pos = 0
+    for k, e in enumerate(todo):
+        n = len(passages[k])
+        ps, pos = answers[pos:pos + n], pos + n
+        avg = {c: sum(p[c] for p in ps) / len(ps) for c in ps[0]}
+        code, conf = max(avg.items(), key=lambda kv: kv[1])
+        need = NONUS_MIN_KNOWN if _in_us_dictionary(e["term"]) else NONUS_MIN
+        if code == "gb":
+            need = max(need, GB_MIN)
+        if code in ("us", "other") or conf < need:
+            code = "us"
+        by[code] += 1
+        lang = "" if code == "us" else code
+        old = e.get("lang") or ""
+        if lang != old:
+            changed += 1
+        if e.get("lang_src") == "wordfreq" and old and lang == "":
+            continue                                          # a word list says it is foreign and the model is not convinced otherwise: keep that
+        e.update(lang=lang, lang_src="model" if lang else "", lang_conf=round(conf, 2), setting=code)
+        if lang != old:                                       # the sound made from the old language no longer applies
+            if not e.get("ipa_src") and e.get("source") != "user":
+                e["ipa"] = ""
+            if e.get("respell_src") in (None, "", "auto") and e.get("source") != "user":
+                e["respell"], e["respell_src"] = "", ""
+    todo2 = [e for e in todo if e.get("lang") and not e.get("ipa")]
+    for e in todo2:
+        e["source"] = "auto"
+    autofill(todo2)
+    return {"asked": len(todo), "changed": changed, "by_setting": dict(by)}
+
+
+def redo_origins(work, judge, progress=None) -> dict:
+    """assign_origins for a book that already has a lexicon (the old one is kept as lexicon.before_origins.json)."""
+    import shutil
+    work = Path(work)
+    data = json.loads((work / "chapters.json").read_text())
+    entries = json.loads((work / "lexicon.json").read_text())
+    shutil.copy(work / "lexicon.json", work / "lexicon.before_origins.json")
+    rep = assign_origins(entries, [c["text"] for c in data["chapters"]], judge, data.get("title", ""), data.get("author") or "", progress)
+    (work / "lexicon.json").write_text(json.dumps(entries, indent=2, ensure_ascii=False))
+    return rep
+
+
 def detect_languages(entries: dict, texts: list[str], hint: str = "", judge=None,
                      title: str = "", author: str = "", tick=None) -> dict:
     """Assume English; move words out of it only on evidence.

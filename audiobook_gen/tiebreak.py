@@ -103,6 +103,35 @@ class Judge:
         best = max(lp, key=lp.get)
         return dict((n, c) for c, n in self.BOOK_LANGS)[best], math.exp(lp[best])
 
+    SETTINGS = [("us", "American English: an American person's name, or a place in the United States (whatever the origin of the name)"),
+                ("gb", "British or Irish English: a name or place from Britain or Ireland"),
+                ("es", "Spanish: a Spanish-language name or place (Mexico, Spain, Latin America), said the Spanish way"),
+                ("fr", "French: a French or French-Canadian name or place"),
+                ("it", "Italian: an Italian name or place"), ("de", "German: a German, Austrian or Swiss-German name or place"),
+                ("pt", "Portuguese: a Portuguese or Brazilian name or place"), ("nl", "Dutch: a Dutch or Flemish name or place"),
+                ("la", "Latin or classical: an ancient Roman or Greek name"),
+                ("other", "Another language or tradition (Slavic, Asian, African, Native American words kept in their own form ...)")]
+
+    SYS_SETTING = "You are an expert on names and places and how they are pronounced. You decide which pronunciation tradition a name belongs to."
+
+    @staticmethod
+    def setting_question(term: str, passage: str, title: str = "", author: str = "") -> str:
+        book = (f'In the book "{title}"' + (f" by {author}" if author else "")) if title else "In a book"
+        return f'{book}, this passage appears: "{passage}"\n\nWhich pronunciation tradition does "{term}" belong to here?'
+
+    def name_setting(self, term: str, passage: str, title: str = "", author: str = "") -> dict[str, float]:
+        """Where does this name or place belong, so it is pronounced the right way? {code: probability} over SETTINGS."""
+        lp = self.choose(self.SYS_SETTING, self.setting_question(term, passage, title, author), [d for _, d in self.SETTINGS], True)
+        return {c: math.exp(lp[d]) for c, d in self.SETTINGS}
+
+    def settings(self, requests: list[tuple[str, str]], title: str = "", author: str = "", progress=None) -> list[dict[str, float]]:
+        out = []
+        for k, (term, passage) in enumerate(requests):
+            if progress and k % 20 == 0:
+                progress(k, len(requests))
+            out.append(self.name_setting(term, passage, title, author))
+        return out
+
     def close(self):
         import gc
 

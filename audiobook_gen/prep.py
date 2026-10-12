@@ -26,6 +26,9 @@ STEPS = [
      "help": "Always done: the voices read these lines. Finds the narrator and the characters from quotation marks and speech tags."},
     {"id": "lexicon", "label": "Find names and unusual words (the pronunciation list)", "ai": False, "default": True,
      "help": "Uses a small language-analysis model (spaCy) on the CPU; no generative AI. Names are what the voices get wrong most often."},
+    {"id": "origin", "label": "Ask the small model where each name is from (US or UK English, Spanish, French ...) so it is said the right way", "ai": True,
+     "default": True, "help": "A small model (Qwen2.5-1.5B) reads a few sentences around every name or place, with the book's title and author, and says which "
+     "pronunciation it belongs to. An American general stays American; a Mexican town in the same book gets Spanish. Uses the GPU, a few minutes."},
     {"id": "ipa", "label": "Look up how those names are pronounced (dictionaries, Bible names)", "ai": False, "default": True,
      "help": "Offline dictionaries and the Bible-name list. Gives the name check after generation something to judge against."},
     {"id": "language", "label": "Question marks and delivery: which sentences are plain or emotional, and which feeling", "ai": True, "default": True,
@@ -35,7 +38,7 @@ STEPS = [
     {"id": "speaker_ai", "label": "Settle unclear speakers with a small AI model (books with several voices)", "ai": True, "default": False,
      "help": "A small model (Qwen2.5-1.5B) breaks ties when the speaker of a quote is not clear. Uses the GPU; slower. Only useful for multi-voice books."},
 ]
-RUN_ORDER = ["segments", "lexicon", "ipa", "dialect", "language"]       # speaker_ai is part of "segments"; dialect words go in after the lexicon is built
+RUN_ORDER = ["segments", "lexicon", "origin", "ipa", "dialect", "language"]       # speaker_ai is part of "segments"; dialect words go in after the lexicon is built
 BY_ID = {s["id"]: s for s in STEPS}
 
 
@@ -52,7 +55,8 @@ NO_DIALECT_READERS = ("play", "verse")        # a play in verse or scripture has
 
 def default_selected(reader: str = "") -> list[str]:
     """The steps ticked by default. `reader` is how the text was read (chapters.json parse_report.reader): what the text is decides what it needs."""
-    return [s["id"] for s in STEPS if s["default"] and not (s["id"] == "dialect" and reader in NO_DIALECT_READERS)]
+    return [s["id"] for s in STEPS if s["default"] and not (s["id"] == "dialect" and reader in NO_DIALECT_READERS)
+            and not (s["id"] == "origin" and reader == "verse")]        # scripture names come from the Bible dictionary
 
 
 def reader_of(work) -> str:
@@ -163,6 +167,15 @@ def run(work, selected: list[str] | None = None, progress=lambda f, d: None, lan
                 from .lexicon import build_lexicon
                 lex = build_lexicon(work, lang or cfg.get("name_lang", ""), None, meta.get("title", ""), meta.get("author") or "", sub)
                 notes[sid] = f"{len(lex)} words"
+            elif sid == "origin":
+                from .lexicon import redo_origins
+                from .refine import MODEL, Scorer
+                judge = Scorer(cfg.get("origin_model", MODEL), cfg.get("device", "auto"))     # the larger model of the two (Qwen3-4B)
+                try:
+                    r = redo_origins(work, judge, sub)
+                finally:
+                    judge.close()
+                notes[sid] = f"{r['asked']} names: " + ", ".join(f"{n} {c}" for c, n in sorted(r["by_setting"].items(), key=lambda kv: -kv[1]))
             elif sid == "ipa":
                 from .pronounce import fill_lexicon
                 path = work / "lexicon.json"

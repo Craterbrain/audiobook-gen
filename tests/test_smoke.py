@@ -2700,3 +2700,34 @@ def test_a_few_foreign_looking_names_do_not_make_a_book_foreign(monkeypatch):
             {"term": "Mine", "lang": "fr", "lang_src": "book", "lang_conf": 0.5, "ipa": "mˈin", "respell": "meen", "source": "user"}]
     assert lexicon.drop_guessed_language(rows) == 1 and rows[0]["lang"] == "" and rows[0]["ipa"] == "" and rows[0]["respell"] == ""
     assert rows[1]["lang"] == "fr" and rows[2]["ipa"] == "mˈin"                   # a confident language and your own entries are kept
+
+
+def test_names_are_placed_by_the_model_with_three_sentence_context_and_strict_thresholds(monkeypatch):
+    from audiobook_gen import lexicon, refine, tiebreak
+    texts = ["General Grant arrived. Gen. Meade was already there, with Lieut. Smith of the Mexican war. We marched at noon.\n\n"
+             "Then Matamoras fell! It was over. The town was taken by noon.\n\nLater Meade rode out. He was calm. The rest followed."]
+    ps = lexicon._sentences_with(texts, "Meade")
+    assert ps[0] == "General Grant arrived. Gen. Meade was already there, with Lieut. Smith of the Mexican war. We marched at noon."     # the sentence and one either side
+    assert ps[-1] == "The town was taken by noon. Later Meade rode out. He was calm."          # across the paragraph break
+    assert lexicon._sentences_with(texts, "Matamoras")[0] == "We marched at noon. Then Matamoras fell! It was over."
+    assert 'In the book "Memoirs" by U. S. Grant' in tiebreak.Judge.setting_question("Meade", "x", "Memoirs", "U. S. Grant")
+
+    class Fake:
+        def settings(self, requests, title="", author="", progress=None):
+            self.seen = requests
+            def p(term):
+                if term == "Matamoras": return {"us": 0.0, "es": 1.0}
+                if term == "Meade": return {"us": 0.03, "es": 0.97}                    # sure, but it is a dictionary name: needs 0.9... and gets it
+                if term == "Halleck": return {"us": 0.3, "gb": 0.7}                     # British is over-guessed: needs 0.8
+                if term == "Ogilvy": return {"us": 0.05, "gb": 0.95}
+                return {"us": 0.9, "es": 0.1}
+            return [p(t) | {k: 0.0 for k in ("gb", "es", "fr", "us") if k not in p(t)} for t, _ in requests]
+    ents = [{"term": t, "kind": "name", "known": False, "source": "auto", "lang": "es", "lang_src": "book", "lang_conf": 0.5, "ipa": "x", "respell": "y", "respell_src": "auto"}
+            for t in ("Matamoras", "Halleck", "Ogilvy", "Hancock")]
+    monkeypatch.setattr(lexicon, "autofill", lambda es, include_known=False: None)
+    monkeypatch.setattr(lexicon, "_in_us_dictionary", lambda term: term in ("Halleck", "Hancock"))
+    rep = lexicon.assign_origins(ents, texts + ["Matamoras. Ogilvy. Halleck. Hancock."], Fake(), "Memoirs", "Grant")
+    by = {e["term"]: e for e in ents}
+    assert by["Matamoras"]["lang"] == "es" and by["Ogilvy"]["lang"] == "gb"            # convincing: kept in their own tradition
+    assert by["Halleck"]["lang"] == "" and by["Halleck"]["ipa"] == "" and by["Halleck"]["respell"] == ""   # 0.7 for British is not enough, and the Spanish guess is undone
+    assert by["Hancock"]["lang"] == "" and rep["by_setting"] == {"es": 1, "gb": 1, "us": 2}
