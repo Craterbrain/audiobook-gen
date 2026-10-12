@@ -2799,11 +2799,15 @@ def test_unused_clips_are_the_ones_outside_the_plan_and_corrections_keep_their_o
     book = tmp_path / "work" / "b"; (book / "clips").mkdir(parents=True)
     for n in ("keep.wav", "also.wav", "old_version.wav", "was_before_fix.wav", "stray.wav"):
         (book / "clips" / n).write_bytes(b"x" * 100)
-    (book / "clips_meta.json").write_text(json.dumps({"keep.wav": {}}))
+    (book / "clips_meta.json").write_text(json.dumps({"keep.wav": {"chapter": 1}}))
+    (book / "segments.json").write_text(json.dumps([{"id": "a", "chapter": 1}]))
     (book / "clips.json").write_text(json.dumps({"s1": ["keep.wav", "also.wav"]}))
     (book / "clip_overrides.json").write_text(json.dumps({"1:0": {"text": "t", "was": "was_before_fix.wav"}}))
     assert [f.name for f in library.unused_clips(book)] == ["old_version.wav", "stray.wav"]
     n, freed = library.remove_unused_clips(book)
     assert (n, freed) == (2, 200) and sorted(f.name for f in (book / "clips").glob("*.wav")) == ["also.wav", "keep.wav", "was_before_fix.wav"]
+    (book / "stray2.wav").write_bytes(b"x"); (book / "clips" / "stray2.wav").write_bytes(b"x")
+    (book / "segments.json").write_text(json.dumps([{"id": "a", "chapter": 1}, {"id": "b", "chapter": 2}]))     # the plan only covers chapter 1
+    assert library.unused_clips(book) == []                                      # so it says nothing about chapter 2's clips
     (book / "clips_meta.json").unlink()                                          # no plan to go by: nothing is guessed
     assert library.unused_clips(book) == []

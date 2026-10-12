@@ -102,6 +102,13 @@ def unused_clips(work: Path) -> list[Path]:
         except (OSError, ValueError):
             return []                                      # no plan to compare against: never guess
         used |= set(data) if name == "clips_meta.json" else {f for v in data.values() for f in v}
+    try:                                                   # a plan made for only some chapters says nothing about the others' clips
+        planned = {m.get("chapter") for m in json.loads((work / "clips_meta.json").read_text()).values()}
+        book = {sg.get("chapter") for sg in json.loads((work / "segments.json").read_text())}
+        if not book <= planned:
+            return []
+    except (OSError, ValueError):
+        return []
     try:
         used |= {o.get("was") for o in json.loads((work / "clip_overrides.json").read_text()).values() if o.get("was")}
     except (OSError, ValueError):
