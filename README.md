@@ -1,10 +1,12 @@
 # audiobook-gen
 
-Local pipeline: `.epub`/`.txt` -> speaker-parsed segments -> pronunciation lexicon -> Kokoro-82M / F5-TTS on an Intel Arc GPU (PyTorch XPU) -> chapterized, tagged `.m4b`.
+**New here? Read the [user guide](docs/USER_GUIDE.md).**
+
+Local pipeline: `.epub`/`.txt`/`.md`/`.html`/`.docx`/`.pdf` (and, with calibre, `.mobi` and others) -> speaker-parsed segments -> pronunciation lexicon -> Kokoro-82M / F5-TTS on an Intel Arc GPU (PyTorch XPU) -> name check -> optional music and spoken titles -> chapterized, tagged `.m4b` (Opus 64 kb/s at −16 LUFS by default; `audio_codec: aac` for Apple Books).
 
 ## A quick look
 
-The app (`python -m audiobook_gen.gui`) walks a book through five tabs, then keeps watching the queue for you.
+The app (`python -m audiobook_gen.gui`) walks a book through six steps (Book, Voices, Names, Extras, Make, Fix), then keeps watching the queue for you. The screenshots below are from earlier versions of the tabs; the [user guide](docs/USER_GUIDE.md) describes the current layout.
 
 **Cast** — each character gets a voice (here, Frankenstein: a male voice for Clerval, your own cloned voice for the narrator), with a pace control and a Hear button. The banner at the top of each GPU tab shows whether a book is being made and lets you borrow the GPU.
 
@@ -165,3 +167,15 @@ The queue runner is built to be started and forgotten:
 * **Dialect and apostrophe words** (`dialect.py`, `data/dialect_ipa*.json`): known sounds are added to the lexicon so the name check can judge them. `tools/dialect_baseline.py` measures whether rewriting them helps (needs a free GPU).
 * **EPUB without audio**: `python -m audiobook_gen epub x --work work/<book> [--out file.epub]`.
 * **ntfy commands**: `current` (including GPU holds), `done` (newest first, 1 = newest), `send <number|name>` (the book's file to the phone), plus the respell-suggestion replies.
+
+## What is new in the app
+
+* **Parser check.** After a book is read, `parsecheck.py` judges whether the layout reader (play, verse, chapters, single text) fits the text, falls back to another by itself, and records its verdict as `parse_report` in `chapters.json`. `presets.py` offers a scripture or play preset once.
+* **Where each name belongs.** `lexicon.assign_origins` / `redo_origins` ask a Qwen3-4B judge, using the book title, the author and three passages with the surrounding sentences, whether a name is US English, UK English or another language. The result is the `setting` field of each lexicon entry. Roman numerals, sentence-initial words in phrases and guessed languages are cleaned up (`lexicon-fix numerals|phrases|language` in the assistant tools).
+* **Done tab** (`library.py`): star ratings in `out/ratings.json`, unused-clip counting and removal, zip-without-clips archive (`archive/`), whole-folder delete. Nothing runs without a click and active jobs' folders are never touched.
+* **Duplicates.** The queue warns about a book that is already queued or done (`jobqueue.same_book`) and can supersede the earlier job and optionally delete its folder.
+* **Music** (`music.py`, `previews.py`): per-section bridges, opening with a spoken title, previews from existing clips, `add_url` for recordings from any site (files over 120 MB are re-encoded to Opus to fit, `shrink_to_fit`).
+* **Output.** `assemble.py` writes Opus (default) or AAC and normalises to `loudness_lufs` (default −16).
+* **Operations without the GUI** (`operations.py`): `enqueue`, `rebuild`, `reapply_extras`, with a refusal while a book is being made.
+* **Assistant tools** (`assistant_tools.py`, `assistant_guide.md`): the `./tools` command described above.
+* **Clip counter.** While names are re-checked the count shows total clips minus those being remade, so it does not fall to zero and climb back.
