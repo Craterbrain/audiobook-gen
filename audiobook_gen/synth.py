@@ -112,9 +112,19 @@ def unload_engines() -> None:
         pass
 
 
+def make_room(name: str) -> bool:
+    """Higgs (9.4 GB) and the other engines do not fit the 12 GB card together: before one side is loaded, the other is unloaded."""
+    loaded = {k[0] for k in _ENGINES}
+    if (name == "higgs" and loaded - {"higgs"}) or (name != "higgs" and "higgs" in loaded):
+        unload_engines()
+        return True
+    return False
+
+
 def get_engine(name: str, device_pref: str = "auto", slot: int = 0, precision: str = "float16"):
     key = (name, device_pref, slot)
     if key not in _ENGINES:  # lazy: only load what the config needs
+        make_room(name)
         if name == "kokoro":
             from .tts.kokoro_engine import KokoroEngine
             _ENGINES[key] = KokoroEngine(device_pref)
@@ -204,7 +214,13 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
     if done:
         yield done, total, f"{done} clip(s) already made"
     pools: dict[str, queue.Queue] = {}
-    for ename in {t[3] for t in todo}:
+
+    def open_pool(ename: str) -> None:
+        """Load an engine's workers when its turn comes (not all at once), after unloading what cannot share the card with it."""
+        if ename in pools:
+            return
+        if make_room(ename):
+            pools.clear()                                   # the engines that were loaded are gone
         pools[ename] = queue.Queue()
         for slot in range(max(1, int(workers.get(ename, 1)))):
             pools[ename].put(get_engine(ename, device, slot, precision))
@@ -243,6 +259,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
 
     for ename in dict.fromkeys(t[3] for t in todo):      # one engine at a time: two models computing on the GPU together can hang it
         group = [t for t in todo if t[3] == ename]
+        open_pool(ename)
         with ThreadPoolExecutor(pools[ename].qsize()) as ex:
             futs = []
             for t in group:

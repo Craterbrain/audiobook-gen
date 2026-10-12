@@ -223,7 +223,8 @@ def pass_once(work: Path, cfg: dict, progress=print, good: float = GOOD, seeds: 
             skipped.extend(sorted(left_out & set(files)))
     progress(f"[names] {len(todo)} clips say a name that has an IPA ({len(ents)} such names in the lexicon"
              + (f", {len(left_out & set(files))} left out as known good" if left_out else "") + ")")
-    engine = None
+    todo.sort(key=lambda x: x[1]["engine"])                 # a book with two checked engines: one engine at a time, so each is loaded once
+    engine, engine_name = None, None
 
     def check_due(takes: dict) -> bool:
         """Ask for a respelling for each name whose takes in this clip have failed enough. True if one was adopted."""
@@ -256,7 +257,8 @@ def pass_once(work: Path, cfg: dict, progress=print, good: float = GOOD, seeds: 
         best, best_min = scores, min(scores.values())
         if best_min < good and info.get("key") not in chosen:
             stop = check_due(takes)
-            engine = engine or get_engine(info["engine"], cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
+            if engine is None or engine_name != info["engine"]:
+                engine, engine_name = get_engine(info["engine"], cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16")), info["engine"]
             orig_len = (qc.measure(path) or {}).get("seconds") or 0
             orig_db = _level(path)
             for seed in ([] if stop else seeds):

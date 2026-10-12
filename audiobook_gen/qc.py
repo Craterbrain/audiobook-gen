@@ -124,7 +124,7 @@ def repair(work: Path, cfg: dict, flagged: list[dict], median: dict, progress=pr
     meta = json.loads((work / "clips_meta.json").read_text())
     device, precision = cfg.get("device", "auto"), cfg.get("f5_precision", "float16")
     fixed, left = [], []
-    for n, item in enumerate(flagged):
+    for n, item in enumerate(sorted(flagged, key=lambda i: meta[i["file"]]["engine"])):      # one engine at a time: each model is loaded once
         info = meta[item["file"]]
         path = work / "clips" / item["file"]
         eng_name = info["engine"]

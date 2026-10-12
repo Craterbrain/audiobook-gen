@@ -234,6 +234,45 @@ def test_higgs_clips_carry_the_style_tag_and_the_chosen_emotion_tags(tmp_path, m
     assert synth.lexicon_mode("higgs", cfg) == "checked"                     # plain text: only typed or name-check respellings reach it
 
 
+def test_a_book_mixing_higgs_with_other_engines_loads_them_one_at_a_time(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    from audiobook_gen import synth
+    from audiobook_gen.tts import higgs_engine, kokoro_engine
+    log = []
+
+    def fake(name):
+        class E:
+            sample_rate = 24000
+            def __init__(self, *a, **k):
+                log.append(("load", name))
+            def synth(self, text, voice):
+                log.append(("make", name))
+                return np.full(2400, 0.1, np.float32)
+        return E
+
+    monkeypatch.setattr(higgs_engine, "HiggsEngine", fake("higgs")); monkeypatch.setattr(kokoro_engine, "KokoroEngine", fake("kokoro"))
+    monkeypatch.setattr(synth, "unload_engines", lambda: (log.append(("unload", "all")), synth._ENGINES.clear()))
+    synth._ENGINES.clear()
+    segs = ([{"id": f"001-{i:05d}", "chapter": 1, "speaker": "Narrator", "kind": "narration", "text": f"Narration {i}.", "para_start": True} for i in range(3)]
+            + [{"id": f"001-{i:05d}", "chapter": 1, "speaker": "Bob", "kind": "dialogue", "text": f"Bob says {i}.", "para_start": True} for i in range(3, 6)])
+    (tmp_path / "segments.json").write_text(json.dumps(segs))
+    cfg = {"voices": {"Narrator": {"engine": "higgs", "ref_audio": "r.wav", "ref_text": "x"}, "Bob": {"engine": "kokoro", "voice": "bm_george"}},
+           "default_voice": {"engine": "kokoro", "voice": "bm_george"}, "workers": {"kokoro": 2}}
+    list(synth.synthesize_iter(tmp_path, cfg))
+    kinds = [e for e in log if e[0] != "make"]
+    assert kinds[0] in (("load", "higgs"), ("load", "kokoro")) and ("unload", "all") in kinds       # one side is unloaded before the other loads
+    loaded_together = False
+    live = set()
+    for what, name in log:
+        if what == "load": live.add(name)
+        if what == "unload": live.clear()
+        loaded_together |= {"higgs", "kokoro"} <= live
+    assert not loaded_together                                                                    # never both on the card at once
+    assert sum(1 for e in log if e == ("make", "higgs")) == 3 and sum(1 for e in log if e == ("make", "kokoro")) == 3
+    synth._ENGINES.clear()
+
+
 def test_the_name_check_listens_to_higgs_clips_too(tmp_path):
     import json
     from audiobook_gen import namecheck
