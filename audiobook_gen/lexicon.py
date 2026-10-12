@@ -187,7 +187,7 @@ def detect_languages(entries: dict, texts: list[str], hint: str = "", judge=None
         unknown = sum(1 for e in entries.values() if not e.get("known"))
         # A few foreign-looking names do not make a book foreign (War of the Worlds got French from 5 of 232 names, and its London
         # parks were then read by espeak's French voice, which says English words in British phonemes). A foreign book has many.
-        if n >= 5 and n / sum(votes.values()) >= 0.5 and n >= VOTE_SHARE * max(1, unknown):
+        if n >= 3 and n / sum(votes.values()) >= 0.5 and n >= VOTE_SHARE * max(1, unknown):
             book = top
     for e in entries.values():  # a lone hit in some other language is more likely coincidence
         if e.get("lang_src") == "wordfreq" and e["lang"] != book and votes[e["lang"]] < 2 \
