@@ -19,7 +19,7 @@ from .extract import TEXT_EXTS, extract
 from .lexicon import MACBETH_SEED, MONTE_CRISTO_SEED, autofill, build_lexicon, fill_respell, seed
 from .speakers import NARRATOR, backup_segments, parse_book
 from . import casting
-from . import library, prep, workflow
+from . import library, presets, prep, workflow
 from . import m4b as m4blib
 from . import sync as synclib
 from . import voicepack as vpk
@@ -75,6 +75,27 @@ def parse_note(report) -> str:
         return ""                                  # it read fine: no need to say anything
     return (f"  \n⚠️ Read as {how}, and it does not look right:  \n" if how else "  \n⚠️ It does not look right:  \n") + "  \n".join(f"• {n}" for n in report["notes"]) + \
         "  \nTick the chapters you want, or fix the headings in the file and load it again."
+
+
+def preset_offer(project):
+    """After a book is loaded: the recommended preset for what the text turned out to be, as a question (nothing if there is none or it was answered)."""
+    pr = presets.pending(_wd(project)) if project else None
+    if not pr:
+        return gr.update(visible=False), ""
+    return (gr.update(visible=True), f"**Recommended: {pr['title']} preset.** {pr['why']}  \n" + "  \n".join(f"• {c}" for c in pr["changes"]) +
+            "  \n\nUse it? You can still change every setting afterwards.")
+
+
+def preset_yes(project):
+    work = _wd(project)
+    reader = prep.reader_of(work)
+    steps = presets.apply(work, reader)
+    return gr.update(visible=False), "", gr.update(value=steps), f"Preset applied: {presets.PRESETS[reader]['title']}."
+
+
+def preset_no(project):
+    presets.answer(_wd(project), "declined")
+    return gr.update(visible=False), ""
 
 
 def load_book(file, max_chapters):
@@ -2232,6 +2253,10 @@ def build_ui() -> gr.Blocks:
                         maxch = gr.Number(label="Only first N chapters (0 = all)", value=0, precision=0)
                         load_btn = gr.Button("Load book", variant="primary")
                         status1 = gr.Markdown()
+                with gr.Group(visible=False) as preset_box:
+                    preset_md = gr.Markdown()
+                    with gr.Row():
+                        preset_yes_btn = gr.Button("Use the recommended preset", variant="primary"); preset_no_btn = gr.Button("No thanks")
                 with gr.Row():
                     title = gr.Textbox(label="Title"); author = gr.Textbox(label="Author")
                     cover = gr.Image(label="Cover (optional)", type="filepath", height=160)
@@ -2851,11 +2876,14 @@ def build_ui() -> gr.Blocks:
             nxt.click(lambda t: gr.Tabs(selected=t), tgt, tabs)
             if sid in ("voices", "names"):
                 ok.click(lambda p, w=sid: workflow.ack(_wd(p), w) if p else None, project).then(refresh_flow, [project, chap_df], FLOW_OUTS)
+        preset_yes_btn.click(preset_yes, project, [preset_box, preset_md, prep_cbg, status1]).then(
+            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(refresh_flow, [project, chap_df], FLOW_OUTS)
+        preset_no_btn.click(preset_no, project, [preset_box, preset_md])
         GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
         lex_snap = gr.State({})     # the lexicon table as loaded from lexicon.json (see save_lexicon)
         LEX_OUTS = [lex_df, term_dd, lex_snap]
         prep_outs = [prep_cbg, prep_status, gen_prep, go]
-        load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(
+        load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(preset_offer, project, [preset_box, preset_md]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
             gen_settings, project, GEN_OUTS).then(speed_text, project, speed_md).then(
             prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)

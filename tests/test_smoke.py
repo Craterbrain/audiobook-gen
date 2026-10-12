@@ -2648,3 +2648,34 @@ def test_a_poor_reading_falls_back_to_a_better_one_and_the_reader_sets_prep_defa
     w = tmp_path / "w"; w.mkdir()
     (w / "chapters.json").write_text(json.dumps({"parse_report": {"reader": "play"}, "chapters": []}))
     assert "dialect" not in prep.default_selected(prep.reader_of(w)) and "dialect" in prep.default_selected("chapters")
+
+
+def test_a_recommended_preset_is_offered_once_and_applied_on_yes(tmp_path):
+    import yaml
+    from audiobook_gen import gui, presets, extract
+    raw = " ".join(f"{c}:{v} In the beginning was the word and the word was good." for c in (1, 2, 3) for v in range(1, 12))
+    src = tmp_path / "scripture.txt"; src.write_text(raw)
+    w = tmp_path / "w"; extract.extract(str(src), str(w))
+    (w / "config.yaml").write_text(yaml.safe_dump({"voices": {"Narrator": {"engine": "kokoro", "voice": "bm_george"}}}))
+    box, text = gui.preset_offer(str(w))
+    assert box["visible"] is True and "Scripture preset" in text and "One narrator" in text
+    out = gui.preset_yes(str(w))
+    cfg = yaml.safe_load((w / "config.yaml").read_text())
+    assert cfg["single_voice"] == {"enabled": True, "voice": {"engine": "kokoro", "voice": "bm_george"}} and "speaker_ai" not in out[2]["value"] and "dialect" not in out[2]["value"]
+    assert gui.preset_offer(str(w))[0]["visible"] is False                       # answered: not asked again
+    prose = tmp_path / "p.txt"; prose.write_text("A Book\n\nChapter 1. One\n\n" + "Some plain prose goes here. " * 40 + "\n\nChapter 2. Two\n\n" + "More prose here. " * 40)
+    w2 = tmp_path / "w2"; extract.extract(str(prose), str(w2))
+    assert gui.preset_offer(str(w2))[0]["visible"] is False                      # ordinary prose: nothing to recommend
+    src2 = tmp_path / "play.txt"
+    src2.write_text("Title: A Play\nAuthor: Someone\n\n" + "".join(f"SCENE {r}. A room.\n\n" + "".join(f"HAMLET.\nTo be or not to be, that is line {i}.\n\nOPHELIA.\nMy lord, I have remembrances of yours {i}.\n\n" for i in range(6)) for r in ("I", "II", "III", "IV", "V")))
+    w3 = tmp_path / "w3"; d = extract.extract(str(src2), str(w3))
+    assert d["parse_report"]["reader"] == "play" and gui.preset_offer(str(w3))[0]["visible"] is True
+    gui.preset_no(str(w3))
+    assert gui.preset_offer(str(w3))[0]["visible"] is False and json.loads((w3 / "chapters.json").read_text())["parse_report"]["preset"] == "declined"
+
+
+def test_a_scripture_text_is_titled_by_its_file_name_not_its_first_verse(tmp_path):
+    from audiobook_gen import extract
+    f = tmp_path / "john_study_text.txt"
+    f.write_text("\n".join(f"{c}:{v} In the beginning was the word and the word was with God." for c in (1, 2) for v in range(1, 14)))
+    assert extract.extract(str(f), str(tmp_path / "w"))["title"] == "John Study Text"

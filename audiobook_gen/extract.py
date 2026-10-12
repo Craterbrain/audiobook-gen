@@ -54,7 +54,7 @@ def extract_play(raw: str, title: str) -> dict:
 
 
 def extract_txt(path: Path) -> dict:
-    return extract_raw(path.read_text(encoding="utf-8", errors="replace"))
+    return extract_raw(path.read_text(encoding="utf-8", errors="replace"), fallback=_pretty(path.stem))
 
 
 def _read_play(raw: str, title: str) -> dict:
@@ -88,12 +88,14 @@ def _read_single(raw: str, title: str) -> dict:
     return {"title": title, "author": "", "cover": None, "chapters": [{"index": 1, "title": title, "text": _clean(raw)}]}
 
 
-def extract_raw(raw: str, title: str = "") -> dict:
+def extract_raw(raw: str, title: str = "", fallback: str = "") -> dict:
     """Chapters from plain text. parsecheck.kind() decides which reader fits (a play, chapter:verse scripture, standalone 'Chapter N'
     headings, or one block); the result is checked, and if it looks wrong the other readers are tried and the best result wins. The
     decision, the reasons and anything still wrong are kept in "parse_report" (the Book tab only speaks up when something is still wrong)."""
     from . import parsecheck
-    title = title or raw.strip().splitlines()[0].strip()
+    first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    if not title:
+        title = fallback if fallback and (len(first) > 90 or re.match(r"\d{1,3}:\d{1,3}\b", first)) else first    # a verse or a long line is not a title
     k = parsecheck.kind(raw)
     strict = parsecheck.headings(raw)
     loose = list(LOOSE_HEADING_RE.finditer(raw))
