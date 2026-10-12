@@ -334,6 +334,66 @@ def test_higgs_settings_are_saved_in_the_project_config(tmp_path, monkeypatch):
     assert yaml.safe_load((p / "config.yaml").read_text())["higgs_emotion_share"] == 0.3
 
 
+def test_the_voice_picker_goes_engine_first_and_keeps_every_stored_shape(tmp_path, monkeypatch):
+    from audiobook_gen import casting
+    voices = _higgs_library(tmp_path, monkeypatch)
+    monkeypatch.setattr(casting, "vlib", voices); casting.forget_ready()
+    monkeypatch.setattr(casting, "_engine_ready", lambda suffix: suffix != "@qwen3")
+    assert [e for _, e in casting.engine_choices()] == ["kokoro", "higgs", "chatterbox", "f5"]            # Qwen3 is not installed: hidden
+    assert ("Qwen3 ⚠ not installed", "qwen3") in casting.engine_choices("qwen3")                          # unless a role is already set to it
+    for eng in ("kokoro", "higgs", "chatterbox", "f5"):                                                    # every menu key round-trips through the stored shape
+        for _, key in casting.voices_for(eng):
+            assert casting.engine_of_key(key) == eng and casting.key_of(casting.voice_of(key)) == key
+    assert casting.voices_for("higgs") == [("Walt", "clone:Walt@higgs")]
+    assert ("Gone (missing)", "clone:Gone@higgs") in casting.voices_for("higgs", "clone:Gone@higgs")
+    assert casting.switch_engine("clone:Walt@chatterbox", "higgs") == "clone:Walt@higgs"                  # the clone stays
+    assert casting.switch_engine("kokoro:af_heart", "f5", last_clone="Walt") == "clone:Walt"
+    assert casting.switch_engine("clone:Walt", "kokoro", "male", {"kokoro:am_adam"}) == "kokoro:am_echo"  # a preset of the gender nobody has yet
+    assert casting.voice_problem({"engine": "higgs", "library": "Gone"}) == "Gone is no longer in the voice library"
+    assert casting.voice_problem({"engine": "qwen3", "library": "Walt"}) == "Qwen3 is not installed"
+    cfg = {"default_voice": {"engine": "chatterbox", "library": "Walt"}, "voices": {"Bob": {"engine": "kokoro", "voice": "bm_george"}}}
+    assert casting.configured_voice("Servants", cfg) == {"engine": "chatterbox", "library": "Walt"}       # a role on the default voice (was a blank menu)
+    assert "one GPU pass" in casting.mix_note([{"engine": "higgs"}, {"engine": "kokoro", "voice": "x"}])
+    assert "separate passes" in casting.mix_note([{"engine": "higgs", "library": "W"}, {"engine": "chatterbox", "library": "W"}])
+    casting.forget_ready()
+
+
+def test_changing_a_role_engine_and_setting_many_roles_save_the_usual_config(tmp_path, monkeypatch):
+    import yaml
+    from audiobook_gen import casting, gui
+    voices = _higgs_library(tmp_path, monkeypatch)
+    monkeypatch.setattr(casting, "vlib", voices); monkeypatch.setattr(gui.vlib, "LIB", voices.LIB); casting.forget_ready()
+    monkeypatch.setattr(casting, "_engine_ready", lambda suffix: True)
+    p = tmp_path / "proj"; p.mkdir()
+    (p / "config.yaml").write_text("voices:\n  Narrator: {engine: chatterbox, library: Walt}\n  Bob: {engine: kokoro, voice: am_adam}\ngenders: {Bob: male, Eve: female}\n"
+                                   "default_voice: {engine: kokoro, voice: bm_george}\n")
+    out = gui.set_role_engine(str(p), "Narrator", "higgs", "clone:Walt@chatterbox", 1.0, "unknown", None)
+    cfg = yaml.safe_load((p / "config.yaml").read_text())
+    assert cfg["voices"]["Narrator"] == {"engine": "higgs", "library": "Walt"} and out[3] == "Walt" and "Higgs + Kokoro" in out[4]     # same dict shape as before
+    gui.set_role_engine(str(p), "Bob", "higgs", "kokoro:am_adam", 1.0, "male", out[3])                                              # Kokoro -> Higgs uses the last clone
+    assert yaml.safe_load((p / "config.yaml").read_text())["voices"]["Bob"] == {"engine": "higgs", "library": "Walt"}
+    roles = [("Narrator", 10), ("Bob", 5), ("Eve", 3)]
+    msg = gui.bulk_apply(str(p), ["All but the Narrator"], "kokoro", "__auto__", None, roles)
+    cfg = yaml.safe_load((p / "config.yaml").read_text())
+    assert msg.startswith("Changed 2 role(s)") and cfg["voices"]["Eve"]["voice"] in casting.FEMALE and cfg["voices"]["Bob"]["voice"] in casting.MALE
+    assert cfg["voices"]["Narrator"]["engine"] == "higgs"                                                                            # the Narrator was left alone
+    gui.bulk_apply(str(p), ["Eve"], "kokoro", "__keep__", "Narrator", roles)                                                          # copy another role's voice
+    assert yaml.safe_load((p / "config.yaml").read_text())["voices"]["Eve"] == {"engine": "higgs", "library": "Walt"}
+    single = gui.set_single_engine(str(p), "chatterbox", "clone:Walt@higgs", 1.0)
+    assert yaml.safe_load((p / "config.yaml").read_text())["single_voice"]["voice"] == {"engine": "chatterbox", "library": "Walt"}
+    casting.forget_ready()
+
+
+def test_opening_a_book_does_not_write_its_config(tmp_path):
+    import os
+    from audiobook_gen import gui
+    p = tmp_path / "proj"; p.mkdir()
+    (p / "config.yaml").write_text("voices: {Narrator: {engine: kokoro, voice: bm_george}}\n")
+    before = (p / "config.yaml").stat().st_mtime_ns
+    gui.voice_settings(str(p))
+    assert (p / "config.yaml").stat().st_mtime_ns == before
+
+
 def test_gender_aware_voices():
     from audiobook_gen import casting
     from audiobook_gen.synth import resolve_voice
@@ -696,7 +756,7 @@ def test_gui_reconnects_to_a_running_job(tmp_path, monkeypatch):
     assert r["title"] == "Running book" and r["pct"] == 25 and r["since_clip"] < 60
     assert "Making “Running book”" in gui.queue_now() and "25%" in gui.queue_now()
     out = gui.reconnect_on_load("")                          # nothing open: it opens the running book
-    assert len(gui.reconnect_on_load(str(p))) == len(out) == 32 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
+    assert len(gui.reconnect_on_load(str(p))) == len(out) == 33 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
     assert out[1]["Include"].all()                           # every chapter ticked, as it was queued
     assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(str(p)))     # a book is already open: leave it alone
     jq.update(job["id"], status="done")

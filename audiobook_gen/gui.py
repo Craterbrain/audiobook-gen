@@ -247,8 +247,10 @@ def voice_settings(project):
     single = cfg.get("single_voice") or {}
     on = bool(single.get("enabled"))
     v = resolve_voice(NARRATOR, {**cfg, "single_voice": {}}) if not single.get("voice") else resolve_voice(NARRATOR, cfg)
-    return (MODE_SINGLE if on else MODE_MULTI, gr.update(choices=casting.voice_choices(), value=casting.key_of(single.get("voice") or v)),
-            v.get("speed", 1.0), gr.update(visible=on))
+    key = casting.key_of(single.get("voice") or v)
+    eng = casting.engine_of_key(key) or "kokoro"
+    return (MODE_SINGLE if on else MODE_MULTI, gr.update(choices=casting.voices_for(eng, key), value=key), v.get("speed", 1.0), gr.update(visible=on),
+            gr.update(choices=casting.engine_choices(eng), value=eng))
 
 
 def set_mode(project, mode):
@@ -260,6 +262,35 @@ def set_mode(project, mode):
     _save_cfg(project, cfg)
     return gr.update(visible=single["enabled"]), ("Everything will be read by one narrator, as continuous text." if single["enabled"]
                                                   else "Each character has their own voice.")
+
+
+def _pace_update(engine):
+    """The Pace slider means different things per engine: Kokoro and F5 use it as is, Higgs scales its own saved pace, the others choose their own."""
+    if engine in ("chatterbox", "qwen3"):
+        return gr.update(interactive=False, label="Pace (set by the engine)")
+    return gr.update(interactive=True, label="Pace ×saved" if engine == "higgs" else "Pace")
+
+
+def _mix(project):
+    cfg = _cfg(project)
+    roles = list((cfg.get("voices") or {}).values()) or [casting.configured_voice(NARRATOR, cfg)]
+    if (cfg.get("single_voice") or {}).get("enabled"):
+        roles = [casting.configured_voice(NARRATOR, cfg)]
+    return casting.mix_note(roles)
+
+
+def set_single_engine(project, engine, key, speed):
+    """The one narrator moves to another engine (a clone keeps its clone) and the voice menu is filtered to that engine."""
+    if not project:
+        return gr.skip(), gr.skip(), ""
+    try:
+        new = casting.switch_engine(key, engine)
+    except ValueError as e:
+        raise gr.Error(str(e))
+    cfg = _cfg(project)
+    cfg.setdefault("single_voice", {})["voice"] = casting.voice_of(new, speed)
+    _save_cfg(project, cfg)
+    return gr.update(choices=casting.voices_for(engine, new), value=new), _pace_update(engine), _mix(project)
 
 
 def set_single(project, key, speed):
@@ -278,6 +309,80 @@ def set_role_voice(project, role, key, speed):
     cfg.setdefault("voices", {})[role] = casting.voice_of(key, speed)
     _save_cfg(project, cfg)
     return f"{role} → {key.split(':', 1)[1]}"
+
+
+def set_role_voice_ui(project, role, key, speed):
+    """The row's Voice menu or Pace slider: save, then say what the cast now costs."""
+    msg = set_role_voice(project, role, key, speed)
+    return msg, (_mix(project) if project and key else gr.skip())
+
+
+def set_role_engine(project, role, engine, key, speed, gender, last_clone):
+    """The row's Engine menu: save the role on that engine in one step (a clone keeps its clone, Kokoro gets a preset of the role's gender nobody has yet)
+    and filter the row's Voice menu to the engine. Returns (voice menu, pace slider, status, last clone used, what the cast costs)."""
+    if not project or not role:
+        return gr.skip(), gr.skip(), "", last_clone, ""
+    cfg = _cfg(project)
+    taken = {casting.key_of(v) for r, v in (cfg.get("voices") or {}).items() if r != role}
+    try:
+        new = casting.switch_engine(key, engine, gender, taken, last_clone)
+    except ValueError as e:
+        raise gr.Error(str(e))
+    cfg.setdefault("voices", {})[role] = casting.voice_of(new, speed)
+    _save_cfg(project, cfg)
+    last = casting._clone_label(new) if new.startswith("clone:") else last_clone
+    return (gr.update(choices=casting.voices_for(engine, new), value=new), _pace_update(engine),
+            f"{role} → {casting.ENGINES[engine][0]}, {new.split(':', 1)[1].partition('@')[0]}", last, _mix(project))
+
+
+BULK_SPECIAL = ["All characters", "All but the Narrator", "Characters on automatic voices"]
+
+
+def bulk_roles(roles):
+    return [*BULK_SPECIAL, *[r for r, _ in roles]]
+
+
+def bulk_apply(project, sel, engine, voice, copy_from, roles):
+    """Set many roles at once: to the same voice, to one engine (keeping each role's clone, or giving presets by gender), or copy another role's voice."""
+    if not project or not sel:
+        raise gr.Error("Choose the roles to change.")
+    cfg = _cfg(project)
+    names = [r for r, _ in roles]
+    chosen: list[str] = []
+    for item in sel:
+        if item == "All characters":
+            chosen += [r for r in names]
+        elif item == "All but the Narrator":
+            chosen += [r for r in names if r != NARRATOR]
+        elif item == "Characters on automatic voices":
+            chosen += [r for r in names if r != NARRATOR and r not in (cfg.get("voices") or {})]
+        else:
+            chosen.append(item)
+    chosen = list(dict.fromkeys(chosen))
+    voices = cfg.setdefault("voices", {})
+    genders = cfg.get("genders") or {}
+    if copy_from:
+        src = casting.configured_voice(copy_from, cfg)
+        for r in chosen:
+            voices[r] = dict(src)
+    elif voice and voice not in ("__keep__", "__auto__"):
+        for r in chosen:
+            voices[r] = casting.voice_of(voice, 1.0)
+    else:
+        taken = {casting.key_of(v) for r, v in voices.items() if r not in chosen}
+        for r in chosen:
+            if voice == "__auto__" and engine == "kokoro":
+                pool = casting.pool_for(genders.get(r))
+                new = f"kokoro:{next((v for v in pool if f'kokoro:{v}' not in taken), pool[0])}"
+            else:
+                try:
+                    new = casting.switch_engine(casting.key_of(casting.configured_voice(r, cfg)), engine, genders.get(r), taken)
+                except ValueError as e:
+                    raise gr.Error(str(e))
+            taken.add(new)
+            voices[r] = casting.voice_of(new, 1.0)
+    _save_cfg(project, cfg)
+    return f"Changed {len(chosen)} role(s)." + (" " + _mix(project) if chosen else "")
 
 
 def hear_voice(project, key, speed, text):
@@ -336,8 +441,11 @@ def assign_by_gender_voices(project, roles):
 
 
 def refresh_voices(project):
+    casting.forget_ready()
     cfg = _cfg(project) if project else {}
-    return gr.update(choices=casting.voice_choices())
+    key = casting.key_of((cfg.get("single_voice") or {}).get("voice") or {}) if cfg else None
+    eng = casting.engine_of_key(key) or "kokoro"
+    return gr.update(choices=casting.voices_for(eng, key), value=key or None), gr.update(choices=casting.engine_choices(eng), value=eng)
 
 
 def run_parse(project, chap_df, endpoint, use_judge=False, progress=gr.Progress()):
@@ -381,7 +489,7 @@ def load_parsed(project):
 
 
 def open_everything(work, title="", author="", cover=""):
-    """Everything the tabs show for a project: book, cast, voices, generate settings (32 values)."""
+    """Everything the tabs show for a project: book, cast, voices, generate settings (33 values)."""
     book = open_project(work, title, author, cover)
     return (*book, *load_parsed(book[0]), *voice_settings(book[0]), *gen_settings(book[0]), *higgs_settings(book[0]))
 
@@ -1157,7 +1265,7 @@ def vp_make(source, clone_name, audio_file, m4b_file, around, name, steps, warm,
            "This score is a computer's measure of speaker likeness; compare the three samples by ear. "
            "It now appears in the voice menus (Voices tab → Refresh voice list).")
     return (msg, real, new, stock, gr.update(choices=_mine(), value=name),
-            gr.update(choices=["(start from the closest stock voice)"] + _mine()), gr.update(choices=casting.voice_choices()))
+            gr.update(choices=["(start from the closest stock voice)"] + _mine()), gr.skip())
 
 
 def vp_load_tag(name):
@@ -1175,7 +1283,7 @@ def vp_tag(name, label, tags):
     meta = json.loads(path.read_text()) if path.exists() else {}
     meta.update(label=(label or "").strip(), tags=(tags or "").strip())
     path.write_text(json.dumps(meta, indent=2))
-    return f"Tagged **{name}** as “{meta['label'] or name} — {meta['tags'] or 'your Kokoro voice'}”. Voices tab → Refresh voice list.", gr.update(choices=casting.voice_choices())
+    return f"Tagged **{name}** as “{meta['label'] or name} — {meta['tags'] or 'your Kokoro voice'}”. Voices tab → Refresh voice list.", gr.skip()
 
 
 def vp_hear(name, text):
@@ -1803,7 +1911,7 @@ def reconnect_on_load(project):
     from . import jobqueue
     run = jobqueue.now_running()
     if project or not run:
-        return (gr.skip(),) * 32
+        return (gr.skip(),) * 33
     j = next(x for x in jobqueue.load() if x["id"] == run["id"])
     return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 
@@ -2429,9 +2537,10 @@ def build_ui() -> gr.Blocks:
                             "(about the cost of making them the first time), and switching the narration style can move corrections and emotion hints "
                             "to other lines, so they are ignored where the line no longer matches.")
                 with gr.Accordion("Voice preview & menu help", open=False):
-                    gr.Markdown("Every saved clone shows up three times in the voice menus: **(F5)**, **(Chatterbox)** and **(Qwen3)**. "
-                                "The **Pace** slider applies to Kokoro and F5; Chatterbox and Qwen3 choose their own pace "
-                                "(Chatterbox gets emotion from the text — see the Make tab).")
+                    gr.Markdown("Pick an **Engine** for each character, then one of that engine's voices. Any character can use any engine: the voices "
+                                "of one book can come from Kokoro, Higgs, Chatterbox, F5 and Qwen3 together. A saved clone can be voiced by Higgs, Chatterbox, F5 or Qwen3, "
+                                "and changing the engine keeps the clone. The **Pace** slider applies to Kokoro and F5; for Higgs it scales the voice's own pace; "
+                                "Chatterbox and Qwen3 choose their own pace (Chatterbox gets emotion from the text — see the Make tab).")
                     with gr.Row():
                         pv_text = gr.Textbox(label="Sample text for ▶ Hear", scale=3,
                                              value="In the beginning was the Word, and the Word was with God.")
@@ -2444,32 +2553,48 @@ def build_ui() -> gr.Blocks:
                 with gr.Group(visible=False) as single_group:
                     gr.Markdown("**One narrator for the entire cast** — all characters and narration, read straight through.")
                     with gr.Row():
-                        single_dd = gr.Dropdown(label="Narrator", choices=casting.voice_choices(), scale=3)
+                        single_ed = gr.Dropdown(label="Engine", choices=casting.engine_choices(), value="kokoro", scale=1, min_width=120)
+                        single_dd = gr.Dropdown(label="Narrator", choices=casting.voices_for("kokoro"), scale=3, min_width=180)
                         single_speed = gr.Slider(0.6, 1.4, 1.0, step=0.05, label="Pace", scale=2)
                         single_hear = gr.Button("▶ Hear", scale=1)
 
+                VS_OUTS = [mode, single_dd, single_speed, single_group, single_ed]                                    # = voice_settings()
+                engine_strip = gr.Markdown(value=lambda: " · ".join(
+                    f"{'●' if casting.engine_ready(e) else '○'} **{lab}** {hint}" for e, (lab, _, hint, _) in casting.ENGINES.items()))
+                mix_md = gr.Markdown()
+                last_clone = gr.State(None)
+                with gr.Accordion("Set many at once — one engine or voice for several characters", open=False):
+                    with gr.Row():
+                        bulk_sel = gr.Dropdown(label="Characters", choices=BULK_SPECIAL, multiselect=True, scale=3, min_width=200)
+                        bulk_engine = gr.Dropdown(label="Engine", choices=casting.engine_choices(), value="kokoro", scale=1, min_width=120)
+                        bulk_voice = gr.Dropdown(label="Voice", choices=[("Keep each character's clone / automatic by gender", "__auto__")] + casting.voices_for("kokoro"),
+                                                 value="__auto__", scale=2, min_width=180)
+                    with gr.Row():
+                        bulk_copy = gr.Dropdown(label="…or copy the voice of this character", choices=[], scale=2, min_width=180)
+                        bulk_btn = gr.Button("Apply to these characters", variant="primary", scale=1)
                 # Fixed pool of rows (shown/hidden as needed): more dependable than rebuilding widgets on every change.
                 role_note = gr.Markdown("*Load a book and click “Parse speakers” — each character appears here with a voice menu.*")
                 role_rows = []
                 for _ in range(MAX_ROLES):
                     with gr.Row(visible=False, equal_height=True) as row:
                         lab = gr.Markdown(min_height=0)
-                        gd = gr.Dropdown(choices=GENDER_CHOICES, show_label=False, scale=1, min_width=90)
-                        dd = gr.Dropdown(choices=casting.voice_choices(), show_label=False, scale=3)
+                        gd = gr.Dropdown(choices=GENDER_CHOICES, show_label=False, scale=1, min_width=110)
+                        ed = gr.Dropdown(choices=casting.engine_choices(), show_label=False, scale=1, min_width=120)
+                        dd = gr.Dropdown(choices=casting.voices_for("kokoro"), show_label=False, scale=3, min_width=180)
                         sp = gr.Slider(0.6, 1.4, 1.0, step=0.05, label="Pace", scale=2)
                         hear = gr.Button("▶ Hear", scale=1, min_width=80)
                     who = gr.State("")
                     gd.input(set_gender, [project, who, gd], status2)
-                    dd.input(set_role_voice, [project, who, dd, sp], status2)      # .input = the user's own choice
-                    sp.release(set_role_voice, [project, who, dd, sp], status2)
+                    ed.input(set_role_engine, [project, who, ed, dd, sp, gd, last_clone], [dd, sp, status2, last_clone, mix_md])
+                    dd.input(set_role_voice_ui, [project, who, dd, sp], [status2, mix_md])      # .input = the user's own choice
+                    sp.release(set_role_voice_ui, [project, who, dd, sp], [status2, mix_md])
                     hear.click(hear_voice, [project, dd, sp, pv_text], pv_audio)
-                    role_rows.append((row, lab, gd, dd, sp, who))
-                row_outputs = [role_note] + [c for r in role_rows for c in r]
+                    role_rows.append((row, lab, gd, ed, dd, sp, who))
+                row_outputs = [role_note] + [c for r in role_rows for c in r] + [bulk_sel, bulk_copy, mix_md]
 
                 def fill_rows(roles, mode_value, proj):
                     multi = bool(roles) and mode_value == MODE_MULTI
                     cfg = _cfg(proj) if (proj and multi) else {}
-                    choices = casting.voice_choices()
                     if not roles:
                         note = gr.update(visible=True)
                     elif len(roles) > MAX_ROLES and multi:
@@ -2482,13 +2607,26 @@ def build_ui() -> gr.Blocks:
                         if multi and i < len(roles):
                             role, n = roles[i]
                             v = resolve_voice(role, cfg)
-                            out += [gr.update(visible=True), f"**{role}**  \n{n} line{'s' if n != 1 else ''}",
-                                    (cfg.get("genders") or {}).get(role, "unknown"),
-                                    gr.update(choices=choices, value=casting.key_of((cfg.get("voices") or {}).get(role) or v)), v.get("speed", 1.0), role]
+                            raw = casting.configured_voice(role, cfg)               # as stored (a role on the default voice shows the default's real voice)
+                            key = casting.key_of(raw) or casting.key_of(v)
+                            eng = casting.engine_of_key(key) or "kokoro"
+                            prob = casting.voice_problem(raw)
+                            lab = f"**{role}**  \n{n} line{'s' if n != 1 else ''}" + (f"  \n⚠ {prob}" if prob else "") + ("  \n(default voice)" if role not in (cfg.get("voices") or {}) else "")
+                            out += [gr.update(visible=True), lab, (cfg.get("genders") or {}).get(role, "unknown"),
+                                    gr.update(choices=casting.engine_choices(eng), value=eng), gr.update(choices=casting.voices_for(eng, key), value=key),
+                                    gr.update(value=v.get("speed", 1.0), **_pace_update(eng)), role]
                         else:
-                            out += [gr.update(visible=False), "", gr.skip(), gr.skip(), gr.skip(), ""]
+                            out += [gr.update(visible=False), "", gr.skip(), gr.skip(), gr.skip(), gr.skip(), ""]
+                    names = [r for r, _ in roles] if multi else []
+                    out += [gr.update(choices=bulk_roles(roles if multi else []), value=[]), gr.update(choices=names, value=None),
+                            _mix(proj) if (proj and multi) else ""]
                     return out
 
+                bulk_engine.input(lambda e: gr.update(choices=([("Keep each character's clone / automatic by gender", "__auto__")] if e == "kokoro" else
+                                                              [("Keep each character's clone", "__keep__")]) + casting.voices_for(e),
+                                                      value="__auto__" if e == "kokoro" else "__keep__"), bulk_engine, bulk_voice)
+                bulk_btn.click(bulk_apply, [project, bulk_sel, bulk_engine, bulk_voice, bulk_copy, roles_state], status2).then(
+                    fill_rows, [roles_state, mode, project], row_outputs)
                 for trig in (roles_state.change, mode.change, refresh_btn.click):
                     trig(fill_rows, [roles_state, mode, project], row_outputs)
                 gender_btn.click(find_genders, [project, roles_state, title], status2).then(
@@ -3063,7 +3201,7 @@ def build_ui() -> gr.Blocks:
             if sid in ("voices", "names"):
                 ok.click(lambda p, w=sid: workflow.ack(_wd(p), w) if p else None, project).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         preset_yes_btn.click(preset_yes, project, [preset_box, preset_md, prep_cbg, status1]).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(refresh_flow, [project, chap_df], FLOW_OUTS)
+            voice_settings, project, VS_OUTS).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         preset_no_btn.click(preset_no, project, [preset_box, preset_md])
         GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
         HG_OUTS = [hg_emo, hg_share, hg_cap]                                                                           # = higgs_settings()
@@ -3071,17 +3209,17 @@ def build_ui() -> gr.Blocks:
         LEX_OUTS = [lex_df, term_dd, lex_snap]
         prep_outs = [prep_cbg, prep_status, gen_prep, go]
         load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(preset_offer, project, [preset_box, preset_md]).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
+            voice_settings, project, VS_OUTS).then(
             gen_settings, project, GEN_OUTS).then(higgs_settings, project, HG_OUTS).then(speed_text, project, speed_md).then(
             prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         cast_outs = [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]
         prep_btn.click(run_prepare, [project, chap_df, prep_cbg], [prep_status, gen_prep, go]).then(
-            load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
+            load_parsed, project, cast_outs).then(voice_settings, project, VS_OUTS).then(
             refresh_flow, [project, chap_df], FLOW_OUTS)
         gen_tab.select(prep_state, project, prep_outs)
         parse_btn.click(run_parse, [project, chap_df, endpoint, judge_cb],
                         [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(refresh_flow, [project, chap_df], FLOW_OUTS)
+            voice_settings, project, VS_OUTS).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         save_hints_btn.click(save_hints, [project, hints], status2)
         char_dd.change(show_lines, [project, char_dd], lines_df)
         review_out = [lines_df, roles_state, char_dd, target_dd]
@@ -3089,10 +3227,11 @@ def build_ui() -> gr.Blocks:
         merge_btn.click(merge_role, [project, char_dd, target_dd], review_out + [status2])
         pv_line_btn.click(preview_line, [project, lines_df, target_dd], [line_audio, status2])
         mode.change(set_mode, [project, mode], [single_group, status2])
-        single_dd.change(set_single, [project, single_dd, single_speed], status2)
+        single_ed.input(set_single_engine, [project, single_ed, single_dd, single_speed], [single_dd, single_speed, mix_md])
+        single_dd.input(set_single, [project, single_dd, single_speed], status2)
         single_speed.release(set_single, [project, single_dd, single_speed], status2)
         single_hear.click(hear_voice, [project, single_dd, single_speed, pv_text], pv_audio)
-        refresh_btn.click(refresh_voices, project, single_dd)
+        refresh_btn.click(refresh_voices, project, [single_dd, single_ed])
         save_seg_btn.click(save_segments, [project, seg_df], [roles_state, char_dd, target_dd, status2])
         save_seg_btn.click(show_lines, [project, char_dd], lines_df)
         emo_cb.change(remake_note, REMAKE_IN, remake_md); emo_base.release(remake_note, REMAKE_IN, remake_md)
@@ -3160,7 +3299,7 @@ def build_ui() -> gr.Blocks:
         qs_apply.click(queue_reschedule, [q_pick, qs_when, qs_win, qs_w1, qs_w2], QMSG)
         qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
-                        mode, single_dd, single_speed, single_group, *GEN_OUTS, *HG_OUTS]
+                        *VS_OUTS, *GEN_OUTS, *HG_OUTS]
         q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
@@ -3208,7 +3347,7 @@ def build_ui() -> gr.Blocks:
                     [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover, a_files])
         a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover, a_files]).then(
             gen_settings, project, GEN_OUTS).then(higgs_settings, project, HG_OUTS).then(
-            voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
+            voice_settings, project, VS_OUTS).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover, a_files])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
@@ -3238,7 +3377,7 @@ def build_ui() -> gr.Blocks:
         pc_voice.change(pacing_status, pc_voice, [pc_status, pc_tbl])
         pc_timer.tick(pacing_status, pc_voice, [pc_status, pc_tbl])
         c_assign.click(clone_assign, [project, lib_dd, lib_role, lib_engine], c_status).then(
-            load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group])
+            load_parsed, project, cast_outs).then(voice_settings, project, VS_OUTS)
         c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_qw, cmp_hg, c_status])
     return ui
 
