@@ -865,9 +865,10 @@ class Runner:
             update(job["id"], active=round(float(cur.get("active", 0)) + max(0.0, seconds), 1))
 
     def _record(self, job: dict) -> None:
-        """A finished book teaches the time estimate: its characters per engine against its active time."""
+        """A finished book teaches the time estimate: the characters it made fresh, per engine, against its active time (clips reused from an
+        earlier run are not counted, or a rebuild would make the machine look many times faster than it is)."""
         try:
-            from .runstats import record_job
+            from .runstats import fresh_chars, record_job
             from .synth import resolve_voice
             cfg = yaml.safe_load(Path(job["config"]).read_text()) or {}
             only = set(job.get("chapters") or [])
@@ -878,7 +879,12 @@ class Runner:
                 e = resolve_voice(sg["speaker"], cfg)["engine"]
                 chars[e] = chars.get(e, 0) + len(sg["text"])
             cur = next((j for j in load() if j["id"] == job["id"]), job)
-            record_job(job["id"], chars, float(cur.get("active", 0)))
+            try:
+                since = time.mktime(time.strptime(cur.get("started") or job.get("started"), FMT))
+            except (TypeError, ValueError):
+                return
+            fresh = fresh_chars(Path(job["work"]).name, since)             # clips reused from earlier runs are not speed
+            record_job(job["id"], {e: min(n, fresh.get(e, 0)) for e, n in chars.items()}, float(cur.get("active", 0)))
         except Exception:
             pass
 

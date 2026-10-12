@@ -836,6 +836,22 @@ def test_assistant_ask_returns_a_proposed_cover(tmp_path, monkeypatch):
     assert res[0].startswith("Applied") and res[5].endswith("cover_custom.jpg")                    # the Book tab gets the new cover
 
 
+def test_a_rebuild_with_reused_clips_does_not_count_as_speed(tmp_path, monkeypatch):
+    import time
+    from audiobook_gen import runstats
+    monkeypatch.setattr(runstats, "PATH", tmp_path / "run_stats.json")
+    now = int(time.time())
+    runstats.record(f"book-{now - 5000}", "chatterbox", 1, 2000, 100)        # an older run of the book
+    runstats.record(f"book-{now}", "chatterbox", 1, 600, 30)                  # this job made 600 characters fresh
+    runstats.record(f"other-{now}", "chatterbox", 1, 999, 30)                 # another book is not counted
+    assert runstats.fresh_chars("book", now - 10) == {"chatterbox": 600}
+    assert runstats.fresh_chars("book", now + 60) == {}                       # a pure rebuild made nothing
+    runstats.record_job("fast", {"chatterbox": 100000}, 250)                  # 400 chars/s: reused clips
+    runstats.record_job("fresh", {"chatterbox": 2000}, 100)                   # 20 chars/s
+    assert runstats.drop_cached_jobs() == 1
+    assert [r["id"] for r in runstats._load() if r.get("kind") == "job"] == ["fresh"]
+
+
 def test_whole_book_time_feeds_the_estimate(tmp_path, monkeypatch):
     from audiobook_gen import runstats
     monkeypatch.setattr(runstats, "PATH", tmp_path / "run_stats.json")

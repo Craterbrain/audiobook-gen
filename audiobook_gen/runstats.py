@@ -31,8 +31,31 @@ def record(run_id: str, engine: str, workers: int, chars: int, seconds: float) -
         pass
 
 
+def fresh_chars(work_name: str, since: float) -> dict[str, int]:
+    """{engine: characters made fresh} by the speech runs of this book since `since` (epoch seconds). A rebuild that reuses clips made earlier
+    has few or none, so it never passes cached clips off as speed."""
+    out: dict[str, int] = {}
+    for r in _load():
+        rid = str(r.get("id", ""))
+        stem, _, stamp = rid.rpartition("-")
+        if r.get("kind") != "job" and stem == work_name and stamp.isdigit() and int(stamp) >= since:
+            out[r["engine"]] = out.get(r["engine"], 0) + int(r["chars"])
+    return out
+
+
+def drop_cached_jobs(factor: float = 1.5) -> int:
+    """One-time clean-up of old history: remove whole-book records that ran faster than `factor` times the engine's speech-only speed,
+    which only happens when most clips were reused (a rebuild). Returns how many were removed."""
+    synth = {e: a["cps"] for e, a in averages(jobs=False).items()}
+    runs = _load()
+    keep = [r for r in runs if not (r.get("kind") == "job" and r["engine"] in synth and r["chars"] / max(r["seconds"], 1) > factor * synth[r["engine"]])]
+    if len(keep) != len(runs):
+        PATH.write_text(json.dumps(keep, indent=1))
+    return len(runs) - len(keep)
+
+
 def record_job(job_id: str, chars: dict[str, int], seconds: float) -> None:
-    """A whole finished book: its characters per engine and the active time from the queue starting it to the audiobook
+    """A whole finished book: the characters it made fresh per engine and the active time from the queue starting it to the audiobook
     being built (restarts and start-up included, waiting outside the window not). The seconds are shared between engines
     by how long each engine's characters take at its synth speed, so a mixed-voice book still gives each engine a speed."""
     chars = {e: n for e, n in chars.items() if n > 0}
