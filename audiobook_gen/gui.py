@@ -381,7 +381,7 @@ def load_parsed(project):
 
 
 def open_everything(work, title="", author="", cover=""):
-    """Everything the tabs show for a project: book, cast, voices, generate settings (31 values)."""
+    """Everything the tabs show for a project: book, cast, voices, generate settings (32 values)."""
     book = open_project(work, title, author, cover)
     return (*book, *load_parsed(book[0]), *voice_settings(book[0]), *gen_settings(book[0]), *higgs_settings(book[0]))
 
@@ -809,7 +809,7 @@ def _need_engine(key: str):
 
 
 def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, seed, takes,
-                   engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)"):
+                   engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)", hk=50, hp=0.95, hmax=1500):
     key = _engine_key(engine)
     if not audio:
         raise gr.Error("Add a reference clip first.")
@@ -836,7 +836,8 @@ def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, s
             if key == "chatterbox":
                 voice.update(exaggeration=float(exag), cfg_weight=float(cfgw))
             if key == "higgs":
-                voice.update(vlib.HIGGS_DEFAULTS, temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, ""))
+                voice.update(vlib.HIGGS_DEFAULTS, temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, ""),
+                             top_k=int(hk), top_p=float(hp), max_new_tokens=int(hmax))
         t0 = time.time()
         wav = eng.synth(text, voice)
         outs.append(_wav(wav, eng.sample_rate, f"take{i + 1}.wav"))
@@ -867,7 +868,7 @@ def clone_compare(name, text):
 
 
 def clone_save(name, audio, ref_text, speed, steps, cfg, sway, xfade, rms, seed, seeds, pick, notes,
-               engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)"):
+               engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)", hk=50, hp=0.95, hmax=1500):
     if not audio:
         raise gr.Error("Add a reference clip first.")
     idx = {"Take 1": 0, "Take 2": 1, "Take 3": 2}.get(pick, 0)
@@ -877,7 +878,7 @@ def clone_save(name, audio, ref_text, speed, steps, cfg, sway, xfade, rms, seed,
         if _engine_key(engine) == "chatterbox":     # remember the emotion settings that were tuned
             params.update(exaggeration=float(exag), cfg_weight=float(cfgw))
         saved = vlib.save_voice(name, audio, ref_text, params, notes or "",
-                                higgs=dict(temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, "")))
+                                higgs=dict(temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, ""), top_k=int(hk), top_p=float(hp), max_new_tokens=int(hmax)))
     except ValueError as e:
         raise gr.Error(str(e))
     return gr.update(choices=vlib.list_voices(), value=saved), f"Saved **{saved}** (seed {use_seed}) to `voices/library/{saved}`."
@@ -891,7 +892,7 @@ def clone_load(name):
     hg = {**vlib.HIGGS_DEFAULTS, **meta.get("higgs", {})}
     style = next((k for k, t in HIGGS_STYLES.items() if t == hg["tag"]), "Lively (expressive_high)")
     return (v["ref_audio"], v["ref_text"], name, meta.get("notes", ""),
-            *[v[k] for k in CLONE_KEYS], v.get("exaggeration", 0.5), v.get("cfg_weight", 0.4), hg["temperature"], hg["pace"], style,
+            *[v[k] for k in CLONE_KEYS], v.get("exaggeration", 0.5), v.get("cfg_weight", 0.4), hg["temperature"], hg["pace"], style, hg["top_k"], hg["top_p"], hg["max_new_tokens"],
             f"Loaded **{name}** (saved {meta.get('saved', '?')}).")
 
 
@@ -1293,14 +1294,14 @@ def gen_settings(project):
 def higgs_settings(project):
     """The Higgs emotion-tag switch and share as saved in the project's config."""
     cfg = _cfg(project) if project else {}
-    return bool(cfg.get("higgs_emotion")), float(cfg.get("higgs_emotion_share", 0.18))
+    return bool(cfg.get("higgs_emotion")), float(cfg.get("higgs_emotion_share", 0.18)), float(cfg.get("higgs_emotion_cap", 0.35))
 
 
-def save_higgs(project, on, share):
+def save_higgs(project, on, share, cap=0.35):
     if not project:
         return "Open a book first."
     cfg = _cfg(project)
-    cfg["higgs_emotion"], cfg["higgs_emotion_share"] = bool(on), round(float(share), 2)
+    cfg["higgs_emotion"], cfg["higgs_emotion_share"], cfg["higgs_emotion_cap"] = bool(on), round(float(share), 2), round(float(cap), 2)
     _save_cfg(project, cfg)
     return ""
 
@@ -1802,7 +1803,7 @@ def reconnect_on_load(project):
     from . import jobqueue
     run = jobqueue.now_running()
     if project or not run:
-        return (gr.skip(),) * 31
+        return (gr.skip(),) * 32
     j = next(x for x in jobqueue.load() if x["id"] == run["id"])
     return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 
@@ -2714,6 +2715,8 @@ def build_ui() -> gr.Blocks:
                                          info="A language model reads each passage in context and gives the most strongly felt ones an emotion tag. The first run reads the whole book once (a few minutes).")
                     hg_share = gr.Slider(0.0, 0.4, 0.18, step=0.02, label="How much of the book gets an emotion tag (Higgs)", scale=2,
                                          info="Lower = calmer. 0.18 tags about one passage in five.")
+                    hg_cap = gr.Slider(0.2, 1.0, 0.35, step=0.05, label="Most of the tags any one feeling may take (Higgs)", scale=2,
+                                       info="Keeps a book from becoming all awe. 1.0 = no limit.")
                 with gr.Row():
                     g_when = gr.DateTime(label="Start at (leave empty to start as soon as the GPU is free)", include_time=True,
                                          type="string", scale=2)
@@ -2943,6 +2946,10 @@ def build_ui() -> gr.Blocks:
                                 c_hstyle = gr.Dropdown(list(HIGGS_STYLES), value="Lively (expressive_high)", label="Higgs delivery style (a tag in front of every line)")
                                 c_htemp = gr.Slider(0.3, 1.2, 0.7, step=0.05, label="Higgs temperature (lower = steadier, higher = more varied; 0.7 recommended)")
                                 c_hpace = gr.Slider(0.9, 1.3, 1.08, step=0.01, label="Higgs pace (1.0 = as made; a pitch-preserving speed-up after each clip)")
+                                with gr.Accordion("Higgs advanced — sampling and length", open=False):
+                                    c_hk = gr.Slider(1, 200, 50, step=1, label="top_k (how many of the likeliest sounds it may pick from; lower = steadier)")
+                                    c_hp = gr.Slider(0.5, 1.0, 0.95, step=0.01, label="top_p (the share of probability it samples from; lower = steadier)")
+                                    c_hmax = gr.Slider(300, 3000, 1500, step=100, label="Longest clip it may make (tokens; 25 per second of speech, so 1500 = 60 s)")
                             with gr.Group() as f5_group:
                                 c_speed = gr.Slider(0.5, 1.6, 1.0, step=0.05, label="F5 pace — speaking speed (the voice's default cadence)")
                                 c_steps = gr.Slider(8, 64, 32, step=1, label="F5 quality steps (more = cleaner, slower)")
@@ -3059,7 +3066,7 @@ def build_ui() -> gr.Blocks:
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         preset_no_btn.click(preset_no, project, [preset_box, preset_md])
         GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
-        HG_OUTS = [hg_emo, hg_share]                                                                           # = higgs_settings()
+        HG_OUTS = [hg_emo, hg_share, hg_cap]                                                                           # = higgs_settings()
         lex_snap = gr.State({})     # the lexicon table as loaded from lexicon.json (see save_lexicon)
         LEX_OUTS = [lex_df, term_dd, lex_snap]
         prep_outs = [prep_cbg, prep_status, gen_prep, go]
@@ -3089,7 +3096,8 @@ def build_ui() -> gr.Blocks:
         save_seg_btn.click(save_segments, [project, seg_df], [roles_state, char_dd, target_dd, status2])
         save_seg_btn.click(show_lines, [project, char_dd], lines_df)
         emo_cb.change(remake_note, REMAKE_IN, remake_md); emo_base.release(remake_note, REMAKE_IN, remake_md)
-        hg_emo.change(save_higgs, [project, hg_emo, hg_share], status1); hg_share.release(save_higgs, [project, hg_emo, hg_share], status1)
+        hg_emo.change(save_higgs, [project, hg_emo, hg_share, hg_cap], status1); hg_share.release(save_higgs, [project, hg_emo, hg_share, hg_cap], status1)
+        hg_cap.release(save_higgs, [project, hg_emo, hg_share, hg_cap], status1)
         lex_filter.change(lex_filtered, [project, lex_filter], [lex_df, status3])
         origins_btn.click(lex_origins, project, [lex_df, term_dd, status3]).then(lex_snapshot, project, lex_snap)
         lex_btn.click(run_lexicon, [project, seed_dd, lang_tb, detect_cb, title, author], [lex_df, status3]).then(
@@ -3217,7 +3225,7 @@ def build_ui() -> gr.Blocks:
         c_trans.click(clone_transcribe, c_audio, c_text)
         c_engine.change(lambda e: (gr.update(visible=e == "Chatterbox"), gr.update(visible=e == "F5-TTS"), gr.update(visible=e == "Higgs")), c_engine,
                         [cb_group, f5_group, hg_group])
-        HG_VOICE = [c_htemp, c_hpace, c_hstyle]
+        HG_VOICE = [c_htemp, c_hpace, c_hstyle, c_hk, c_hp, c_hmax]
         c_go.click(clone_generate, [c_audio, c_text, c_test] + sliders + [c_takes, c_engine, c_exag, c_cfgw] + HG_VOICE, [take1, take2, take3, c_seeds, c_status])
         c_reset.click(lambda: [vlib.DEFAULTS[k] for k in CLONE_KEYS], None, sliders)
         c_save.click(clone_save, [c_name, c_audio, c_text] + sliders + [c_seeds, c_pick, c_notes, c_engine, c_exag, c_cfgw] + HG_VOICE, [lib_dd, c_status])

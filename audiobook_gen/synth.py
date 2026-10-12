@@ -160,7 +160,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
         from .emotion import delivery
         yield 0, max(1, sum(map(len, raw))), "Reading the emotion of each sentence"
         feel = delivery(segs, raw, cfg.get("emotion_base", 0.0), refine.hints(segs, read, refined) if refined else None)
-    tags = None   # per-chunk emotion tags for Higgs: your own (higgs_tags.json: {"segment:chunk": "<|emotion:awe|>"}) or chosen by the language model for the strongest higgs_emotion_share (default 0.2) of the chunks (cfg "higgs_emotion: true")
+    tags = None   # per-chunk emotion tags for Higgs: your own (higgs_tags.json: {"segment:chunk": "<|emotion:awe|>"}) or chosen by the language model for the strongest higgs_emotion_share (default 0.2) of the chunks, no one feeling taking more than higgs_emotion_cap (0.35) of them (cfg "higgs_emotion: true")
     if any(resolve_voice(sg["speaker"], cfg)["engine"] == "higgs" for sg in segs):
         try:
             own = json.loads((work / "higgs_tags.json").read_text())
@@ -171,7 +171,7 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
         elif cfg.get("higgs_emotion"):
             from .emotion import director_probs, director_tags
             yield 0, max(1, sum(map(len, raw))), "Deciding the feeling of each passage"
-            picked = director_tags(director_probs(work, segs, raw), float(cfg.get("higgs_emotion_share", 0.2)))
+            picked = director_tags(director_probs(work, segs, raw), float(cfg.get("higgs_emotion_share", 0.2)), float(cfg.get("higgs_emotion_cap", 0.35)))
             tags = [[picked.get(f"{sg['id']}:{ci}", "") for ci in range(len(raw[si]))] for si, sg in enumerate(segs)]
     for si, seg in enumerate(segs):
         voice = resolve_voice(seg["speaker"], cfg)

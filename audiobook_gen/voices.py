@@ -14,7 +14,7 @@ LIB = ROOT / "voices" / "library"
 MAX_REF_SECONDS = 12  # F5-TTS clips longer references anyway
 
 EXTRA = ("exaggeration", "cfg_weight")   # Chatterbox settings; stored only when a voice was tuned in Chatterbox
-HIGGS_DEFAULTS = dict(temperature=0.7, top_k=50, top_p=0.95, tag="<|prosody:expressive_high|>", pace=1.08)   # Higgs: temperature 0.7 is warmer than the 1.0 it ships with
+HIGGS_DEFAULTS = dict(temperature=0.7, top_k=50, top_p=0.95, max_new_tokens=1500, tag="<|prosody:expressive_high|>", pace=1.08)   # Higgs: temperature 0.7 is warmer than the 1.0 it ships with
 DEFAULTS = dict(speed=1.0, nfe_step=32, cfg_strength=2.0, sway_sampling_coef=-1.0,
                 cross_fade_duration=0.15, target_rms=0.1, seed=1234)
 

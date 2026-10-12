@@ -272,14 +272,16 @@ def test_voice_lab_makes_higgs_takes_with_its_own_settings_and_saves_them(tmp_pa
             return np.full(2400, 0.1, np.float32)
 
     monkeypatch.setattr(gui, "_engine", lambda *a, **k: Fake()); monkeypatch.setattr(gui, "need_gpu", lambda: None)
-    out = gui.clone_generate(str(tmp_path / "ref.wav"), "", "Hello.", 1.0, 32, 2.0, -1.0, 0.15, 0.1, 5, 2, "Higgs", 0.5, 0.4, 0.6, 1.0, "Plain (no style tag)")
+    out = gui.clone_generate(str(tmp_path / "ref.wav"), "", "Hello.", 1.0, 32, 2.0, -1.0, 0.15, 0.1, 5, 2, "Higgs", 0.5, 0.4, 0.6, 1.0, "Plain (no style tag)", 20, 0.8, 900)
     assert [v["seed"] for v in seen] == [5, 6] and seen[0]["temperature"] == 0.6 and seen[0]["pace"] == 1.0 and seen[0]["tag"] == ""
+    assert (seen[0]["top_k"], seen[0]["top_p"], seen[0]["max_new_tokens"]) == (20, 0.8, 900)
     assert out[0] and out[1] and out[2] is None
-    gui.clone_save("V", str(tmp_path / "ref.wav"), "Hello there.", 1.0, 32, 2.0, -1.0, 0.15, 0.1, 5, [5, 6], "Take 2", "", "Higgs", 0.5, 0.4, 0.6, 1.0, "Calm (expressive_low)")
+    gui.clone_save("V", str(tmp_path / "ref.wav"), "Hello there.", 1.0, 32, 2.0, -1.0, 0.15, 0.1, 5, [5, 6], "Take 2", "", "Higgs", 0.5, 0.4, 0.6, 1.0, "Calm (expressive_low)", 30, 0.9, 1200)
     saved = json.loads((tmp_path / "lib" / "V" / "voice.json").read_text())
-    assert saved["higgs"] == {"temperature": 0.6, "pace": 1.0, "tag": "<|prosody:expressive_low|>"} and saved["params"]["seed"] == 6
+    assert saved["higgs"] == {"temperature": 0.6, "pace": 1.0, "tag": "<|prosody:expressive_low|>", "top_k": 30, "top_p": 0.9, "max_new_tokens": 1200}
+    assert saved["params"]["seed"] == 6
     loaded = gui.clone_load("V")
-    assert loaded[-4:-1] == (0.6, 1.0, "Calm (expressive_low)")
+    assert loaded[-7:-1] == (0.6, 1.0, "Calm (expressive_low)", 30, 0.9, 1200)
 
 
 def test_higgs_settings_are_saved_in_the_project_config(tmp_path, monkeypatch):
@@ -287,9 +289,9 @@ def test_higgs_settings_are_saved_in_the_project_config(tmp_path, monkeypatch):
     from audiobook_gen import gui
     p = tmp_path / "proj"; p.mkdir()
     (p / "config.yaml").write_text("voices: {Narrator: {engine: kokoro, voice: bm_george}}\n")
-    assert gui.higgs_settings(str(p)) == (False, 0.18)
-    gui.save_higgs(str(p), True, 0.3)
-    assert gui.higgs_settings(str(p)) == (True, 0.3)
+    assert gui.higgs_settings(str(p)) == (False, 0.18, 0.35)
+    gui.save_higgs(str(p), True, 0.3, 0.5)
+    assert gui.higgs_settings(str(p)) == (True, 0.3, 0.5)
     assert yaml.safe_load((p / "config.yaml").read_text())["higgs_emotion_share"] == 0.3
 
 
@@ -655,7 +657,7 @@ def test_gui_reconnects_to_a_running_job(tmp_path, monkeypatch):
     assert r["title"] == "Running book" and r["pct"] == 25 and r["since_clip"] < 60
     assert "Making “Running book”" in gui.queue_now() and "25%" in gui.queue_now()
     out = gui.reconnect_on_load("")                          # nothing open: it opens the running book
-    assert len(gui.reconnect_on_load(str(p))) == len(out) == 31 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
+    assert len(gui.reconnect_on_load(str(p))) == len(out) == 32 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
     assert out[1]["Include"].all()                           # every chapter ticked, as it was queued
     assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(str(p)))     # a book is already open: leave it alone
     jq.update(job["id"], status="done")
