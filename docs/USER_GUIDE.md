@@ -99,12 +99,18 @@ Nothing is ever deleted automatically. A folder that a queued or running job use
 
 Open **④ Extras → Music**. Only free recordings are offered from the search (public domain or CC0, from Wikimedia Commons). You can also add your own.
 
+![Music section](images/guide/music.png)
+
 * **Opening**: pick a track, a start point, and optionally a **spoken title** read over it (a new line starts a new part, after the pause you set).
 * **Bridges**: short music before a section. Either one shared track at a spacing you choose, or your **own track per section**.
 * **Ending**: music at the close.
 * **▶ Preview** plays a short mp3 of the opening, a bridge or the ending, laid into clips already made. The final book will sound slightly different because clips may be remade, but it shows you the fit.
 * **Add a recording from a link**: paste a direct https:// link to an audio file, name it, say where it came from. A file over 120 MB is re-encoded to Opus in the background to just fit.
 * A credit line for every track used is added to the book.
+
+![Choosing the sections that get a bridge](images/guide/music-bridges.png)
+
+The list of sections (shown here shortened) marks the recommended spots with a ★; tick or untick to choose for yourself, then **Save for this book**.
 
 Music files stay on your machine and are not part of the project's Git repository.
 
