@@ -2,7 +2,7 @@
 
 It reads plain text (no IPA, no respellings) and takes control tags at the start of a sentence. The voice dict supplies ref_audio + ref_text
 and these settings: temperature (0.7), top_k (50), top_p (0.95), seed, tag (e.g. "<|prosody:expressive_high|>" put in front of every
-clip) and speed (a pitch-preserving stretch afterwards: 1.0 = as made, 1.08 = a little faster).
+clip) and pace (a pitch-preserving stretch afterwards: 1.0 = as made, 1.08 = a little faster). voices.HIGGS_DEFAULTS has the defaults.
 
 The model code is the community port multimodalart/higgs-audio-v3-tts-4b-transformers (trust_remote_code); it is pinned to the commit that was
 read before use, so an update of that repository is never run unseen. Licence of the weights: research and non-commercial."""
@@ -21,6 +21,25 @@ class HiggsEngine(TTSEngine):
     name = "higgs"
     lexicon_mode = "respell"
     sample_rate = 24000
+
+    @classmethod
+    def available(cls) -> bool:
+        """The main environment can run it (transformers 5.5 or newer). The 9.3 GB of weights download the first time it is used."""
+        try:
+            import transformers
+            major, minor = (int(x) for x in transformers.__version__.split(".")[:2])
+            return (major, minor) >= (5, 5)
+        except Exception:
+            return False
+
+    @classmethod
+    def cached(cls) -> bool:
+        """The weights are already on this machine."""
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            return isinstance(try_to_load_from_cache(MODEL, "model.safetensors", revision=REVISION), str)
+        except Exception:
+            return False
 
     def __init__(self, device_pref: str = "auto", **_):
         import torch
@@ -51,8 +70,8 @@ class HiggsEngine(TTSEngine):
             max_new_tokens=int(voice.get("max_new_tokens", 1500)))
         sync(self.device)
         audio = wav.numpy().astype(np.float32)
-        speed = float(voice.get("speed", 1.0))
-        return stretch(audio, self.sample_rate, speed) if abs(speed - 1.0) > 0.005 and len(audio) else audio
+        pace = float(voice.get("pace", 1.08))
+        return stretch(audio, self.sample_rate, pace) if abs(pace - 1.0) > 0.005 and len(audio) else audio
 
 
 def stretch(audio: np.ndarray, sr: int, speed: float) -> np.ndarray:

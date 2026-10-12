@@ -19,7 +19,7 @@ DASH_PAUSE = 1.5        # more allowed for each dash or ellipsis in the text: th
 SILENT_DB = -45.0
 MAX_SILENT_SHARE = 0.6
 RETRIES = (101, 202, 303, 404)       # seeds tried for a flagged clip
-REPAIRABLE = ("chatterbox", "qwen3")  # engines that take a seed
+REPAIRABLE = ("chatterbox", "qwen3", "higgs")  # engines that take a seed
 
 
 def measure(path: Path) -> dict:

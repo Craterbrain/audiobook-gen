@@ -1,6 +1,6 @@
 # audiobook-gen
 
-Local pipeline: `.epub`/`.txt`/`.md`/`.html`/`.docx`/`.pdf` (and, with calibre, `.mobi` and others) -> speaker-parsed segments -> pronunciation lexicon -> Kokoro-82M / F5-TTS on an Intel Arc GPU (PyTorch XPU) -> name check -> optional music and spoken titles -> chapterized, tagged `.m4b` (Opus 64 kb/s at −16 LUFS by default; `audio_codec: aac` for Apple Books).
+Local pipeline: `.epub`/`.txt`/`.md`/`.html`/`.docx`/`.pdf` (and, with calibre, `.mobi` and others) -> speaker-parsed segments -> pronunciation lexicon -> Kokoro-82M / F5-TTS / Chatterbox / Qwen3-TTS / Higgs TTS 3 on an Intel Arc GPU (PyTorch XPU) -> name check -> optional music and spoken titles -> chapterized, tagged `.m4b` (Opus 64 kb/s at −14.6 LUFS by default; `audio_codec: aac` for Apple Books).
 
 ## A quick look
 
@@ -179,3 +179,14 @@ The queue runner is built to be started and forgotten:
 * **Operations without the GUI** (`operations.py`): `enqueue`, `rebuild`, `reapply_extras`, with a refusal while a book is being made.
 * **Assistant tools** (`assistant_tools.py`, `assistant_guide.md`): the `./tools` command described above.
 * **Clip counter.** While names are re-checked the count shows total clips minus those being remade, so it does not fall to zero and climb back.
+
+## Higgs TTS 3 (4B): the fourth voice engine
+
+Installed with `./setup_engines.sh higgs` (it runs in the main environment and needs transformers 5.5 or newer; the 9.3 GB of weights download once, from a community `trust_remote_code` port pinned to the commit that was read before first use). It needs about 9.4 GB of the 12 GB card, so it runs one worker and cannot share the GPU with the other engines (the app unloads whichever side is loaded). Weights licence: research and non-commercial.
+
+- **Why:** it reads plain text, without IPA or respellings, and gets names right (on Grant chapters 15-16, 96% of 135 names scored 0.70 or better without any retakes, against 99% for Chatterbox after its name check). Dialect, ordinals like "2d", digits and dashes need no cleaning first.
+- **Settings** (per voice, in Voice lab -> Engine: Higgs -> Tuning; a book's config can override any of them): `temperature` (0.7; its own default of 1.0 sounds flat), `top_k` 50, `top_p` 0.95, `tag` (a control tag put in front of every line; `<|prosody:expressive_high|>` by default), `pace` (1.08: a pitch-preserving stretch of each clip afterwards) and `seed`. `voices.HIGGS_DEFAULTS` holds the defaults. Higgs voices are saved like any clone (reference clip plus transcript) and appear in the voice menus as *(Higgs)*.
+- **Emotion tags:** `higgs_emotion: true` in the book's config (Make tab: *Emotion tags (Higgs)*) has a language model (Qwen3-4B) read each passage with its neighbours and choose a feeling or none. Only the most certain `higgs_emotion_share` of the lines (default 0.18) get a tag, no one feeling takes more than about a third of them, and the choices are cached in `higgs_emotion.json`. Your own tags win: `higgs_tags.json` in the work folder maps `"segment:chunk"` to a tag such as `<|emotion:awe|>`.
+- **Checks:** the clip check retakes odd clips with other seeds, and the name check listens to names, retakes weak ones and tries respellings, as for Chatterbox. The Corrections tab can change a Higgs clip's text and seed.
+- **Queue and ntfy:** the queue estimate uses a prior of 16 characters per second until a book has been made with it; `current`, `queue` and the finished message say which voices a book uses.
+- **Loudness:** the default is now -14.6 LUFS (`loudness_lufs`); a target louder than about -15.5 brings the peaks down gently, raises the level by the measured amount and limits the peaks at -2 dB.

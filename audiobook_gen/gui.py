@@ -36,7 +36,8 @@ KOKORO_VOICES = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_
 MAX_ROLES = 30
 MODE_MULTI = "Different voice for each character"
 MODE_SINGLE = "One narrator reads everything"
-ENGINE_LABELS = {"F5-TTS": "f5", "Chatterbox": "chatterbox", "Qwen3-TTS": "qwen3"}
+ENGINE_LABELS = {"F5-TTS": "f5", "Chatterbox": "chatterbox", "Qwen3-TTS": "qwen3", "Higgs": "higgs"}
+HIGGS_STYLES = {"Lively (expressive_high)": "<|prosody:expressive_high|>", "Calm (expressive_low)": "<|prosody:expressive_low|>", "Plain (no style tag)": ""}
 LEX_MODES = {"Phonetic respelling — made from the IPA where blank": "respell",
              "Plain spelling — no substitutions": "plain"}
 CHAP_COLS = ["Include", "#", "Title", "Characters"]
@@ -286,7 +287,7 @@ def hear_voice(project, key, speed, text):
     v = casting.voice_of(key, speed)
     from .voices import resolve
     v = resolve(v)
-    eng = get_engine(v["engine"], _cfg(project).get("device", "auto"))
+    eng = _engine(v["engine"], _cfg(project).get("device", "auto"))
     return _wav(eng.synth(text or "In the beginning was the Word.", v), eng.sample_rate, "voice.wav")
 
 
@@ -380,9 +381,9 @@ def load_parsed(project):
 
 
 def open_everything(work, title="", author="", cover=""):
-    """Everything the tabs show for a project: book, cast, voices, generate settings (29 values)."""
+    """Everything the tabs show for a project: book, cast, voices, generate settings (31 values)."""
     book = open_project(work, title, author, cover)
-    return (*book, *load_parsed(book[0]), *voice_settings(book[0]), *gen_settings(book[0]))
+    return (*book, *load_parsed(book[0]), *voice_settings(book[0]), *gen_settings(book[0]), *higgs_settings(book[0]))
 
 
 def save_segments(project, seg_df):
@@ -465,7 +466,7 @@ def preview_line(project, lines_df, target):
     cfg = _cfg(project)
     v = resolve_voice(role, cfg)
     need_gpu()
-    eng = get_engine(v["engine"], cfg.get("device", "auto"))
+    eng = _engine(v["engine"], cfg.get("device", "auto"))
     return _wav(eng.synth(row["text"][:400], v), eng.sample_rate, "line.wav"), f"Previewing line {row['id']} as **{role}**."
 
 
@@ -678,11 +679,13 @@ def fw_hear(project, word, ipa, respell, voice_key, template):
         spoken = f"[{word}](/{ipa.strip().strip('/')}/)" if (ipa or "").strip() else word
     elif v["engine"] in ("chatterbox", "qwen3"):     # these read the IPA itself
         spoken = ipa.strip().strip("/") if (ipa or "").strip() else word
+    elif v["engine"] == "higgs":                     # plain text: the name, or the respelling you typed
+        spoken = (respell or "").strip() or word
     else:
         spoken = (f5_text(respell, word) if (respell or "").strip()
                   else auto_respell({"ipa": ipa}) and f5_text(auto_respell({"ipa": ipa}), word)) or word
     need_gpu()
-    eng = get_engine(v["engine"], _cfg(project).get("device", "auto") if project else "auto")
+    eng = _engine(v["engine"], _cfg(project).get("device", "auto") if project else "auto")
     text = (template or "Then said {word} unto him, Come and see.").replace("{word}", spoken)
     return _wav(eng.synth(text, v), eng.sample_rate, "word.wav"), f"Spoke it as: `{spoken}`"
 
@@ -783,7 +786,22 @@ def _engine_key(label) -> str:
     return ENGINE_LABELS.get(label, "f5")
 
 
+def _engine(key: str, device: str = "auto"):
+    """An engine for a preview or a take. Higgs (9.4 GB) and the other engines do not fit the card together, so whichever side is loaded
+    makes room first."""
+    from .synth import _ENGINES, unload_engines
+    loaded = {k[0] for k in _ENGINES}
+    if (key == "higgs" and loaded - {"higgs"}) or (key != "higgs" and "higgs" in loaded):
+        unload_engines()
+    return get_engine(key, device)
+
+
 def _need_engine(key: str):
+    if key == "higgs":
+        from .tts.higgs_engine import HiggsEngine
+        if not HiggsEngine.available():
+            raise gr.Error("Higgs needs transformers 5.5 or newer in the main environment.")
+        return
     from .tts import remote_engine as re_
     cls = {"chatterbox": re_.ChatterboxEngine, "qwen3": re_.Qwen3Engine}.get(key)
     if cls and not cls.available():
@@ -791,7 +809,7 @@ def _need_engine(key: str):
 
 
 def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, seed, takes,
-                   engine="F5-TTS", exag=0.5, cfgw=0.4):
+                   engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)"):
     key = _engine_key(engine)
     if not audio:
         raise gr.Error("Add a reference clip first.")
@@ -800,14 +818,14 @@ def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, s
         audio = to_wav(audio)                          # any audio format: decoded to WAV first if the engines could not read it
     except ValueError as e:
         raise gr.Error(str(e))
-    if key != "chatterbox" and not (ref_text or "").strip():
-        raise gr.Error("Type exactly what is said in the clip (F5-TTS and Qwen3 need it; Chatterbox does not).")
+    if key not in ("chatterbox", "higgs") and not (ref_text or "").strip():
+        raise gr.Error("Type exactly what is said in the clip (F5-TTS and Qwen3 need it; Chatterbox and Higgs do not).")
     _need_engine(key)
     import random
     import time
     base = int(seed) if int(seed) >= 0 else random.randint(0, 10**6)
     need_gpu()
-    eng = get_engine(key, "auto")
+    eng = _engine(key, "auto")
     outs, seeds, notes = [], [], []
     for i in range(int(takes)):
         if key == "f5":
@@ -817,6 +835,8 @@ def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, s
             voice = {"engine": key, "ref_audio": audio, "ref_text": (ref_text or "").strip(), "seed": base + i}
             if key == "chatterbox":
                 voice.update(exaggeration=float(exag), cfg_weight=float(cfgw))
+            if key == "higgs":
+                voice.update(vlib.HIGGS_DEFAULTS, temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, ""))
         t0 = time.time()
         wav = eng.synth(text, voice)
         outs.append(_wav(wav, eng.sample_rate, f"take{i + 1}.wav"))
@@ -841,13 +861,13 @@ def clone_compare(name, text):
             continue
         v = resolve({"engine": key, "library": name})
         need_gpu()
-        eng = get_engine(key, "auto")
+        eng = _engine(key, "auto")
         outs.append(_wav(eng.synth(text or TEST_TEXT, v), eng.sample_rate, f"compare_{key}.wav"))
-    return (*outs, f"**{name}** in F5-TTS, Chatterbox and Qwen3-TTS (an engine that isn't installed is left blank).")
+    return (*outs, f"**{name}** in F5-TTS, Chatterbox, Qwen3-TTS and Higgs (an engine that isn't installed is left blank).")
 
 
 def clone_save(name, audio, ref_text, speed, steps, cfg, sway, xfade, rms, seed, seeds, pick, notes,
-               engine="F5-TTS", exag=0.5, cfgw=0.4):
+               engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)"):
     if not audio:
         raise gr.Error("Add a reference clip first.")
     idx = {"Take 1": 0, "Take 2": 1, "Take 3": 2}.get(pick, 0)
@@ -856,7 +876,8 @@ def clone_save(name, audio, ref_text, speed, steps, cfg, sway, xfade, rms, seed,
         params = _params(speed, steps, cfg, sway, xfade, rms, use_seed)
         if _engine_key(engine) == "chatterbox":     # remember the emotion settings that were tuned
             params.update(exaggeration=float(exag), cfg_weight=float(cfgw))
-        saved = vlib.save_voice(name, audio, ref_text, params, notes or "")
+        saved = vlib.save_voice(name, audio, ref_text, params, notes or "",
+                                higgs=dict(temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, "")))
     except ValueError as e:
         raise gr.Error(str(e))
     return gr.update(choices=vlib.list_voices(), value=saved), f"Saved **{saved}** (seed {use_seed}) to `voices/library/{saved}`."
@@ -867,8 +888,10 @@ def clone_load(name):
         raise gr.Error("Choose a saved voice.")
     v = vlib.load_voice(name)
     meta = json.loads((vlib.LIB / name / "voice.json").read_text())
+    hg = {**vlib.HIGGS_DEFAULTS, **meta.get("higgs", {})}
+    style = next((k for k, t in HIGGS_STYLES.items() if t == hg["tag"]), "Lively (expressive_high)")
     return (v["ref_audio"], v["ref_text"], name, meta.get("notes", ""),
-            *[v[k] for k in CLONE_KEYS], v.get("exaggeration", 0.5), v.get("cfg_weight", 0.4),
+            *[v[k] for k in CLONE_KEYS], v.get("exaggeration", 0.5), v.get("cfg_weight", 0.4), hg["temperature"], hg["pace"], style,
             f"Loaded **{name}** (saved {meta.get('saved', '?')}).")
 
 
@@ -1187,23 +1210,30 @@ def engine_status() -> str:
     from .tts import remote_engine as re_
     ok = lambda b: "ready" if b else "not installed"
     v = gpu_vram_gib()
+    from .tts.higgs_engine import HiggsEngine
+    higgs = "needs transformers 5.5+" if not HiggsEngine.available() else "ready" if HiggsEngine.cached() else "ready (9.3 GB downloads the first time)"
     return (f"**Engines on this machine** — Kokoro: ready · F5-TTS: ready · "
-            f"Chatterbox: {ok(re_.ChatterboxEngine.available())} · Qwen3-TTS: {ok(re_.Qwen3Engine.available())}"
+            f"Chatterbox: {ok(re_.ChatterboxEngine.available())} · Qwen3-TTS: {ok(re_.Qwen3Engine.available())} · Higgs: {higgs}"
             + (f" · GPU memory: {v:.0f} GB" if v else " · no Intel GPU found (CPU only)"))
 
 
-ENGINE_NAMES = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "qwen3": "Qwen3-TTS"}
+ENGINE_NAMES = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "qwen3": "Qwen3-TTS", "higgs": "Higgs"}
 
 
 def speed_text(project=None) -> str:
     """Running average speed of every engine from past runs, plus an estimate for the open book."""
     from .runstats import averages, clock
     avg = averages()
-    if not avg:
+    from .runstats import PRIOR_CPS
+    try:                                  # a book made with an engine that has a prior (Higgs) gets an estimate before any run is recorded
+        uses_prior = any(resolve_voice(sg["speaker"], _cfg(project))["engine"] in PRIOR_CPS for sg in json.loads((_wd(project) / "segments.json").read_text()))
+    except Exception:
+        uses_prior = False
+    if not avg and not uses_prior:
         return "**Speed** — no runs recorded yet. After a few runs this shows the average speed of each engine and how long this book should take."
     parts = [f"{ENGINE_NAMES.get(e, e)} {a['cps']:.1f} characters/s ({a['runs']} {'whole book' if a['whole'] else 'run'}{'s' if a['runs'] != 1 else ''})"
              for e, a in sorted(avg.items())]
-    text = "**Speed, running average** — " + " · ".join(parts)
+    text = "**Speed, running average** — " + (" · ".join(parts) or "no runs recorded yet")
     try:
         cfg = _cfg(project)
         segs = json.loads((_wd(project) / "segments.json").read_text())
@@ -1211,9 +1241,12 @@ def speed_text(project=None) -> str:
         for sg in segs:
             e = resolve_voice(sg["speaker"], cfg)["engine"]
             per[e] = per.get(e, 0) + len(sg["text"])
-        if per and all(e in avg for e in per):
-            secs = sum(n / avg[e]["cps"] for e, n in per.items())
-            text += f"\n\n**This book:** {sum(per.values()):,} characters, about {clock(secs)} from scratch, start to finished file (clips already made are skipped)."
+        from .runstats import PRIOR_CPS
+        if per and all(e in avg or e in PRIOR_CPS for e in per):
+            secs = sum(n / (avg[e]["cps"] if e in avg else PRIOR_CPS[e]) for e, n in per.items())
+            guess = [ENGINE_NAMES.get(e, e) for e in per if e not in avg]
+            text += (f"\n\n**This book:** {sum(per.values()):,} characters, about {clock(secs)} from scratch, start to finished file (clips already made are skipped)."
+                     + (f" ({', '.join(guess)}: an estimate until a book has been made with it.)" if guess else ""))
     except Exception:
         pass
     return text
@@ -1255,6 +1288,21 @@ def gen_settings(project):
             int(cfg.get("crossfade_ms", 60)), int(pm.get("sentence", 350)), int(pm.get("paragraph", 700)),
             int(pm.get("speaker_change", 250)), int((cfg.get("workers") or {}).get("kokoro", 4)),
             cfg.get("f5_precision", "float16") != "float32")
+
+
+def higgs_settings(project):
+    """The Higgs emotion-tag switch and share as saved in the project's config."""
+    cfg = _cfg(project) if project else {}
+    return bool(cfg.get("higgs_emotion")), float(cfg.get("higgs_emotion_share", 0.18))
+
+
+def save_higgs(project, on, share):
+    if not project:
+        return "Open a book first."
+    cfg = _cfg(project)
+    cfg["higgs_emotion"], cfg["higgs_emotion_share"] = bool(on), round(float(share), 2)
+    _save_cfg(project, cfg)
+    return ""
 
 
 def chatterbox_workers(toggle) -> int:
@@ -2207,7 +2255,8 @@ def corr_pick(project, files, evt: gr.SelectData):
     seed = int(v.get("seed", -1)) if isinstance(v.get("seed", -1), (int, float)) else -1
     info = (f"**{c['speaker']}**, chapter {c['chapter']} · engine **{c['engine']}**" + (f" · flagged: {c['flags']}" if c["flags"] else "")
             + (" · corrected" if c["corrected"] else "")
-            + ("" if c["engine"] == "chatterbox" else " · only the text can be changed for this engine"))
+            + ("" if c["engine"] == "chatterbox" else " · the text and the seed can be changed (start the text with a tag such as <|emotion:awe|> to colour it)" if c["engine"] == "higgs"
+               else " · only the text can be changed for this engine"))
     return (str(path) if path.exists() else None, c["orig"], c["text"], float(v.get("exaggeration", 0.5)), float(v.get("cfg_weight", 0.5)), seed,
             c["file"], info, None, "")
 
@@ -2215,8 +2264,8 @@ def corr_pick(project, files, evt: gr.SelectData):
 def _changes(c, exag, cfg_w, seed):
     """Only the settings that differ from what the clip has now."""
     v, out = c["voice"], {}
-    if c["engine"] in ("chatterbox", "qwen3"):
-        for k, val in (("exaggeration", exag), ("cfg_weight", cfg_w)):
+    if c["engine"] in ("chatterbox", "qwen3", "higgs"):
+        for k, val in (("exaggeration", exag), ("cfg_weight", cfg_w)) if c["engine"] != "higgs" else ():
             if val is not None and abs(float(val) - float(v.get(k, 0.5))) > 1e-6:
                 out[k] = round(float(val), 3)
         if seed is not None and int(seed) >= 0 and int(seed) != v.get("seed"):
@@ -2229,7 +2278,7 @@ def corr_take(project, file, text, exag, cfg_w, seed):
     if not (text or "").strip():
         raise gr.Error("The text to speak is empty.")
     need_gpu()
-    eng = get_engine(c["engine"], _cfg(project).get("device", "auto"))
+    eng = _engine(c["engine"], _cfg(project).get("device", "auto"))
     path = corr.make_take(_wd(project), c, text.strip(), _changes(c, exag, cfg_w, seed), eng)
     from . import jobqueue
     jobqueue.lease_touch()
@@ -2661,6 +2710,11 @@ def build_ui() -> gr.Blocks:
                     emo_cb = gr.Checkbox(label="Emotion from the text (Chatterbox)", scale=1,
                                          info="Each sentence gets its own expressiveness, from its mood and tags like “cried” or “whispered”.")
                 with gr.Row():
+                    hg_emo = gr.Checkbox(label="Emotion tags (Higgs)", scale=1,
+                                         info="A language model reads each passage in context and gives the most strongly felt ones an emotion tag. The first run reads the whole book once (a few minutes).")
+                    hg_share = gr.Slider(0.0, 0.4, 0.18, step=0.02, label="How much of the book gets an emotion tag (Higgs)", scale=2,
+                                         info="Lower = calmer. 0.18 tags about one passage in five.")
+                with gr.Row():
                     g_when = gr.DateTime(label="Start at (leave empty to start as soon as the GPU is free)", include_time=True,
                                          type="string", scale=2)
                     g_win = gr.Checkbox(label="Only run overnight", value=False, scale=1,
@@ -2699,6 +2753,10 @@ def build_ui() -> gr.Blocks:
                     with gr.Row():
                         p_cont = gr.Slider(0, 600, 140, step=10, label="Pause when a sentence carries on after a quote (ms) — all voices")
                         p_tag = gr.Slider(0, 600, 120, step=10, label="Pause before a speaker tag (“said Danglars”) (ms) — all voices")
+                    gr.Markdown("### Higgs only")
+                    gr.Markdown("Higgs reads plain text (no pronunciation spellings are needed). Its pace, temperature and style tag belong to the voice: Voice lab → "
+                                "Engine: Higgs → Tuning. On the Voices tab the pace slider scales the voice's own pace (1.0 = as saved). Higgs needs about 9.4 GB of GPU memory, "
+                                "so it runs one worker.")
                     gr.Markdown("### Chatterbox only")
                     emo_base = gr.Slider(-0.3, 0.3, 0.0, step=0.05, label="Emotion offset (− calmer, + more dramatic) — Chatterbox only",
                                          info="Works with “Emotion from the text” ticked. The other voices have no emotion control.")
@@ -2881,6 +2939,10 @@ def build_ui() -> gr.Blocks:
                             with gr.Group(visible=False) as cb_group:
                                 c_exag = gr.Slider(0.0, 1.5, 0.5, step=0.05, label="Chatterbox emotion / exaggeration (0.5 = natural)")
                                 c_cfgw = gr.Slider(0.0, 1.0, 0.4, step=0.05, label="Chatterbox pace & guidance (lower = faster, more energetic)")
+                            with gr.Group(visible=False) as hg_group:
+                                c_hstyle = gr.Dropdown(list(HIGGS_STYLES), value="Lively (expressive_high)", label="Higgs delivery style (a tag in front of every line)")
+                                c_htemp = gr.Slider(0.3, 1.2, 0.7, step=0.05, label="Higgs temperature (lower = steadier, higher = more varied; 0.7 recommended)")
+                                c_hpace = gr.Slider(0.9, 1.3, 1.08, step=0.01, label="Higgs pace (1.0 = as made; a pitch-preserving speed-up after each clip)")
                             with gr.Group() as f5_group:
                                 c_speed = gr.Slider(0.5, 1.6, 1.0, step=0.05, label="F5 pace — speaking speed (the voice's default cadence)")
                                 c_steps = gr.Slider(8, 64, 32, step=1, label="F5 quality steps (more = cleaner, slower)")
@@ -2915,7 +2977,7 @@ def build_ui() -> gr.Blocks:
                     with gr.Accordion("Hear this voice in every engine", open=False):
                         c_compare = gr.Button("Compare engines")
                         with gr.Row():
-                            cmp_f5 = gr.Audio(label="F5-TTS"); cmp_cb = gr.Audio(label="Chatterbox"); cmp_qw = gr.Audio(label="Qwen3-TTS")
+                            cmp_f5 = gr.Audio(label="F5-TTS"); cmp_cb = gr.Audio(label="Chatterbox"); cmp_qw = gr.Audio(label="Qwen3-TTS"); cmp_hg = gr.Audio(label="Higgs")
                 with gr.Accordion("Pacing: measure this narrator's pauses from their audiobook", open=False):
                     gr.Markdown("Where a voice pauses (after sentences, commas, paragraphs, inside speech) is a large part of how it sounds. Give the "
                                 "recording the voice was made from and its ebook; the pauses are measured, matched to the text, and saved with the "
@@ -2997,12 +3059,13 @@ def build_ui() -> gr.Blocks:
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         preset_no_btn.click(preset_no, project, [preset_box, preset_md])
         GEN_OUTS = [emo_cb, emo_base, lex_rd, p_cont, p_tag, cb_workers, xf, ps, pp, pc, k_workers, f5_half]   # = gen_settings()
+        HG_OUTS = [hg_emo, hg_share]                                                                           # = higgs_settings()
         lex_snap = gr.State({})     # the lexicon table as loaded from lexicon.json (see save_lexicon)
         LEX_OUTS = [lex_df, term_dd, lex_snap]
         prep_outs = [prep_cbg, prep_status, gen_prep, go]
         load_btn.click(load_book, [book, maxch], [project, chap_df, title, author, cover, status1]).then(preset_offer, project, [preset_box, preset_md]).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(
-            gen_settings, project, GEN_OUTS).then(speed_text, project, speed_md).then(
+            gen_settings, project, GEN_OUTS).then(higgs_settings, project, HG_OUTS).then(speed_text, project, speed_md).then(
             prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         cast_outs = [roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints]
         prep_btn.click(run_prepare, [project, chap_df, prep_cbg], [prep_status, gen_prep, go]).then(
@@ -3026,6 +3089,7 @@ def build_ui() -> gr.Blocks:
         save_seg_btn.click(save_segments, [project, seg_df], [roles_state, char_dd, target_dd, status2])
         save_seg_btn.click(show_lines, [project, char_dd], lines_df)
         emo_cb.change(remake_note, REMAKE_IN, remake_md); emo_base.release(remake_note, REMAKE_IN, remake_md)
+        hg_emo.change(save_higgs, [project, hg_emo, hg_share], status1); hg_share.release(save_higgs, [project, hg_emo, hg_share], status1)
         lex_filter.change(lex_filtered, [project, lex_filter], [lex_df, status3])
         origins_btn.click(lex_origins, project, [lex_df, term_dd, status3]).then(lex_snapshot, project, lex_snap)
         lex_btn.click(run_lexicon, [project, seed_dd, lang_tb, detect_cb, title, author], [lex_df, status3]).then(
@@ -3088,7 +3152,7 @@ def build_ui() -> gr.Blocks:
         qs_apply.click(queue_reschedule, [q_pick, qs_when, qs_win, qs_w1, qs_w2], QMSG)
         qs_asap.click(queue_asap, q_pick, QMSG)
         open_outputs = [project, chap_df, title, author, cover, status1, roles_state, seg_df, status2, char_dd, target_dd, lines_df, hints,
-                        mode, single_dd, single_speed, single_group, *GEN_OUTS]
+                        mode, single_dd, single_speed, single_group, *GEN_OUTS, *HG_OUTS]
         q_open.click(queue_open, q_pick, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         ui.load(queue_refresh, q_pick, QOUT)          # reconnect: show the queue as it is right now
         ui.load(reconnect_on_load, project, open_outputs).then(prep_state, project, prep_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)              # and open the book that is being made
@@ -3135,7 +3199,7 @@ def build_ui() -> gr.Blocks:
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
                     [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover, a_files])
         a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover, a_files]).then(
-            gen_settings, project, GEN_OUTS).then(
+            gen_settings, project, GEN_OUTS).then(higgs_settings, project, HG_OUTS).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
         a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover, a_files])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
@@ -3151,11 +3215,13 @@ def build_ui() -> gr.Blocks:
         vp_del_btn.click(vp_delete, vp_mine, [vp_mine, vp_warm, vp_note])
         sliders = [c_speed, c_steps, c_cfg, c_sway, c_xfade, c_rms, c_seed]
         c_trans.click(clone_transcribe, c_audio, c_text)
-        c_engine.change(lambda e: (gr.update(visible=e == "Chatterbox"), gr.update(visible=e == "F5-TTS")), c_engine, [cb_group, f5_group])
-        c_go.click(clone_generate, [c_audio, c_text, c_test] + sliders + [c_takes, c_engine, c_exag, c_cfgw], [take1, take2, take3, c_seeds, c_status])
+        c_engine.change(lambda e: (gr.update(visible=e == "Chatterbox"), gr.update(visible=e == "F5-TTS"), gr.update(visible=e == "Higgs")), c_engine,
+                        [cb_group, f5_group, hg_group])
+        HG_VOICE = [c_htemp, c_hpace, c_hstyle]
+        c_go.click(clone_generate, [c_audio, c_text, c_test] + sliders + [c_takes, c_engine, c_exag, c_cfgw] + HG_VOICE, [take1, take2, take3, c_seeds, c_status])
         c_reset.click(lambda: [vlib.DEFAULTS[k] for k in CLONE_KEYS], None, sliders)
-        c_save.click(clone_save, [c_name, c_audio, c_text] + sliders + [c_seeds, c_pick, c_notes, c_engine, c_exag, c_cfgw], [lib_dd, c_status])
-        c_load.click(clone_load, lib_dd, [c_audio, c_text, c_name, c_notes] + sliders + [c_exag, c_cfgw, c_status])
+        c_save.click(clone_save, [c_name, c_audio, c_text] + sliders + [c_seeds, c_pick, c_notes, c_engine, c_exag, c_cfgw] + HG_VOICE, [lib_dd, c_status])
+        c_load.click(clone_load, lib_dd, [c_audio, c_text, c_name, c_notes] + sliders + [c_exag, c_cfgw] + HG_VOICE + [c_status])
         c_del.click(clone_delete, lib_dd, [lib_dd, c_status])
         c_roles.click(clone_roles, project, lib_role)
         lib_dd.change(lambda: gr.update(choices=vlib.list_voices()), None, pc_voice)          # a voice just saved or deleted shows up here too
@@ -3165,7 +3231,7 @@ def build_ui() -> gr.Blocks:
         pc_timer.tick(pacing_status, pc_voice, [pc_status, pc_tbl])
         c_assign.click(clone_assign, [project, lib_dd, lib_role, lib_engine], c_status).then(
             load_parsed, project, cast_outs).then(voice_settings, project, [mode, single_dd, single_speed, single_group])
-        c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_qw, c_status])
+        c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_qw, cmp_hg, c_status])
     return ui
 
 

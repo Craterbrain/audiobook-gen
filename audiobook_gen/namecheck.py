@@ -27,6 +27,7 @@ import soundfile as sf
 GOOD = 0.70
 SEEDS = (101, 202, 303, 404, 505, 606)
 KINDS = ("name", "place", "demonym", "foreign", "dialect")
+CHECKED_ENGINES = ("chatterbox", "higgs")        # engines whose clips are listened to, retaken with other seeds and, where it helps, respelled
 BANDS = ((0.3, 1), (0.4, 2), (0.5, 3), (0.6, 4), (0.7, 5))     # (score, how many takes under it make a respelling due)
 DUR_RANGE = (0.70, 1.30)   # a new take must last about as long as the one it replaces...
 RMS_DB = 4.0               # ...and be about as loud, so a take with a runaway delivery (shouting, rushing, a drawl) is never swapped in
@@ -62,10 +63,26 @@ def pattern(spoken: str) -> re.Pattern:
     return re.compile(rf"(?<![{LETTER}])({body})(?:['’]s)?(?![{LETTER}])", re.I)
 
 
-def spoken_form(entry: dict, work: Path, mode: str = "verified") -> str:
+_MODES: dict = {}
+
+
+def _mode_for(work: Path) -> str:
+    """The lexicon mode of the engine whose clips are checked: Higgs books use "checked", the rest "verified" (Chatterbox)."""
+    f = Path(work) / "clips_meta.json"
+    try:
+        stamp = (f.stat().st_mtime_ns, f.stat().st_size)
+    except OSError:
+        return "verified"
+    if _MODES.get(str(f), (None,))[0] != stamp:
+        engines = {i.get("engine") for i in json.loads(f.read_text()).values()}
+        _MODES[str(f)] = (stamp, "checked" if "higgs" in engines and "chatterbox" not in engines else "verified")
+    return _MODES[str(f)][1]
+
+
+def spoken_form(entry: dict, work: Path, mode: str | None = None) -> str:
     """How the book's engine is given this name: the respelling if one is in use, else the name itself."""
     from .lexicon import load_preprocessor
-    pre = load_preprocessor(work, mode)
+    pre = load_preprocessor(work, mode or _mode_for(work))
     hit = pre.map.get(pre._key(entry["term"]))
     return hit[1] if hit else entry["term"]
 
@@ -189,7 +206,7 @@ def pass_once(work: Path, cfg: dict, progress=print, good: float = GOOD, seeds: 
     adopted = set()                                        # names given a new spelling in this pass: their clips wait for the next round
     todo = []
     for f, info in meta.items():
-        if info.get("engine") != "chatterbox" or not (work / "clips" / f).exists():
+        if info.get("engine") not in CHECKED_ENGINES or not (work / "clips" / f).exists():
             continue
         here = [(e, rx) for e, rx in pats if rx.search(info["text"])]
         if here:
@@ -239,7 +256,7 @@ def pass_once(work: Path, cfg: dict, progress=print, good: float = GOOD, seeds: 
         best, best_min = scores, min(scores.values())
         if best_min < good and info.get("key") not in chosen:
             stop = check_due(takes)
-            engine = engine or get_engine("chatterbox", cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
+            engine = engine or get_engine(info["engine"], cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
             orig_len = (qc.measure(path) or {}).get("seconds") or 0
             orig_db = _level(path)
             for seed in ([] if stop else seeds):
@@ -352,7 +369,8 @@ def test_hints(work: Path, cfg: dict, progress=print) -> dict:
             continue
         t = ipa_of.get(e["term"])
         rx = pattern(spoken_form(e, work))
-        voice = next((i["voice"] for i in meta.values() if i.get("engine") == "chatterbox" and rx.search(i["text"])), None)
+        found = next(((i["voice"], i["engine"]) for i in meta.values() if i.get("engine") in CHECKED_ENGINES and rx.search(i["text"])), None)
+        voice, ename = found or (None, None)
         if t is None or voice is None:
             progress(f"[names] {e['term']}: suggestion(s) {', '.join(todo)} kept for later ({'no IPA to judge by' if t is None else 'no clip says it'})")
             continue
@@ -364,7 +382,7 @@ def test_hints(work: Path, cfg: dict, progress=print) -> dict:
         if not todo:
             continue
         note(f"testing your suggestion for {e['term']}")
-        engine = get_engine("chatterbox", cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
+        engine = get_engine(ename, cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
         base = respell_check.check([(current.lower(), current, t["ipa"])], voice, engine, progress=lambda *_: None, seed=1)[0]
         rows = respell_check.check([(h.lower(), h[:1].upper() + h[1:], t["ipa"]) for h in todo], voice, engine, progress=lambda *_: None, seed=1)
         best = max(rows, key=lambda r: r["score"])
@@ -387,10 +405,11 @@ def try_respell(work: Path, cfg: dict, entry: dict, progress=print, batches: tup
     target = float(target if target is not None else cfg.get("name_respell_target", TARGET))
     meta = json.loads((work / "clips_meta.json").read_text())
     rx = pattern(spoken_form(entry, work))
-    voice = next((i["voice"] for i in meta.values() if i.get("engine") == "chatterbox" and rx.search(i["text"])), None)
-    if voice is None:
+    found = next(((i["voice"], i["engine"]) for i in meta.values() if i.get("engine") in CHECKED_ENGINES and rx.search(i["text"])), None)
+    if found is None:
         return {}
-    engine = get_engine("chatterbox", cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
+    voice, ename = found
+    engine = get_engine(ename, cfg.get("device", "auto"), 0, cfg.get("f5_precision", "float16"))
     plain_key = entry["term"].lower()
     suggested = [h for h in hints(entry["term"], work) if h.lower() != plain_key]                  # yours, spoken in the first round
     cands = [c for c in respell_search.candidates(entry["ipa"], entry["term"], sum(batches)) if c != plain_key and c not in {h.lower() for h in suggested}]

@@ -14,6 +14,7 @@ LIB = ROOT / "voices" / "library"
 MAX_REF_SECONDS = 12  # F5-TTS clips longer references anyway
 
 EXTRA = ("exaggeration", "cfg_weight")   # Chatterbox settings; stored only when a voice was tuned in Chatterbox
+HIGGS_DEFAULTS = dict(temperature=0.7, top_k=50, top_p=0.95, tag="<|prosody:expressive_high|>", pace=1.08)   # Higgs: temperature 0.7 is warmer than the 1.0 it ships with
 DEFAULTS = dict(speed=1.0, nfe_step=32, cfg_strength=2.0, sway_sampling_coef=-1.0,
                 cross_fade_duration=0.15, target_rms=0.1, seed=1234)
 
@@ -34,7 +35,7 @@ def load_voice(name: str) -> dict:
             **{**DEFAULTS, **meta.get("params", {})}}
 
 
-def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: str = "") -> str:
+def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: str = "", higgs: dict | None = None) -> str:
     """Store the clip (mono 24 kHz, trimmed to 12 s) with its transcript and settings."""
     import numpy as np
     import soundfile as sf
@@ -58,6 +59,7 @@ def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: s
     (d / "voice.json").write_text(json.dumps({
         "name": name, "ref_text": ref_text.strip(), "notes": notes,
         "params": {k: params[k] for k in (*DEFAULTS, *EXTRA) if k in params},
+        **({"higgs": {k: v for k, v in higgs.items() if k in HIGGS_DEFAULTS}} if higgs else {}),
         "saved": time.strftime("%Y-%m-%d %H:%M")}, indent=2, ensure_ascii=False))
     return name
 
@@ -72,4 +74,9 @@ def resolve(voice: dict) -> dict:
     if not name:
         return voice
     base = load_voice(name)
-    return {**base, **{k: v for k, v in voice.items() if k != "library"}}
+    out = {**base, **{k: v for k, v in voice.items() if k != "library"}}
+    if out.get("engine") == "higgs":          # its own settings: the defaults, then what was saved with the voice, then what the book says
+        saved = json.loads((LIB / name / "voice.json").read_text()).get("higgs", {})
+        out = {**HIGGS_DEFAULTS, **saved, **{k: v for k, v in voice.items() if k not in ("library", "engine")}, "engine": "higgs",
+               **{k: base[k] for k in ("ref_audio", "ref_text", "seed") if k in base and k not in voice}}
+    return out

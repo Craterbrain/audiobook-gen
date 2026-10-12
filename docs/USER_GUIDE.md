@@ -40,7 +40,7 @@ Upload your book. Supported: `.epub`, `.txt`, `.md`, `.html`, `.docx`, `.pdf` (n
 * Each character gets an engine and voice, a pace slider and a **▶ Hear** button. Changes save as you make them.
 * **Find genders** asks the small language model; correct any row by hand. Genders pick sensible default voices.
 * You can move lines between characters, or merge two characters.
-* Voices: **Kokoro** presets (fast), or your own **cloned** voices from the Voice lab (Chatterbox is the most expressive, F5 and Qwen3 also work).
+* Voices: **Kokoro** presets (fast), or your own **cloned** voices from the Voice lab. **Higgs** is the newest clone engine: it reads names correctly from plain text, so it needs little pronunciation work. Chatterbox is expressive, F5 and Qwen3 also work.
 
 ### ③ Names
 
@@ -127,6 +127,12 @@ Music files stay on your machine and are not part of the project's Git repositor
 
 Cloning quality depends on the clip's cleanliness and the engine, not on a higher bitrate.
 
+### Higgs (clone engine)
+* **Install:** `./setup_engines.sh higgs` (9.3 GB, once). The engine line under *Details* on the Make tab says whether it is ready.
+* **Make a Higgs voice:** Voice lab, Engine **Higgs**. Under *Tuning*: **style** (Lively adds expressive delivery to every line), **temperature** (0.7 recommended) and **pace** (1.08 = a little faster than it is made; 1.0 = as made). Save the voice as usual, then choose *(Higgs)* in the voice menus.
+* **Emotion tags:** on the Make tab, tick *Emotion tags (Higgs)* and choose how much of the book gets one. A language model reads each passage and tags the ones with the strongest feeling (awe, sadness, determination and so on). The first run spends a few minutes reading the whole book. Lower the slider for a calmer reading.
+* **One thing at a time on the GPU:** Higgs takes about 9.4 GB, so it cannot be loaded together with the other engines; the app unloads the other side when you switch.
+
 ## 6. Ask Claude
 
 ![Ask Claude tab](images/guide/ask-claude.png)
@@ -137,7 +143,7 @@ It can edit voices and pacing, the pronunciation list, and the music plan. It ca
 
 ## 7. The finished audiobook
 
-The file is in `out/` as a chaptered `.m4b`. By default the audio is **Opus at 64 kb/s**, normalised to **−16 LUFS** (comfortably loud on a phone). Opus plays in Android players, VLC and Audiobookshelf. If you use Apple Books, set `audio_codec: aac` in `config.yaml`. If you ticked *send to my phone*, the queue shares the file through KDE Connect once the book is done, retrying while the phone is away.
+The file is in `out/` as a chaptered `.m4b`. By default the audio is **Opus at 64 kb/s**, normalised to **−14.6 LUFS** (loud and clear on a phone; set `loudness_lufs: -16` in `config.yaml` for a quieter, more natural dynamic range). Opus plays in Android players, VLC and Audiobookshelf. If you use Apple Books, set `audio_codec: aac` in `config.yaml`. If you ticked *send to my phone*, the queue shares the file through KDE Connect once the book is done, retrying while the phone is away.
 
 ## 8. Sharing the GPU
 

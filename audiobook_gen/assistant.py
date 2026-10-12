@@ -19,7 +19,7 @@ import yaml
 EDITABLE = ("config.yaml", "lexicon.json", "music.json")
 ACTIONS = ("rebuild", "delete-unused-clips", "origin-check", "hold", "resume")
 GUIDE = Path(__file__).with_name("assistant_guide.md")
-ENGINES = {"kokoro", "f5", "qwen3", "chatterbox"}
+ENGINES = {"kokoro", "f5", "qwen3", "chatterbox", "higgs"}
 LEX_MODES = {"verified", "respell", "rawipa", "plain", "ipa"}
 KOKORO_ID = re.compile(r"^[abefhijpz][fm]_\w+$|^pack:\w+|^\w+$")
 
@@ -56,7 +56,7 @@ def _reference(project: Path, scratch: Path) -> None:
     kokoro = "\n".join(f"- {vid}: {name}, {desc}" for vid, (name, desc) in casting.KOKORO.items())
     clones = "\n".join(f"- {n}" for n in vlib.list_voices()) or "- (none saved)"
     (ref / "voices.md").write_text(f"# Kokoro preset voices (engine: kokoro, voice: <id>)\n{kokoro}\n\n"
-                                   f"# Saved clone voices (library: <name>, with engine chatterbox, f5 or qwen3)\n{clones}\n")
+                                   f"# Saved clone voices (library: <name>, with engine chatterbox, f5, qwen3 or higgs)\n{clones}\n")
 
 
 COVER_FILES = ("cover.jpg", "cover.json")

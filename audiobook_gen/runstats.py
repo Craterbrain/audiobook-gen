@@ -31,6 +31,15 @@ def record(run_id: str, engine: str, workers: int, chars: int, seconds: float) -
         pass
 
 
+PRIOR_CPS = {"higgs": 16.0}     # characters per second of a whole book, for an engine with no finished book yet (Higgs: measured 20.4 for speech alone, less with the checks)
+
+
+def rate(engine: str, avg: dict | None = None) -> float | None:
+    """Characters per second to plan with: the measured average if there is one, else the prior, else None."""
+    avg = averages() if avg is None else avg
+    return avg[engine]["cps"] if engine in avg else PRIOR_CPS.get(engine)
+
+
 def fresh_chars(work_name: str, since: float) -> dict[str, int]:
     """{engine: characters made fresh} by the speech runs of this book since `since` (epoch seconds). A rebuild that reuses clips made earlier
     has few or none, so it never passes cached clips off as speed."""

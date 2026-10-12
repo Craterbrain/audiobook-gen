@@ -174,6 +174,125 @@ def test_parallel_synthesis_caches_and_keeps_every_clip(tmp_path, monkeypatch):
     assert not seen                                        # second run: everything cached, no synthesis
 
 
+def _higgs_library(tmp_path, monkeypatch):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import voices
+    monkeypatch.setattr(voices, "LIB", tmp_path / "lib")
+    sf.write(tmp_path / "ref.wav", (np.sin(np.arange(24000 * 3) * 0.05) * 0.2).astype(np.float32), 24000)
+    voices.save_voice("Walt", str(tmp_path / "ref.wav"), "Hello there.", {"seed": 7})
+    return voices
+
+
+def test_a_higgs_voice_has_its_own_settings_layered_defaults_then_saved_then_the_book(tmp_path, monkeypatch):
+    from audiobook_gen import casting
+    voices = _higgs_library(tmp_path, monkeypatch)
+    v = voices.resolve({"engine": "higgs", "library": "Walt"})
+    assert v["engine"] == "higgs" and v["temperature"] == 0.7 and v["pace"] == 1.08 and v["tag"] == "<|prosody:expressive_high|>" and v["seed"] == 7
+    assert v["ref_text"] == "Hello there." and v["ref_audio"].endswith("ref.wav")
+    voices.save_voice("Walt", str(tmp_path / "ref.wav"), "Hello there.", {"seed": 7}, higgs={"temperature": 0.6, "pace": 1.0, "tag": "", "junk": 1})
+    v = voices.resolve({"engine": "higgs", "library": "Walt"})
+    assert v["temperature"] == 0.6 and v["pace"] == 1.0 and v["tag"] == "" and "junk" not in v          # what was saved with the voice
+    assert voices.resolve({"engine": "higgs", "library": "Walt", "temperature": 0.9})["temperature"] == 0.9  # the book wins
+    assert voices.resolve({"engine": "f5", "library": "Walt"})["engine"] == "f5"                             # other engines are untouched
+    assert ("@higgs", "Higgs") in casting.CLONE_ENGINES
+    assert casting.voice_of("clone:Walt@higgs", 1.0) == {"engine": "higgs", "library": "Walt"}
+    assert casting.voice_of("clone:Walt@higgs", 1.1)["pace"] == 1.1                                         # the slider scales the voice's pace
+
+
+def test_higgs_stretch_keeps_pitch_and_changes_length():
+    import numpy as np
+    from audiobook_gen.tts.higgs_engine import stretch
+    sr = 24000
+    a = (np.sin(2 * np.pi * 200 * np.arange(sr) / sr) * 0.3).astype(np.float32)
+    b = stretch(a, sr, 1.25)
+    assert abs(len(b) / sr - 0.8) < 0.05
+    f = np.fft.rfftfreq(len(b), 1 / sr)[np.argmax(np.abs(np.fft.rfft(b)))]
+    assert abs(f - 200) < 10                                                          # same pitch
+
+
+def test_higgs_clips_carry_the_style_tag_and_the_chosen_emotion_tags(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    from audiobook_gen import synth
+    seen = []
+
+    class Fake:
+        sample_rate = 24000
+        def synth(self, text, voice):
+            seen.append((text, voice.get("tag")))
+            return np.full(2400, 0.1, np.float32)
+
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Fake())
+    segs = [{"id": f"001-{i:05d}", "chapter": 1, "speaker": "Narrator", "kind": "narration", "text": f"Sentence number {i}.", "para_start": True} for i in range(4)]
+    (tmp_path / "segments.json").write_text(json.dumps(segs))
+    (tmp_path / "higgs_tags.json").write_text(json.dumps({"001-00001:0": "<|emotion:awe|>", "001-00003:0": "<|emotion:sadness|>"}))
+    voice = {"engine": "higgs", "ref_audio": "r.wav", "ref_text": "x", "tag": "<|prosody:expressive_high|>", "pace": 1.08}
+    cfg = {"voices": {"Narrator": voice}, "default_voice": voice}
+    list(synth.synthesize_iter(tmp_path, cfg))
+    tags = sorted(t for _, t in seen)
+    assert tags == sorted(["<|prosody:expressive_high|>"] * 2 + ["<|prosody:expressive_high|><|emotion:awe|>", "<|prosody:expressive_high|><|emotion:sadness|>"])
+    assert synth.lexicon_mode("higgs", cfg) == "checked"                     # plain text: only typed or name-check respellings reach it
+
+
+def test_the_name_check_listens_to_higgs_clips_too(tmp_path):
+    import json
+    from audiobook_gen import namecheck
+    assert "higgs" in namecheck.CHECKED_ENGINES
+    (tmp_path / "clips_meta.json").write_text(json.dumps({"a.wav": {"engine": "higgs", "text": "x", "voice": {}}}))
+    assert namecheck._mode_for(tmp_path) == "checked"
+    (tmp_path / "clips_meta.json").write_text(json.dumps({"a.wav": {"engine": "chatterbox", "text": "x", "voice": {}}}))
+    assert namecheck._mode_for(tmp_path) == "verified"
+
+
+def test_the_queue_and_ntfy_name_the_voices_and_estimate_higgs(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import jobqueue as jq
+    work = tmp_path / "w"; work.mkdir()
+    (work / "segments.json").write_text(json.dumps([{"id": "1", "chapter": 1, "speaker": "Narrator", "text": "x" * 1000},
+                                                    {"id": "2", "chapter": 1, "speaker": "Bob", "text": "y" * 100}]))
+    (tmp_path / "c.yaml").write_text("voices: {Narrator: {engine: higgs}, Bob: {engine: kokoro, voice: bm_george}}\n")
+    job = {"id": "j", "work": str(work), "config": str(tmp_path / "c.yaml"), "chapters": []}
+    assert jq.voices_text(job) == "Higgs + Kokoro"
+    from audiobook_gen import runstats
+    assert runstats.rate("higgs", {}) == runstats.PRIOR_CPS["higgs"] and runstats.rate("kokoro", {}) is None
+
+
+def test_voice_lab_makes_higgs_takes_with_its_own_settings_and_saves_them(tmp_path, monkeypatch):
+    import json
+    import numpy as np, soundfile as sf
+    from audiobook_gen import gui, voices
+    monkeypatch.setattr(voices, "LIB", tmp_path / "lib"); monkeypatch.setattr(gui.vlib, "LIB", tmp_path / "lib")
+    sf.write(tmp_path / "ref.wav", (np.sin(np.arange(24000 * 3) * 0.05) * 0.2).astype(np.float32), 24000)
+    seen = []
+
+    class Fake:
+        sample_rate = 24000
+        def synth(self, text, voice):
+            seen.append(voice)
+            return np.full(2400, 0.1, np.float32)
+
+    monkeypatch.setattr(gui, "_engine", lambda *a, **k: Fake()); monkeypatch.setattr(gui, "need_gpu", lambda: None)
+    out = gui.clone_generate(str(tmp_path / "ref.wav"), "", "Hello.", 1.0, 32, 2.0, -1.0, 0.15, 0.1, 5, 2, "Higgs", 0.5, 0.4, 0.6, 1.0, "Plain (no style tag)")
+    assert [v["seed"] for v in seen] == [5, 6] and seen[0]["temperature"] == 0.6 and seen[0]["pace"] == 1.0 and seen[0]["tag"] == ""
+    assert out[0] and out[1] and out[2] is None
+    gui.clone_save("V", str(tmp_path / "ref.wav"), "Hello there.", 1.0, 32, 2.0, -1.0, 0.15, 0.1, 5, [5, 6], "Take 2", "", "Higgs", 0.5, 0.4, 0.6, 1.0, "Calm (expressive_low)")
+    saved = json.loads((tmp_path / "lib" / "V" / "voice.json").read_text())
+    assert saved["higgs"] == {"temperature": 0.6, "pace": 1.0, "tag": "<|prosody:expressive_low|>"} and saved["params"]["seed"] == 6
+    loaded = gui.clone_load("V")
+    assert loaded[-4:-1] == (0.6, 1.0, "Calm (expressive_low)")
+
+
+def test_higgs_settings_are_saved_in_the_project_config(tmp_path, monkeypatch):
+    import yaml
+    from audiobook_gen import gui
+    p = tmp_path / "proj"; p.mkdir()
+    (p / "config.yaml").write_text("voices: {Narrator: {engine: kokoro, voice: bm_george}}\n")
+    assert gui.higgs_settings(str(p)) == (False, 0.18)
+    gui.save_higgs(str(p), True, 0.3)
+    assert gui.higgs_settings(str(p)) == (True, 0.3)
+    assert yaml.safe_load((p / "config.yaml").read_text())["higgs_emotion_share"] == 0.3
+
+
 def test_gender_aware_voices():
     from audiobook_gen import casting
     from audiobook_gen.synth import resolve_voice
@@ -291,7 +410,7 @@ def test_library_voice_keeps_chatterbox_settings(tmp_path, monkeypatch):
 def test_interface_builds_with_every_engine_option():
     from audiobook_gen import gui
     assert gui.build_ui() is not None
-    assert set(gui.ENGINE_LABELS.values()) == {"f5", "chatterbox", "qwen3"}
+    assert set(gui.ENGINE_LABELS.values()) == {"f5", "chatterbox", "qwen3", "higgs"}
     assert set(gui.LEX_MODES.values()) == {"respell", "plain"}
 
 
@@ -536,7 +655,7 @@ def test_gui_reconnects_to_a_running_job(tmp_path, monkeypatch):
     assert r["title"] == "Running book" and r["pct"] == 25 and r["since_clip"] < 60
     assert "Making “Running book”" in gui.queue_now() and "25%" in gui.queue_now()
     out = gui.reconnect_on_load("")                          # nothing open: it opens the running book
-    assert len(out) == 29 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
+    assert len(out) == 31 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
     assert out[1]["Include"].all()                           # every chapter ticked, as it was queued
     assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(str(p)))     # a book is already open: leave it alone
     jq.update(job["id"], status="done")

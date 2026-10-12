@@ -848,6 +848,7 @@ class Preprocessor:
     mode="rawipa":  replace the word with its bare IPA, for text models that may read it (Qwen3, Chatterbox).
     mode="plain":   no substitutions at all.
     mode="typed":   plain spelling, except respellings you typed in the lexicon (Qwen3-TTS).
+    mode="checked": as "typed", plus respellings the name check found and scored (Higgs; not the Bible respellings tuned for Chatterbox).
     mode="verified": plain spelling, except names whose respelling in data/bible_respell.json was tested to sound
                     better (Chatterbox) and respellings the name check (namecheck.py) scored better than the plain spelling;
                     respellings you typed into the project lexicon win over those.
@@ -856,11 +857,11 @@ class Preprocessor:
     def __init__(self, lexicon: list[dict], mode: str = "respell"):
         field = "ipa" if mode in ("ipa", "rawipa") else "respell"
         self.map = {}
-        if mode in ("verified", "typed"):
+        if mode in ("verified", "typed", "checked"):
             lexicon = ([{"term": k, "respell": v["respell"]} for k, v in verified_respellings().items()] if mode == "verified" else []) + \
                       [e for e in lexicon if e.get("respell") and (e.get("respell_src") == "user" or
                                                                    (not e.get("respell_src") and e.get("source") == "user") or
-                                                                   (mode == "verified" and e.get("respell_src") == "checked"))]   # typed by you (or, for Chatterbox, found and scored by the name check), not auto-made from IPA
+                                                                   (mode in ("verified", "checked") and e.get("respell_src") == "checked"))]   # typed by you (or, for Chatterbox and Higgs, found and scored by the name check), not auto-made from IPA
         for e in ([] if mode == "plain" else lexicon):
             val = (e.get(field) or "").strip()
             if mode == "respell":

@@ -31,14 +31,15 @@ def voice_choices() -> list[tuple[str, str]]:
     return clones + packs + kokoro
 
 
-CLONE_ENGINES = [("", "F5"), ("@qwen3", "Qwen3"), ("@chatterbox", "Chatterbox")]   # every clone can be voiced by each
+CLONE_ENGINES = [("", "F5"), ("@qwen3", "Qwen3"), ("@chatterbox", "Chatterbox"), ("@higgs", "Higgs")]   # every clone can be voiced by each
 
 
 def _engine_ready(suffix: str) -> bool:
     if not suffix:
         return True
     from .tts import remote_engine
-    return {"@qwen3": remote_engine.Qwen3Engine, "@chatterbox": remote_engine.ChatterboxEngine}[suffix].available()
+    from .tts.higgs_engine import HiggsEngine
+    return {"@qwen3": remote_engine.Qwen3Engine, "@chatterbox": remote_engine.ChatterboxEngine, "@higgs": HiggsEngine}[suffix].available()
 
 
 def key_of(voice: dict) -> str | None:
@@ -55,6 +56,10 @@ def voice_of(key: str, speed: float = 1.0) -> dict:
     if kind == "clone":
         name, _, engine = name.partition("@")
         v = {"engine": engine or "f5", "library": name}
+        if engine == "higgs":                 # Higgs has its own pace (a stretch after the clip is made): the slider scales it, 1.0 = as saved
+            if abs(float(speed) - 1.0) > 1e-6:
+                v["pace"] = round(float(vlib.resolve({"engine": "higgs", "library": name})["pace"]) * float(speed), 3)
+            return v
         if abs(float(speed) - vlib.load_voice(name).get("speed", 1.0)) > 1e-6:
             v["speed"] = float(speed)
         return v

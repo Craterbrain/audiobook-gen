@@ -79,8 +79,10 @@ def lexicon_mode(ename: str, cfg: dict) -> str:
         return "ipa"
     if ename == "chatterbox":
         return "verified"
-    if ename in ("qwen3", "higgs"):         # Higgs reads plain text: only respellings you typed yourself reach it
+    if ename == "qwen3":
         return "typed"
+    if ename == "higgs":                    # plain text: only respellings you typed, or the name check found and scored, reach it
+        return "checked"
     return cfg.get("text_lexicon", "respell")
 
 

@@ -843,11 +843,12 @@ class Runner:
         cur = next((j for j in load() if j["id"] == job["id"]), job)
         if ok:
             qc = f" ({cur['qc']})" if cur.get("qc") and "fine" not in cur["qc"] else ""
+            voices = f" ({voices_text(cur)})" if voices_text(cur) else ""
             left = [j for j in load() if j["status"] in ACTIVE]
             if left:
-                notify(f"Finished “{job['title']}”{qc}. {len(left)} more in the queue.", "Book finished", tags=["white_check_mark"])
+                notify(f"Finished “{job['title']}”{voices}{qc}. {len(left)} more in the queue.", "Book finished", tags=["white_check_mark"])
             else:
-                notify(f"Finished “{job['title']}”{qc}. The queue is empty.", "Queue finished", tags=["tada"])
+                notify(f"Finished “{job['title']}”{voices}{qc}. The queue is empty.", "Queue finished", tags=["tada"])
             return
         notify(f"“{job['title']}” failed: {cur.get('note', '')}", "Book failed", priority="high", tags=["x"])
         if streak >= FAIL_HALT:
@@ -988,7 +989,7 @@ class Runner:
         if cfg.get("name_check", True) is False:
             return False
         meta = json.loads((Path(job["work"]) / "clips_meta.json").read_text())
-        return any(i.get("engine") == "chatterbox" for i in meta.values()) and (Path(job["work"]) / "lexicon.json").exists()
+        return any(i.get("engine") in ("chatterbox", "higgs") for i in meta.values()) and (Path(job["work"]) / "lexicon.json").exists()
 
     def run_job(self, job: dict) -> None:
         fresh = next((j for j in load() if j["id"] == job["id"]), None)
@@ -1278,7 +1279,9 @@ def answer(text: str, now: datetime | None = None) -> str | None:
         hold = f"\n{hold}" if hold else ""
         if r:
             end = est["ends"].get(r["id"])
-            return (f"Making “{r['title']}”: {r['pct']}% ({r['done']:,} of {r['total']:,} clips)" if r["total"] else f"Making “{r['title']}”: {r['note'] or 'starting'}") \
+            who = next((voices_text(j) for j in jobs if j["id"] == r["id"]), "")
+            who = f" with {who}" if who else ""
+            return (f"Making “{r['title']}”{who}: {r['pct']}% ({r['done']:,} of {r['total']:,} clips)" if r["total"] else f"Making “{r['title']}”{who}: {r['note'] or 'starting'}") \
                 + (f"\nExpected done {_when(end)}" if end else "") + (f"\nStep: {r['note']}" if r["note"] and r["total"] else "") + (f"\n⚠ {why}" if why else "") + hold
         if why:
             return f"The queue paused itself: {why}" + hold
@@ -1293,7 +1296,7 @@ def answer(text: str, now: datetime | None = None) -> str | None:
         for i, j in enumerate([j for j in jobs if j["status"] in ACTIVE or j["status"] == "held"], 1):
             tail = (f"{j.get('progress', '')} · done {_when(est['ends'].get(j['id']))}" if j["status"] == "running" else
                     f"done {_when(est['ends'][j['id']])}{'~' if j['title'] in est['rough'] else ''}" if j["id"] in est["ends"] else "saved for later" if j["status"] == "held" else "no estimate yet")
-            lines.append(f"{i}. {j['title'][:38]} — {j['status']}, {tail}")
+            lines.append(f"{i}. {j['title'][:38]} — {j['status']}, {tail}" + (f" [{voices_text(j)}]" if voices_text(j) else ""))
         if not lines:
             return "The queue is empty."
         return "\n".join(lines) + (f"\nAll finished about {_when(est['all'])}." + (" (~ = rough: a voice engine has no measured speed yet)" if est["rough"] else "") if est["all"] else "")
@@ -1459,6 +1462,18 @@ def now_running() -> dict | None:
     return None
 
 
+ENGINE_LABELS = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "qwen3": "Qwen3-TTS", "higgs": "Higgs"}
+
+
+def voices_text(job: dict) -> str:
+    """The voice engines a book is made with, most characters first: "Higgs" or "Higgs + Kokoro". Empty when it cannot be told."""
+    try:
+        per = book_chars(job)
+    except Exception:
+        return ""
+    return " + ".join(ENGINE_LABELS.get(e, e) for e, _ in sorted(per.items(), key=lambda kv: -kv[1]))
+
+
 _CHARS: dict = {}
 
 
@@ -1484,7 +1499,7 @@ def book_chars(job: dict) -> dict[str, int]:
 def estimate_queue(now: datetime | None = None) -> dict:
     """When each waiting or running book should be finished, from the measured speed of each engine (whole books, start to file),
     in queue order, through each book's start time and daily window. {"ends": {job id: datetime}, "all": datetime | None, "unknown": [titles]}."""
-    from .runstats import averages
+    from .runstats import PRIOR_CPS, averages
     now = now or datetime.now()
     avg, t, ends, unknown, rough = averages(), now, {}, [], []
     for j in load():
@@ -1494,10 +1509,10 @@ def estimate_queue(now: datetime | None = None) -> dict:
             per = book_chars(j)
             if not per or not avg:
                 raise KeyError
-            slowest = min(a["cps"] for a in avg.values())                 # an engine never measured is assumed as slow as the slowest known
+            slowest = min(a["cps"] for a in avg.values())                 # an engine never measured is assumed as slow as the slowest known (or its prior)
             if any(e not in avg for e in per):
                 rough.append(j["title"])
-            secs = sum(n / avg[e]["cps"] if e in avg else n / slowest for e, n in per.items())
+            secs = sum(n / (avg[e]["cps"] if e in avg else PRIOR_CPS.get(e, slowest)) for e, n in per.items())
         except Exception:
             unknown.append(j["title"])
             continue
