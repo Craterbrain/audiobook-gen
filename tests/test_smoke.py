@@ -2811,3 +2811,26 @@ def test_unused_clips_are_the_ones_outside_the_plan_and_corrections_keep_their_o
     assert library.unused_clips(book) == []                                      # so it says nothing about chapter 2's clips
     (book / "clips_meta.json").unlink()                                          # no plan to go by: nothing is guessed
     assert library.unused_clips(book) == []
+
+
+def test_chosen_sections_get_a_bridge_of_their_own_and_only_those(tmp_path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+    from audiobook_gen import music
+    sr = 8000
+    for name, f in (("a", 0.03), ("b", 0.09)):
+        sf.write(tmp_path / f"{name}.wav", (np.sin(np.arange(60 * sr) * f) * 0.3).astype(np.float32), sr)
+    monkeypatch.setattr(music, "LIB", tmp_path); monkeypatch.setattr(music, "INDEX", tmp_path / "index.json")
+    music._save([{"id": t, "file": f"{t}.wav", "seconds": 60.0, "credit": f"credit {t}", "title": t} for t in ("a", "b")])
+    plan = music.load_plan(tmp_path)
+    plan.update(enabled=True, interval_min=1, bridges={"3": {"track": "a", "seconds": 20.0}, "5": {"track": "b", "seconds": 40.0, "start": 5.0}})
+    plan["bridge"].update(track="", fade_in=0.1, fade_out=0.1)
+    guess = [(i, f"c{i}", 600.0) for i in range(1, 7)]
+    assert music.bridge_before(plan, guess) == {3, 5}                       # not every minute: only the sections that were named
+    assert music.bridge_spec(plan, 5)["track"] == "b" and music.bridge_spec(plan, 4)["track"] == ""
+    speech = np.ones(10 * sr, np.float32) * 0.2
+    n3 = len(music.wrap(speech, 3, [1, 2, 3, 4, 5, 6], plan, guess, sr)) / sr
+    n4 = len(music.wrap(speech, 4, [1, 2, 3, 4, 5, 6], plan, guess, sr)) / sr
+    n5 = len(music.wrap(speech, 5, [1, 2, 3, 4, 5, 6], plan, guess, sr)) / sr
+    assert abs(n4 - 10) < 0.01 and abs(n3 - 30) < 0.01 and abs(n5 - 50) < 0.01      # 20 s and 40 s of music before the speech; none before section 4
+    assert music.credits(plan) == ["credit a", "credit b"]

@@ -48,6 +48,9 @@ DEFAULT_PLAN = {
     "titles": {"speak": True, "pause": 2.8},   # read each section's title aloud, with this pause before and after (see titles.py)
     "interval_min": 25,                      # recommended: one bridge about this many minutes apart, at the nearest section start
     "chapters": {},                          # "<chapter index>": "on" | "off" (a person's choice); missing = follow the recommendation
+    # A bridge of its own for chosen sections: {"<chapter index>": {"track": id, "seconds": 45, "start": 0, ...}}; whatever it names replaces the
+    # shared `bridge` settings for that section. When there are any, only these sections get a bridge (no bridge every `interval_min`).
+    "bridges": {},
 }
 
 
@@ -162,7 +165,8 @@ def recommended(chapters: list[tuple[int, str, float]], interval_min: float = 25
 
 def bridge_before(plan: dict, chapters: list[tuple[int, str, float]]) -> set[int]:
     """The chapter indexes that begin with a bridge: the recommendation, changed by the person's own on/off choices."""
-    rec = set(recommended(chapters, plan.get("interval_min", 25)))
+    own = plan.get("bridges") or {}
+    rec = {int(k) for k in own} if own else set(recommended(chapters, plan.get("interval_min", 25)))
     for k, v in plan.get("chapters", {}).items():
         (rec.add if v == "on" else rec.discard)(int(k))
     first = chapters[0][0] if chapters else None
@@ -210,6 +214,11 @@ def piece(spec: dict, sr: int, rms: float, level_db: float) -> np.ndarray | None
     return (a * min(1.0, 0.7 / peak)).astype(np.float32)
 
 
+def bridge_spec(plan: dict, chapter: int) -> dict:
+    """The bridge settings for this section: the shared ones, with the section's own track and timings laid over them."""
+    return {**plan["bridge"], **((plan.get("bridges") or {}).get(str(chapter)) or {})}
+
+
 def wrap(audio: np.ndarray, chapter: int, chapters: list[int], plan: dict, guess: list[tuple[int, str, float]], sr: int, layered: bool = False) -> np.ndarray:
     """Put this chapter's music around its speech: the intro before the first chapter, a bridge before a chapter chosen for one, the
     ending after the last chapter. `chapters` are the indexes being made now (all of them, or the few a partial run asked for)."""
@@ -219,7 +228,7 @@ def wrap(audio: np.ndarray, chapter: int, chapters: list[int], plan: dict, guess
     if chapter == chapters[0]:
         pre = None if layered else piece(plan["intro"], sr, rms, db)           # a layered opening is its own chapter
     elif chapter in bridge_before(plan, [g for g in guess if g[0] in chapters]):
-        spec = plan["bridge"]
+        spec = bridge_spec(plan, chapter)
         if float(spec.get("title_before", 0)) > 0:
             mixed = bridge_under_title(audio, spec, sr, rms, db)
             if mixed is not None:
@@ -422,8 +431,9 @@ def ending(audio: np.ndarray, plan: dict, sr: int) -> np.ndarray:
 
 def credits(plan: dict) -> list[str]:
     seen, out = set(), []
-    for role in ("intro", "bridge", "outro"):
-        t = track(plan.get(role, {}).get("track", ""))
+    specs = [plan.get(r, {}) for r in ("intro", "bridge")] + [b for _, b in sorted((plan.get("bridges") or {}).items(), key=lambda kv: int(kv[0]))] + [plan.get("outro", {})]
+    for spec in specs:
+        t = track(spec.get("track", ""))
         if t and t["id"] not in seen:
             seen.add(t["id"])
             out.append(t["credit"])
