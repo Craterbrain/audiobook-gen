@@ -49,3 +49,10 @@ books/
 tools/wait_for.py
 *.ogg
 archive/
+
+# music: tracks (any audio format) and the library index changes stay local; the repo carries no music
+music/library/*.oga
+music/library/*.opus
+music/library/*.m4a
+music/library/*.aac
+music/library/*.wma
