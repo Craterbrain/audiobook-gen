@@ -137,7 +137,7 @@ The code is released under the [MIT License](LICENSE). The bundled Bible IPA dic
 - **Cover tab** — pick a picture (upload your own, or search public-domain / CC0 pictures on Wikimedia Commons), choose *picture window*
   (people, on a book-cloth colour) or *full background* (scenery), preview, and press *Use this cover*. `python -m audiobook_gen.covers` does the same from the command line.
 - **Assistant tab** — ask Claude (through your Claude Code login) to set up voices, pacing or pronunciations, or to make a cover. It edits a copy,
-  the only command it may run is the cover tool, you review what it proposes, and nothing changes until you press Apply.
+  the only commands it may run are the cover tool and the book tools (see below), you review what it proposes, and nothing changes until you press Apply.
 
 ## Leaving it alone: the safeguards
 
