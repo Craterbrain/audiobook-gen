@@ -1802,7 +1802,7 @@ def reconnect_on_load(project):
     from . import jobqueue
     run = jobqueue.now_running()
     if project or not run:
-        return (gr.skip(),) * 29
+        return (gr.skip(),) * 31
     j = next(x for x in jobqueue.load() if x["id"] == run["id"])
     return open_everything(j["work"], j["title"], j.get("author", ""), j.get("cover", ""))
 

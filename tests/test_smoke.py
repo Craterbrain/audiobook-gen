@@ -655,7 +655,7 @@ def test_gui_reconnects_to_a_running_job(tmp_path, monkeypatch):
     assert r["title"] == "Running book" and r["pct"] == 25 and r["since_clip"] < 60
     assert "Making “Running book”" in gui.queue_now() and "25%" in gui.queue_now()
     out = gui.reconnect_on_load("")                          # nothing open: it opens the running book
-    assert len(out) == 31 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
+    assert len(gui.reconnect_on_load(str(p))) == len(out) == 31 and out[0] == str(p) and out[2] == "Running book" and out[3] == "An Author"
     assert out[1]["Include"].all()                           # every chapter ticked, as it was queued
     assert all(x == gui.gr.skip() for x in gui.reconnect_on_load(str(p)))     # a book is already open: leave it alone
     jq.update(job["id"], status="done")
