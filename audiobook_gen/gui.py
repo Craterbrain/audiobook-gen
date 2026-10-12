@@ -323,7 +323,7 @@ def set_role_engine(project, role, engine, key, speed, gender, last_clone):
     if not project or not role:
         return gr.skip(), gr.skip(), "", last_clone, ""
     cfg = _cfg(project)
-    taken = {casting.key_of(v) for r, v in (cfg.get("voices") or {}).items() if r != role}
+    taken = [casting.key_of(v) for r, v in (cfg.get("voices") or {}).items() if r != role]
     try:
         new = casting.switch_engine(key, engine, gender, taken, last_clone)
     except ValueError as e:
@@ -331,7 +331,7 @@ def set_role_engine(project, role, engine, key, speed, gender, last_clone):
     cfg.setdefault("voices", {})[role] = casting.voice_of(new, speed)
     _save_cfg(project, cfg)
     last = casting._clone_label(new) if new.startswith("clone:") else last_clone
-    return (gr.update(choices=casting.voices_for(engine, new), value=new), _pace_update(engine),
+    return (gr.update(choices=casting.voices_for(engine, new, gender), value=new), _pace_update(engine),
             f"{role} → {casting.ENGINES[engine][0]}, {new.split(':', 1)[1].partition('@')[0]}", last, _mix(project))
 
 
@@ -369,17 +369,19 @@ def bulk_apply(project, sel, engine, voice, copy_from, roles):
         for r in chosen:
             voices[r] = casting.voice_of(voice, 1.0)
     else:
-        taken = {casting.key_of(v) for r, v in voices.items() if r not in chosen}
+        taken = [casting.key_of(v) for r, v in voices.items() if r not in chosen]
         for r in chosen:
-            if voice == "__auto__" and engine == "kokoro":
-                pool = casting.pool_for(genders.get(r))
-                new = f"kokoro:{next((v for v in pool if f'kokoro:{v}' not in taken), pool[0])}"
-            else:
+            cur = casting.key_of(casting.configured_voice(r, cfg))
+            if voice == "__auto__" and (engine == "kokoro" or not (cur or "").startswith("clone:")):
+                new = casting.auto_voice(engine, genders.get(r), taken)         # a voice of the character's gender, the least used so far
+                if new is None:
+                    raise gr.Error("Save a clone voice first (Voice lab): the clone engines speak with a clone.")
+            else:                                                               # keep the clone (Walter (F5) -> Walter (Higgs)), or pick one by gender
                 try:
-                    new = casting.switch_engine(casting.key_of(casting.configured_voice(r, cfg)), engine, genders.get(r), taken)
+                    new = casting.switch_engine(cur, engine, genders.get(r), taken)
                 except ValueError as e:
                     raise gr.Error(str(e))
-            taken.add(new)
+            taken.append(new)
             voices[r] = casting.voice_of(new, 1.0)
     _save_cfg(project, cfg)
     return f"Changed {len(chosen)} role(s)." + (" " + _mix(project) if chosen else "")
@@ -975,8 +977,27 @@ def clone_compare(name, text):
     return (*outs, f"**{name}** in F5-TTS, Chatterbox, Qwen3-TTS and Higgs (an engine that isn't installed is left blank).")
 
 
+GENDER_PICK = ["Detect from the clip", "male", "female", "unknown"]
+
+
+def _lib_choices() -> list[tuple[str, str]]:
+    """The saved voices for a menu, each marked ♂ / ♀ / · by its gender."""
+    return [(f"{casting.GENDER_MARK[vlib.voice_gender(n)]} {n}", n) for n in vlib.list_voices()]
+
+
+def clone_set_gender(name, gender):
+    if not name:
+        raise gr.Error("Choose a saved voice.")
+    if gender not in vlib.GENDERS:
+        vlib.save_gender_auto(name)
+        return gr.update(choices=_lib_choices(), value=name), f"**{name}** is now {vlib.voice_gender(name)} (detected from its clip)."
+    vlib.set_gender(name, gender)
+    return gr.update(choices=_lib_choices(), value=name), f"**{name}** is now marked {gender}."
+
+
 def clone_save(name, audio, ref_text, speed, steps, cfg, sway, xfade, rms, seed, seeds, pick, notes,
-               engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)", hk=50, hp=0.95, hmax=1500):
+               engine="F5-TTS", exag=0.5, cfgw=0.4, htemp=0.7, hpace=1.08, hstyle="Lively (expressive_high)", hk=50, hp=0.95, hmax=1500,
+               gender="Detect from the clip"):
     if not audio:
         raise gr.Error("Add a reference clip first.")
     idx = {"Take 1": 0, "Take 2": 1, "Take 3": 2}.get(pick, 0)
@@ -986,10 +1007,11 @@ def clone_save(name, audio, ref_text, speed, steps, cfg, sway, xfade, rms, seed,
         if _engine_key(engine) == "chatterbox":     # remember the emotion settings that were tuned
             params.update(exaggeration=float(exag), cfg_weight=float(cfgw))
         saved = vlib.save_voice(name, audio, ref_text, params, notes or "",
-                                higgs=dict(temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, ""), top_k=int(hk), top_p=float(hp), max_new_tokens=int(hmax)))
+                                higgs=dict(temperature=float(htemp), pace=float(hpace), tag=HIGGS_STYLES.get(hstyle, ""), top_k=int(hk), top_p=float(hp), max_new_tokens=int(hmax)),
+                                gender=gender if gender in vlib.GENDERS else None)
     except ValueError as e:
         raise gr.Error(str(e))
-    return gr.update(choices=vlib.list_voices(), value=saved), f"Saved **{saved}** (seed {use_seed}) to `voices/library/{saved}`."
+    return gr.update(choices=_lib_choices(), value=saved), f"Saved **{saved}** ({vlib.voice_gender(saved)}, seed {use_seed}) to `voices/library/{saved}`."
 
 
 def clone_load(name):
@@ -1000,7 +1022,7 @@ def clone_load(name):
     hg = {**vlib.HIGGS_DEFAULTS, **meta.get("higgs", {})}
     style = next((k for k, t in HIGGS_STYLES.items() if t == hg["tag"]), "Lively (expressive_high)")
     return (v["ref_audio"], v["ref_text"], name, meta.get("notes", ""),
-            *[v[k] for k in CLONE_KEYS], v.get("exaggeration", 0.5), v.get("cfg_weight", 0.4), hg["temperature"], hg["pace"], style, hg["top_k"], hg["top_p"], hg["max_new_tokens"],
+            *[v[k] for k in CLONE_KEYS], v.get("exaggeration", 0.5), v.get("cfg_weight", 0.4), hg["temperature"], hg["pace"], style, hg["top_k"], hg["top_p"], hg["max_new_tokens"], vlib.voice_gender(name),
             f"Loaded **{name}** (saved {meta.get('saved', '?')}).")
 
 
@@ -1008,7 +1030,7 @@ def clone_delete(name):
     if not name:
         raise gr.Error("Choose a saved voice.")
     vlib.delete_voice(name)
-    return gr.update(choices=vlib.list_voices(), value=None), f"Deleted **{name}**."
+    return gr.update(choices=_lib_choices(), value=None), f"Deleted **{name}**."
 
 
 # ---------- pacing profile of a narrator ----------
@@ -2567,7 +2589,8 @@ def build_ui() -> gr.Blocks:
                     with gr.Row():
                         bulk_sel = gr.Dropdown(label="Characters", choices=BULK_SPECIAL, multiselect=True, scale=3, min_width=200)
                         bulk_engine = gr.Dropdown(label="Engine", choices=casting.engine_choices(), value="kokoro", scale=1, min_width=120)
-                        bulk_voice = gr.Dropdown(label="Voice", choices=[("Keep each character's clone / automatic by gender", "__auto__")] + casting.voices_for("kokoro"),
+                        bulk_voice = gr.Dropdown(label="Voice", choices=[("Automatic: a voice of each character's gender", "__auto__"),
+                                                                 ("Keep each character's clone where there is one", "__keep__")] + casting.voices_for("kokoro"),
                                                  value="__auto__", scale=2, min_width=180)
                     with gr.Row():
                         bulk_copy = gr.Dropdown(label="…or copy the voice of this character", choices=[], scale=2, min_width=180)
@@ -2613,7 +2636,8 @@ def build_ui() -> gr.Blocks:
                             prob = casting.voice_problem(raw)
                             lab = f"**{role}**  \n{n} line{'s' if n != 1 else ''}" + (f"  \n⚠ {prob}" if prob else "") + ("  \n(default voice)" if role not in (cfg.get("voices") or {}) else "")
                             out += [gr.update(visible=True), lab, (cfg.get("genders") or {}).get(role, "unknown"),
-                                    gr.update(choices=casting.engine_choices(eng), value=eng), gr.update(choices=casting.voices_for(eng, key), value=key),
+                                    gr.update(choices=casting.engine_choices(eng), value=eng),
+                                    gr.update(choices=casting.voices_for(eng, key, (cfg.get("genders") or {}).get(role)), value=key),
                                     gr.update(value=v.get("speed", 1.0), **_pace_update(eng)), role]
                         else:
                             out += [gr.update(visible=False), "", gr.skip(), gr.skip(), gr.skip(), gr.skip(), ""]
@@ -2622,9 +2646,9 @@ def build_ui() -> gr.Blocks:
                             _mix(proj) if (proj and multi) else ""]
                     return out
 
-                bulk_engine.input(lambda e: gr.update(choices=([("Keep each character's clone / automatic by gender", "__auto__")] if e == "kokoro" else
-                                                              [("Keep each character's clone", "__keep__")]) + casting.voices_for(e),
-                                                      value="__auto__" if e == "kokoro" else "__keep__"), bulk_engine, bulk_voice)
+                bulk_engine.input(lambda e: gr.update(choices=[("Automatic: a voice of each character's gender", "__auto__"),
+                                                               ("Keep each character's clone where there is one", "__keep__")] + casting.voices_for(e),
+                                                      value="__auto__"), bulk_engine, bulk_voice)
                 bulk_btn.click(bulk_apply, [project, bulk_sel, bulk_engine, bulk_voice, bulk_copy, roles_state], status2).then(
                     fill_rows, [roles_state, mode, project], row_outputs)
                 for trig in (roles_state.change, mode.change, refresh_btn.click):
@@ -3108,13 +3132,17 @@ def build_ui() -> gr.Blocks:
                     with gr.Row():
                         c_name = gr.Textbox(label="Voice name", scale=3)
                         c_pick = gr.Radio(["Take 1", "Take 2", "Take 3"], value="Take 1", label="Keep the take", scale=3)
+                        c_gender = gr.Dropdown(GENDER_PICK, value="Detect from the clip", label="Gender of this voice", scale=2)
                         c_save = gr.Button("Save voice", variant="primary", scale=1)
                     c_notes = gr.Textbox(label="Notes (optional)")
                 with gr.Group():
                     gr.Markdown("### 4 · Saved voices")
                     with gr.Row():
-                        lib_dd = gr.Dropdown(label="Saved voice", choices=vlib.list_voices(), scale=4)
+                        lib_dd = gr.Dropdown(label="Saved voice (♂ male · ♀ female · · unknown)", choices=_lib_choices(), scale=4)
                         c_load = gr.Button("Load into editor", scale=1); c_del = gr.Button("Delete", scale=1)
+                    with gr.Row():
+                        c_setg_dd = gr.Dropdown(GENDER_PICK, value="Detect from the clip", label="Set this saved voice's gender", scale=3)
+                        c_setg = gr.Button("Set gender", scale=1)
                     with gr.Row():
                         lib_role = gr.Dropdown(label="Give it to a role (needs a parsed book)", choices=[], scale=3)
                         lib_engine = gr.Dropdown(list(ENGINE_LABELS), value="F5-TTS", label="…voiced by", scale=2)
@@ -3367,10 +3395,11 @@ def build_ui() -> gr.Blocks:
         HG_VOICE = [c_htemp, c_hpace, c_hstyle, c_hk, c_hp, c_hmax]
         c_go.click(clone_generate, [c_audio, c_text, c_test] + sliders + [c_takes, c_engine, c_exag, c_cfgw] + HG_VOICE, [take1, take2, take3, c_seeds, c_status])
         c_reset.click(lambda: [vlib.DEFAULTS[k] for k in CLONE_KEYS], None, sliders)
-        c_save.click(clone_save, [c_name, c_audio, c_text] + sliders + [c_seeds, c_pick, c_notes, c_engine, c_exag, c_cfgw] + HG_VOICE, [lib_dd, c_status])
-        c_load.click(clone_load, lib_dd, [c_audio, c_text, c_name, c_notes] + sliders + [c_exag, c_cfgw] + HG_VOICE + [c_status])
+        c_save.click(clone_save, [c_name, c_audio, c_text] + sliders + [c_seeds, c_pick, c_notes, c_engine, c_exag, c_cfgw] + HG_VOICE + [c_gender], [lib_dd, c_status])
+        c_load.click(clone_load, lib_dd, [c_audio, c_text, c_name, c_notes] + sliders + [c_exag, c_cfgw] + HG_VOICE + [c_gender, c_status])
         c_del.click(clone_delete, lib_dd, [lib_dd, c_status])
         c_roles.click(clone_roles, project, lib_role)
+        c_setg.click(clone_set_gender, [lib_dd, c_setg_dd], [lib_dd, c_status])
         lib_dd.change(lambda: gr.update(choices=vlib.list_voices()), None, pc_voice)          # a voice just saved or deleted shows up here too
         pc_start.click(pacing_start, [pc_voice, pc_m4b, pc_epub, pc_windows, pc_minutes], [pc_status, pc_tbl])
         pc_remove.click(pacing_remove, pc_voice, [pc_status, pc_tbl])

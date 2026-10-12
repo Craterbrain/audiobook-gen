@@ -122,6 +122,7 @@ Music files stay on your machine and are not part of the project's Git repositor
 * Type what is said exactly, or let the app transcribe it.
 * **Generate takes** makes several versions with different seeds side by side. **Save voice** keeps the clip, the words, the settings and the seed of the one you pick.
 * **Take a reference from an audiobook**: open an `.m4b` or any audio file, choose a chapter, and the app cuts clean clips at pauses and writes down what is said (matching it to the ebook if you supply one).
+* **Every voice has a gender**, shown as ♂, ♀ or · in the voice menus. Kokoro's presets and your voice packs are marked from their names and descriptions; a clone you save is marked from the pitch of its clip (or set it yourself in the *Gender of this voice* menu, and change it later with *Set gender* under Saved voices). The Voices tab lists the voices matching a character's gender first, and *Set many at once* → *Automatic* picks a voice of each character's gender on any engine, sharing the clones out while they last.
 * A saved voice can be used by any engine from the voice menus.
 * **Make a Kokoro voice from a recording** searches for a fast Kokoro voice that sounds like your target.
 

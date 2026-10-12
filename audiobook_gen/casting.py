@@ -139,14 +139,49 @@ def _clone_label(key: str) -> str:
     return key.partition(":")[2].partition("@")[0]
 
 
-def voices_for(engine: str, current_key: str | None = None) -> list[tuple[str, str]]:
-    """[(label, key)] of one engine's voices. A `current_key` that is no longer available is kept in the list, marked missing."""
+GENDER_MARK = {"male": "♂", "female": "♀", "unknown": "·"}
+
+
+def kokoro_gender(voice_id: str) -> str:
+    """Kokoro's own naming: af_/bf_ are female, am_/bm_ male."""
+    return {"f": "female", "m": "male"}.get(voice_id[1:2], "unknown") if voice_id[:1] in ("a", "b") and voice_id[2:3] == "_" else "unknown"
+
+
+def pack_gender(stem: str) -> str:
+    """A voice pack's gender: the one saved with it, else read from its description ("US male, calm"), else unknown."""
+    from .voicepack import PACKS
+    path = PACKS / f"{stem}.json"
+    try:
+        meta = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return "unknown"
+    if meta.get("gender") in vlib.GENDERS:
+        return meta["gender"]
+    tags = f"{meta.get('tags', '')} {meta.get('label', '')}".lower()
+    return "female" if "female" in tags else "male" if "male" in tags else "unknown"
+
+
+def key_gender(key: str | None) -> str:
+    """The gender of any voice key: every voice has one (male, female or unknown when it cannot be told)."""
+    if not key:
+        return "unknown"
+    kind, _, rest = key.partition(":")
+    if kind == "kokoro":
+        return pack_gender(rest[5:]) if rest.startswith("pack:") else kokoro_gender(rest)
+    return vlib.voice_gender(_clone_label(key)) if kind == "clone" else "unknown"
+
+
+def voices_for(engine: str, current_key: str | None = None, gender: str | None = None) -> list[tuple[str, str]]:
+    """[(label, key)] of one engine's voices, each marked ♂ / ♀ / · by its gender. With a `gender`, voices of that gender come first.
+    A `current_key` that is no longer available is kept in the list, marked missing."""
     allv = voice_choices_all()
     if engine == "kokoro":
         out = [(lab, k) for lab, k in allv if k.startswith("kokoro:")]
     else:
-        suffix = ENGINES[engine][1]
         out = [(_clone_label(k), k) for lab, k in allv if engine_of_key(k) == engine]
+    out = [(f"{GENDER_MARK[key_gender(k)]} {lab}", k) for lab, k in out]
+    if gender in ("male", "female"):
+        out.sort(key=lambda lk: key_gender(lk[1]) != gender)             # a stable sort: the gender's voices first, the order otherwise kept
     if current_key and current_key not in {k for _, k in out} and engine_of_key(current_key) == engine:
         name = _clone_label(current_key) if current_key.startswith("clone:") else current_key.partition(":")[2]
         out.append((f"{name} (missing)", current_key))
@@ -169,10 +204,28 @@ def switch_engine(key: str | None, engine: str, gender: str | None = None, taken
         taken = set(taken)
         free = [v for v in pool if f"kokoro:{v}" not in taken]
         return f"kokoro:{(free or pool)[0]}"
-    name = _clone_label(key) if key and key.startswith("clone:") else (last_clone or (vlib.list_voices() or [None])[0])
+    if key and key.startswith("clone:"):
+        name = _clone_label(key)
+    else:                                       # from Kokoro: the last clone used if it suits the role's gender, else a clone of that gender, else any
+        saved = vlib.list_voices()
+        want = gender if gender in ("male", "female") else None
+        suits = lambda n: not want or vlib.voice_gender(n) in (want, "unknown")
+        name = last_clone if last_clone in saved and suits(last_clone) else next((n for n in saved if suits(n)), (saved or [None])[0])
     if not name:
         raise ValueError("Save a clone voice first (Voice lab): Higgs, Chatterbox, F5 and Qwen3 speak with a clone.")
     return f"clone:{name}{ENGINES[engine][1]}"
+
+
+def auto_voice(engine: str, gender: str | None, taken=()) -> str | None:
+    """A voice of `engine` for a role of this gender, the least used so far (so a cast gets different voices while they last). Kokoro chooses among its
+    stock presets; the clone engines among the saved clones of that gender (any clone if none matches)."""
+    taken = list(taken)
+    if engine == "kokoro":
+        pool = [f"kokoro:{v}" for v in pool_for(gender)]
+    else:
+        keys = [k for _, k in voices_for(engine)]
+        pool = ([k for k in keys if key_gender(k) == gender] if gender in ("male", "female") else []) or keys
+    return min(pool, key=lambda k: (taken.count(k), pool.index(k))) if pool else None
 
 
 def configured_voice(role: str, cfg: dict) -> dict:

@@ -320,7 +320,7 @@ def test_voice_lab_makes_higgs_takes_with_its_own_settings_and_saves_them(tmp_pa
     assert saved["higgs"] == {"temperature": 0.6, "pace": 1.0, "tag": "<|prosody:expressive_low|>", "top_k": 30, "top_p": 0.9, "max_new_tokens": 1200}
     assert saved["params"]["seed"] == 6
     loaded = gui.clone_load("V")
-    assert loaded[-7:-1] == (0.6, 1.0, "Calm (expressive_low)", 30, 0.9, 1200)
+    assert loaded[-8:-2] == (0.6, 1.0, "Calm (expressive_low)", 30, 0.9, 1200) and loaded[-2] == "female"       # the sine clip is 190 Hz: detected as female
 
 
 def test_higgs_settings_are_saved_in_the_project_config(tmp_path, monkeypatch):
@@ -344,7 +344,7 @@ def test_the_voice_picker_goes_engine_first_and_keeps_every_stored_shape(tmp_pat
     for eng in ("kokoro", "higgs", "chatterbox", "f5"):                                                    # every menu key round-trips through the stored shape
         for _, key in casting.voices_for(eng):
             assert casting.engine_of_key(key) == eng and casting.key_of(casting.voice_of(key)) == key
-    assert casting.voices_for("higgs") == [("Walt", "clone:Walt@higgs")]
+    assert casting.voices_for("higgs") == [("♀ Walt", "clone:Walt@higgs")]
     assert ("Gone (missing)", "clone:Gone@higgs") in casting.voices_for("higgs", "clone:Gone@higgs")
     assert casting.switch_engine("clone:Walt@chatterbox", "higgs") == "clone:Walt@higgs"                  # the clone stays
     assert casting.switch_engine("kokoro:af_heart", "f5", last_clone="Walt") == "clone:Walt"
@@ -356,6 +356,38 @@ def test_the_voice_picker_goes_engine_first_and_keeps_every_stored_shape(tmp_pat
     assert "one GPU pass" in casting.mix_note([{"engine": "higgs"}, {"engine": "kokoro", "voice": "x"}])
     assert "separate passes" in casting.mix_note([{"engine": "higgs", "library": "W"}, {"engine": "chatterbox", "library": "W"}])
     casting.forget_ready()
+
+
+def _tone(path, hz, secs=3, sr=24000):
+    import numpy as np, soundfile as sf
+    sf.write(path, (np.sin(2 * np.pi * hz * np.arange(sr * secs) / sr) * 0.3 * (1 + 0.2 * np.sin(np.arange(sr * secs) * 0.0004))).astype(np.float32), sr)
+
+
+def test_every_voice_has_a_gender_detected_from_pitch_or_set_by_you(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import casting, voices
+    monkeypatch.setattr(voices, "LIB", tmp_path / "lib"); monkeypatch.setattr(casting, "vlib", voices)
+    _tone(tmp_path / "low.wav", 110); _tone(tmp_path / "high.wav", 230); _tone(tmp_path / "mid.wav", 165)
+    assert [voices.detect_gender(str(tmp_path / f)) for f in ("low.wav", "high.wav", "mid.wav")] == ["male", "female", "unknown"]
+    voices.save_voice("Deep", str(tmp_path / "low.wav"), "Hi.", {})
+    voices.save_voice("Bright", str(tmp_path / "high.wav"), "Hi.", {}, gender="male")                  # what you say beats the pitch
+    meta = json.loads((voices.LIB / "Bright" / "voice.json").read_text())
+    assert voices.voice_gender("Deep") == "male" and voices.voice_gender("Bright") == "male" and meta["gender_src"] == "user"
+    old = voices.LIB / "Old"; old.mkdir(); (old / "ref.wav").write_bytes((tmp_path / "high.wav").read_bytes())
+    (old / "voice.json").write_text(json.dumps({"name": "Old", "ref_text": "x", "params": {}}))      # saved before genders existed
+    assert voices.voice_gender("Old") == "female" and json.loads((old / "voice.json").read_text())["gender_src"] == "auto"
+    voices.set_gender("Old", "unknown"); assert voices.voice_gender("Old") == "unknown"
+    assert voices.save_gender_auto("Old") == "female"
+    assert [casting.key_gender(k) for k in ("kokoro:af_heart", "kokoro:bm_george", "clone:Deep@higgs", "clone:Old", "nothing")] == ["female", "male", "male", "female", "unknown"]
+    assert casting.voices_for("higgs", gender="female")[0][1] == "clone:Old@higgs"                       # the role's gender first
+    assert casting.voices_for("higgs")[0][0].startswith(("♂", "♀", "·"))
+    casting.forget_ready()
+    # a role that is not a clone gets a clone of its own gender when it moves to a clone engine, and clone voices are shared out by gender
+    assert casting.switch_engine("kokoro:af_heart", "higgs", "female") == "clone:Old@higgs"
+    assert casting.switch_engine("kokoro:am_adam", "higgs", "male") == "clone:Bright@higgs"
+    assert casting.auto_voice("higgs", "male", ["clone:Bright@higgs"]) == "clone:Deep@higgs"            # the least used of the male clones
+    assert casting.auto_voice("higgs", "female") == "clone:Old@higgs"
+    assert casting.auto_voice("kokoro", "female") in ("kokoro:" + v for v in casting.FEMALE)
 
 
 def test_changing_a_role_engine_and_setting_many_roles_save_the_usual_config(tmp_path, monkeypatch):

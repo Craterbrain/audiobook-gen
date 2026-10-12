@@ -35,7 +35,7 @@ def load_voice(name: str) -> dict:
             **{**DEFAULTS, **meta.get("params", {})}}
 
 
-def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: str = "", higgs: dict | None = None) -> str:
+def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: str = "", higgs: dict | None = None, gender: str | None = None) -> str:
     """Store the clip (mono 24 kHz, trimmed to 12 s) with its transcript and settings."""
     import numpy as np
     import soundfile as sf
@@ -56,12 +56,74 @@ def save_voice(name: str, audio_path: str, ref_text: str, params: dict, notes: s
     d = LIB / name
     d.mkdir(parents=True, exist_ok=True)
     sf.write(d / "ref.wav", a, 24000, subtype="PCM_16")
+    chosen = gender if gender in GENDERS else None                  # None / "auto": from the pitch of the clip
     (d / "voice.json").write_text(json.dumps({
         "name": name, "ref_text": ref_text.strip(), "notes": notes,
+        "gender": chosen or detect_gender(str(d / "ref.wav")), "gender_src": "user" if chosen else "auto",
         "params": {k: params[k] for k in (*DEFAULTS, *EXTRA) if k in params},
         **({"higgs": {k: v for k, v in higgs.items() if k in HIGGS_DEFAULTS}} if higgs else {}),
         "saved": time.strftime("%Y-%m-%d %H:%M")}, indent=2, ensure_ascii=False))
     return name
+
+
+GENDERS = ("male", "female", "unknown")
+
+
+def detect_gender(audio_path: str) -> str:
+    """male / female / unknown from the pitch of a recording: the median fundamental frequency of its voiced frames (men sit near 85-155 Hz,
+    women near 165-255 Hz; the band between is left unknown rather than guessed)."""
+    import numpy as np
+    import soundfile as sf
+    import librosa
+    try:
+        y, sr = sf.read(audio_path, dtype="float32")
+        y = y if y.ndim == 1 else y.mean(1)
+        y = librosa.resample(y[: 20 * sr], orig_sr=sr, target_sr=16000) if sr != 16000 else y[: 20 * 16000]
+        f0 = librosa.yin(y, fmin=60, fmax=400, sr=16000, frame_length=1024)
+        rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=256)[0]
+        n = min(len(f0), len(rms))
+        voiced = f0[:n][rms[:n] > 0.2 * rms.max()]
+        if len(voiced) < 10:
+            return "unknown"
+        med = float(np.median(voiced))
+    except Exception:
+        return "unknown"
+    return "male" if med < 155 else "female" if med > 175 else "unknown"
+
+
+def voice_gender(name: str) -> str:
+    """The saved gender of a clone voice. A voice saved before genders existed is detected from its clip once and the answer is kept (as "auto")."""
+    path = LIB / name / "voice.json"
+    try:
+        meta = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return "unknown"
+    if meta.get("gender") in GENDERS:
+        return meta["gender"]
+    meta["gender"], meta["gender_src"] = detect_gender(str(LIB / name / "ref.wav")), "auto"
+    try:
+        path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    except OSError:
+        pass
+    return meta["gender"]
+
+
+def save_gender_auto(name: str) -> str:
+    """Forget a gender you set and detect it from the clip again."""
+    path = LIB / clean_name(name) / "voice.json"
+    meta = json.loads(path.read_text())
+    meta["gender"], meta["gender_src"] = detect_gender(str(LIB / clean_name(name) / "ref.wav")), "auto"
+    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    return meta["gender"]
+
+
+def set_gender(name: str, gender: str) -> None:
+    if gender not in GENDERS:
+        raise ValueError("A voice is male, female or unknown.")
+    path = LIB / clean_name(name) / "voice.json"
+    meta = json.loads(path.read_text())
+    meta["gender"], meta["gender_src"] = gender, "user"
+    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
 
 
 def delete_voice(name: str) -> None:
