@@ -69,7 +69,7 @@ def resolve_voice(role: str, cfg: dict) -> dict:
 
 
 _ENGINES: dict = {}  # shared across calls so the GUI doesn't reload models every run
-DEFAULT_WORKERS = {"kokoro": 4, "f5": 1, "qwen3": 1, "chatterbox": 1}  # Kokoro: 1 worker 59 s, 3 -> 23 s, 4 -> 17 s on John 1; F5 saturates the GPU (no gain)
+DEFAULT_WORKERS = {"kokoro": 4, "f5": 1, "qwen3": 1, "chatterbox": 1, "higgs": 1}  # Kokoro: 1 worker 59 s, 3 -> 23 s, 4 -> 17 s on John 1; F5 saturates the GPU (no gain)
 
 
 def lexicon_mode(ename: str, cfg: dict) -> str:
@@ -79,7 +79,7 @@ def lexicon_mode(ename: str, cfg: dict) -> str:
         return "ipa"
     if ename == "chatterbox":
         return "verified"
-    if ename == "qwen3":
+    if ename in ("qwen3", "higgs"):         # Higgs reads plain text: only respellings you typed yourself reach it
         return "typed"
     return cfg.get("text_lexicon", "respell")
 
@@ -119,6 +119,9 @@ def get_engine(name: str, device_pref: str = "auto", slot: int = 0, precision: s
         elif name in ("qwen3", "chatterbox"):   # run in their own virtualenvs
             from .tts import remote_engine
             _ENGINES[key] = {"qwen3": remote_engine.Qwen3Engine, "chatterbox": remote_engine.ChatterboxEngine}[name](device_pref)
+        elif name == "higgs":
+            from .tts.higgs_engine import HiggsEngine
+            _ENGINES[key] = HiggsEngine(device_pref)
         else:
             from .tts.f5_engine import F5Engine
             _ENGINES[key] = F5Engine(device_pref, precision=precision)
@@ -155,15 +158,31 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
         from .emotion import delivery
         yield 0, max(1, sum(map(len, raw))), "Reading the emotion of each sentence"
         feel = delivery(segs, raw, cfg.get("emotion_base", 0.0), refine.hints(segs, read, refined) if refined else None)
+    tags = None   # per-chunk emotion tags for Higgs: your own (higgs_tags.json: {"segment:chunk": "<|emotion:awe|>"}) or chosen by the language model for the strongest higgs_emotion_share (default 0.2) of the chunks (cfg "higgs_emotion: true")
+    if any(resolve_voice(sg["speaker"], cfg)["engine"] == "higgs" for sg in segs):
+        try:
+            own = json.loads((work / "higgs_tags.json").read_text())
+        except (OSError, ValueError):
+            own = None
+        if own:
+            tags = [[own.get(f"{sg['id']}:{ci}", "") for ci in range(len(raw[si]))] for si, sg in enumerate(segs)]
+        elif cfg.get("higgs_emotion"):
+            from .emotion import director_probs, director_tags
+            yield 0, max(1, sum(map(len, raw))), "Deciding the feeling of each passage"
+            picked = director_tags(director_probs(work, segs, raw), float(cfg.get("higgs_emotion_share", 0.2)))
+            tags = [[picked.get(f"{sg['id']}:{ci}", "") for ci in range(len(raw[si]))] for si, sg in enumerate(segs)]
     for si, seg in enumerate(segs):
         voice = resolve_voice(seg["speaker"], cfg)
         ename = voice["engine"]
+        base_tag = voice.get("tag") or ""
         if ename not in lex:
             lex[ename] = load_preprocessor(work, lexicon_mode(ename, cfg))
         files = []
         for ci, chunk in enumerate(lex[ename].substitute(c) for c in raw[si]):
             if feel and ename == "chatterbox":
                 voice = {**voice, **feel[si][ci]}
+            if tags and ename == "higgs":
+                voice = {**voice, "tag": base_tag + tags[si][ci]}
             ov = overrides.get(f"{seg['id']}:{ci}") or {}
             if ov.get("orig") not in (None, raw[si][ci]):          # the line at this position is no longer the one that was corrected
                 ov = {}

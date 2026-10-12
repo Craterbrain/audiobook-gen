@@ -20,7 +20,7 @@ EMOTIONS = ["neutral", "joy", "sadness", "anger", "fear", "surprise", "disgust"]
 EMO_WORDS = ["calm, matter-of-fact", "happy, warm, amused", "sad, sorrowful, grieving", "angry, harsh, upset",
              "afraid, anxious, alarmed", "surprised, astonished", "disgusted, contemptuous"]
 LEVELS = ["mild", "moderate", "intense"]
-LETTERS = "ABCDEFGHIJ"
+LETTERS = "ABCDEFGHIJKL"
 AUX = set(("is are was were am art do does did dost didst can could canst will wilt would shall shalt should may might must have has had hast hath "
            "isn't aren't wasn't weren't don't doesn't didn't can't won't wouldn't shouldn't couldn't haven't hasn't ain't isn’t aren’t wasn’t "
            "weren’t don’t doesn’t didn’t can’t won’t wouldn’t shouldn’t couldn’t haven’t hasn’t").split())
@@ -102,6 +102,26 @@ class Scorer:
             out.append(dict(zip(codes, acc)))
         return out
 
+
+    def emotions(self, requests: list[tuple[str, str, str]], title: str = "", author: str = "", progress=None) -> list[dict[str, float]]:
+        """The feeling a narrator should carry in each (before, passage, after): {tag: probability} over emotion.DIRECTOR. Each request is asked with
+        the options in both orders and averaged (cancels the model's lean towards particular letters). Batched; deterministic."""
+        from .emotion import DIRECTOR, director_question, DIRECTOR_SYSTEM
+        tags, descs = [t for t, _ in DIRECTOR], [d for _, d in DIRECTOR]
+        n, items = len(descs), []
+        for before, passage, after in requests:
+            for order in (list(range(n)), list(reversed(range(n)))):
+                listing = "\n".join(f"{LETTERS[k]}. {descs[i]}" for k, i in enumerate(order))
+                items.append((DIRECTOR_SYSTEM, director_question(before, passage, after, title, author) + f"\n{listing}\nAnswer with a single letter."))
+        probs = self.letters(items, n, progress=progress)
+        out = []
+        for r in range(len(requests)):
+            acc = [0.0] * n
+            for half, order in enumerate((list(range(n)), list(reversed(range(n))))):
+                for k, i in enumerate(order):
+                    acc[i] += probs[2 * r + half][k] / 2
+            out.append(dict(zip(tags, acc)))
+        return out
 
     def __init__(self, model: str = MODEL, device_pref: str = "auto"):
         import torch

@@ -39,4 +39,4 @@ name_bands: [[0.3, 1], [0.4, 2], [0.5, 3], [0.6, 4], [0.7, 5]]   # [score, takes
 # The finished .m4b: Opus (the default; Android players, VLC, Audiobookshelf) or aac (Apple Books and older players need it).
 # audio_codec: opus
 # audio_bitrate: 64k
-# loudness_lufs: -16     # integrated loudness of the finished book (was -18)
+# loudness_lufs: -14.6   # integrated loudness of the finished book (was -18, then -16). Louder than about -15.5 brings the peaks down a little and limits them at -2 dB.

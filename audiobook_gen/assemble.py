@@ -365,11 +365,40 @@ def make_cover(path: Path, title: str, author: str, background: str | None = Non
     return path
 
 
-LOUDNESS_LUFS = -16.0     # integrated loudness of the finished book (it was -18; a little louder is easier to hear over a noisy room)
+LOUDNESS_LUFS = -14.6     # integrated loudness of the finished book (it was -18, then -16; louder is easier to hear over a noisy room)
+LOUD_PLAIN_MAX = -15.5    # at or below this, ffmpeg's loudnorm alone gets there; louder than this needs the peaks brought down first
+LOUD_COMP = "acompressor=threshold=-22dB:ratio=2.5:attack=15:release=200"
+LOUD_LIMIT = "alimiter=limit=-2dB:attack=7:release=80:level=disabled"
+LOUD_LOSS_DB = 1.3        # the limiter takes about this much loudness back, so the gain aims this far above the target
 
 
 def loudnorm(cfg: dict | None = None) -> str:
     return f"loudnorm=I={float((cfg or {}).get('loudness_lufs', LOUDNESS_LUFS))}:TP=-1.5:LRA=11"
+
+
+def measure_lufs(source: Path, before: str = "", concat: bool = False) -> float | None:
+    """Integrated loudness of a file (or a concat list) after the filters in `before`; None when it cannot be measured."""
+    import re
+    cmd = ["ffmpeg", "-nostats", *(["-f", "concat", "-safe", "0"] if concat else []), "-i", str(source), "-af",
+           (before + "," if before else "") + "ebur128", "-f", "null", "-"]
+    try:
+        t = subprocess.run(cmd, capture_output=True, text=True).stderr
+        return float(re.search(r"I:\s+(-?[\d.]+) LUFS", t[t.rindex("Summary"):])[1])
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def loud_filter(cfg: dict | None, source: Path | None = None, concat: bool = False) -> str:
+    """The ffmpeg filter that brings the audio to cfg["loudness_lufs"] (default -14.6). Quiet targets: loudnorm. Louder targets cannot be
+    reached that way (the peaks stop it first), so the peaks are brought down a little, the level is raised by the measured amount, and a
+    limiter keeps the peaks under -2 dB. Needs `source` to measure; without one it falls back to loudnorm."""
+    target = float((cfg or {}).get("loudness_lufs", LOUDNESS_LUFS))
+    if target <= LOUD_PLAIN_MAX or source is None:
+        return loudnorm(cfg)
+    base = measure_lufs(source, LOUD_COMP, concat)
+    if base is None:
+        return loudnorm(cfg)
+    return f"{LOUD_COMP},volume={target - base + LOUD_LOSS_DB:.2f}dB,{LOUD_LIMIT}"
 
 
 def audio_codec(cfg: dict | None = None) -> str:
@@ -398,7 +427,7 @@ def encode_chapters(wavs: list[Path], sr: int, workers: int, run=None, cfg: dict
 
     def one(wav: Path) -> Path:
         out = wav.with_suffix(".m4a")
-        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", loudnorm(cfg), "-ar", str(sr), "-ac", "1",
+        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", loud_filter(cfg, wav), "-ar", str(sr), "-ac", "1",
              *codec_args({**(cfg or {}), "audio_codec": "aac"}), "-f", "ipod", str(out)])
         return out
     with ThreadPoolExecutor(workers) as ex:
@@ -495,5 +524,5 @@ def assemble(work: Path, cfg: dict, out_path: Path, cover: str | None = None,
         except Exception as e:                                          # anything unexpected: the single-pass way below
             print(f"[assemble] parallel encode not used ({e}); encoding in one pass", flush=True)
     (work / "list.txt").write_text("\n".join(listing))
-    finish(work / "list.txt", chap_info, codec_args(cfg), ["-af", loudnorm(cfg), "-ar", str(sr), "-ac", "1"])
+    finish(work / "list.txt", chap_info, codec_args(cfg), ["-af", loud_filter(cfg, work / "list.txt", concat=True), "-ar", str(sr), "-ac", "1"])
     return out_path

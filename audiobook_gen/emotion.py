@@ -45,6 +45,110 @@ def probabilities(texts: list[str]) -> list[dict]:
     return [{d["label"]: d["score"] for d in row} for row in out]
 
 
+HIGGS_TAGS = {"joy": "contentment", "sadness": "sadness", "anger": "anger", "fear": "fear", "surprise": "surprise", "disgust": "disgust"}
+
+
+def higgs_tags(chunks: list[list[str]], minimum: float = 0.45) -> list[list[str]]:
+    """An emotion tag for each chunk, for Higgs (which takes `<|emotion:...|>` at the start of a sentence): the strongest non-neutral feeling of
+    the chunk averaged with its neighbours, when it reaches `minimum`; empty for everything calmer. Strong joy is elation."""
+    flat = [c for seg in chunks for c in seg]
+    if not flat:
+        return [[] for _ in chunks]
+    probs = probabilities(flat)
+    tags, i = [], 0
+    for seg in chunks:
+        row = []
+        for _ in seg:
+            nb = [probs[j] for j in range(max(0, i - 1), min(len(flat), i + 2))]
+            avg = {k: sum(p.get(k, 0) for p in nb) / len(nb) for k in HIGGS_TAGS}
+            k = max(avg, key=avg.get)
+            row.append("" if avg[k] < minimum else "<|emotion:elation|>" if k == "joy" and avg[k] >= 0.6 else f"<|emotion:{HIGGS_TAGS[k]}|>")
+            i += 1
+        tags.append(row)
+    return tags
+
+
+# The narrator's feelings the language model chooses between for Higgs: (Higgs tag, how it is described to the model)
+DIRECTOR = [("none", "No particular feeling: plain, informational or calm narration"),
+            ("awe", "Awe, wonder or reverence"),
+            ("sadness", "Sadness, grief or regret"),
+            ("determination", "Firm resolve, conviction or authority"),
+            ("elation", "Joy, delight or triumph"),
+            ("enthusiasm", "Eager excitement"),
+            ("affection", "Warmth, tenderness or love"),
+            ("contentment", "Calm gladness, peace or comfort"),
+            ("surprise", "Surprise or astonishment"),
+            ("anger", "Anger, indignation or rebuke"),
+            ("fear", "Fear, alarm or dread"),
+            ("contemplation", "Thoughtful, reflective, solemn")]
+DIRECTOR_SYSTEM = "You are directing a narrator who reads a book aloud. You decide which feeling, if any, the narrator should carry in a passage."
+
+
+def director_question(before: str, passage: str, after: str, title: str = "", author: str = "") -> str:
+    book = (f'In the audiobook "{title}"' + (f" by {author}" if author else "")) if title else "In an audiobook"
+    ctx = (f'It follows: "{before}"\n' if before else "") + (f'It is followed by: "{after}"\n' if after else "")
+    return f'{book}, the narrator reads this passage aloud: "{passage}"\n{ctx}\nWhich feeling should the narrator carry while reading the passage?'
+
+
+def director_probs(work, segs: list[dict], raw: list[list[str]], progress=None) -> dict[str, dict[str, float]]:
+    """{"segment:chunk": {tag: probability}} for every chunk, from the language model, cached in work/higgs_emotion.json by the chunk's text."""
+    import hashlib
+    import json
+    from pathlib import Path
+    path = Path(work) / "higgs_emotion.json"
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    flat = [(f"{sg['id']}:{ci}", c) for sg, chunks in zip(segs, raw) for ci, c in enumerate(chunks)]
+    stamp = lambda c: hashlib.sha1(c.encode()).hexdigest()[:10]
+    todo = [i for i, (k, c) in enumerate(flat) if cache.get(k, {}).get("h") != stamp(c)]
+    if todo:
+        try:
+            meta = json.loads((Path(work) / "chapters.json").read_text())
+        except (OSError, ValueError):
+            meta = {}
+        from .refine import Scorer
+        sc = Scorer()
+        try:
+            clip = lambda t: t if len(t) <= 220 else t[:217] + "..."
+            reqs = [(clip(flat[i - 1][1]) if i else "", flat[i][1], clip(flat[i + 1][1]) if i + 1 < len(flat) else "") for i in todo]
+            out = sc.emotions(reqs, meta.get("title", ""), meta.get("author", ""), progress=progress)
+        finally:
+            sc.close()
+        for i, p in zip(todo, out):
+            cache[flat[i][0]] = {"h": stamp(flat[i][1]), "p": p}
+        path.write_text(json.dumps(cache))
+    return {k: cache[k]["p"] for k, _ in flat}
+
+
+def director_tags(probs: dict[str, dict[str, float]], share: float = 0.2, max_per_tag: float = 0.35) -> dict[str, str]:
+    """The tag for the chunks the model feels most strongly about: those whose best feeling (other than none) also beats "none", up to `share`
+    of all chunks, taken from the most to the least certain. No one feeling takes more than `max_per_tag` of what is tagged, so the delivery
+    does not turn into one note (a scripture passage would otherwise be all awe). A lower share tunes the emotion down; 0 gives none."""
+    by_tag: dict[str, list] = {}
+    for k, p in probs.items():
+        best = max((t for t in p if t != "none"), key=p.get)
+        if p[best] > p.get("none", 0):
+            by_tag.setdefault(best, []).append((p[best] - p.get("none", 0), k))
+    for rows in by_tag.values():
+        rows.sort(reverse=True)
+    want = int(round(share * len(probs)))
+    cap = max(1, int(round(max_per_tag * want)))
+    picked: dict[str, str] = {}
+    taken = {t: 0 for t in by_tag}
+    pos = {t: 0 for t in by_tag}
+    while len(picked) < want:
+        live = [t for t in by_tag if pos[t] < len(by_tag[t]) and taken[t] < cap]
+        if not live:
+            break
+        t = max(live, key=lambda x: by_tag[x][pos[x]][0])            # the most certain of what is left, among feelings still under their cap
+        k = by_tag[t][pos[t]][1]
+        pos[t] += 1; taken[t] += 1
+        picked[k] = f"<|emotion:{t}|>"
+    return picked
+
+
 def tag_shift(text: str) -> tuple[float, float]:
     """Sum of the shifts of every tag word in a short narration snippet (capped)."""
     ex = cfg = 0.0

@@ -329,6 +329,41 @@ def test_respell_rules_make_readable_spellings():
     assert respell("ˈheɪɡɑɹ").lower().startswith("haygar")
 
 
+def test_higgs_emotion_tags_are_chosen_sparingly_and_not_all_one_feeling():
+    from audiobook_gen.emotion import director_tags
+    probs = {}
+    for i in range(40):                       # 40 chunks: 15 lean awe, 6 lean sadness, 4 lean anger, the rest plain
+        p = {"none": 0.4, "awe": 0.05, "sadness": 0.05, "anger": 0.05}
+        if i < 15: p.update(awe=0.5 - i * 0.01, none=0.2)
+        elif i < 21: p.update(sadness=0.45, none=0.3)
+        elif i < 25: p.update(anger=0.5, none=0.3)
+        probs[f"s:{i}"] = p
+    t = director_tags(probs, 0.25)
+    assert len(t) == 10 and len({v for v in t.values()}) >= 3                 # a quarter of them, and more than one feeling
+    assert sum(1 for v in t.values() if "awe" in v) <= 4                       # no one feeling takes more than about a third
+    assert director_tags(probs, 0.0) == {}                                     # emotion off
+    assert all(probs[k]["none"] < max(v for t_, v in probs[k].items() if t_ != "none") for k in t)   # only where a feeling beats "no feeling"
+
+
+def test_a_loud_target_is_reached_with_peaks_brought_down(tmp_path):
+    import numpy as np, soundfile as sf, subprocess
+    from audiobook_gen import assemble
+    sr = 24000
+    t = np.arange(sr * 12) / sr
+    rng = np.random.default_rng(1)
+    voice = np.sin(2 * np.pi * 180 * t) * (0.05 + 0.04 * np.sin(2 * np.pi * 3 * t)) + rng.normal(0, 0.01, t.size)
+    voice[::sr * 2] += 0.8                                        # a few tall peaks, like speech
+    wav = tmp_path / "in.wav"; sf.write(wav, voice.astype(np.float32), sr)
+    flt = assemble.loud_filter({"loudness_lufs": -14.6}, wav)
+    assert "volume=" in flt and "alimiter" in flt                 # louder than loudnorm can reach on its own
+    out = tmp_path / "out.wav"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav), "-af", flt, str(out)], check=True)
+    got = assemble.measure_lufs(out)
+    assert abs(got - -14.6) < 1.2, got
+    assert "loudnorm" in assemble.loud_filter({"loudness_lufs": -16}, wav)      # a quiet target keeps the plain way
+    assert "loudnorm" in assemble.loud_filter({"loudness_lufs": -14.6}, None)   # nothing to measure: the plain way
+
+
 def test_run_stats_average_and_estimate(tmp_path, monkeypatch):
     from audiobook_gen import runstats
     monkeypatch.setattr(runstats, "PATH", tmp_path / "run_stats.json")
@@ -1427,7 +1462,7 @@ def test_chapters_encoded_side_by_side_match_the_single_pass_encode(tmp_path, mo
     o = probe(opus_path)
     assert streams == ["opus"] and len(o["chapters"]) == 3 and abs(float(o["format"]["duration"]) - float(outs["serial"]["format"]["duration"])) < 0.3
     assert subprocess.run(["ffmpeg", "-v", "error", "-i", str(opus_path), "-f", "null", "-"], capture_output=True).stderr == b""      # decodes clean
-    assert assemble.audio_codec({"audio_codec": "AAC"}) == "aac" and "loudnorm=I=-16.0" in assemble.loudnorm({})
+    assert assemble.audio_codec({"audio_codec": "AAC"}) == "aac" and "loudnorm=I=-14.6" in assemble.loudnorm({})
 
 
 def test_a_send_the_phone_never_fetched_counts_as_failed(monkeypatch):
