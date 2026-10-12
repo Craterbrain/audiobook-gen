@@ -1,6 +1,6 @@
 # Audiobook Gen: user guide
 
-This guide walks through making an audiobook from a book file, start to finish, using the app. For the technical side (settings files, command line, how the pieces work) see the [README](../README.md).
+This guide walks through making an audiobook from a book file, start to finish, using the app. For the technical side (settings files, command line, how the pieces work) see the [README](../README.md). The README links back here, and the screenshots below are of the app itself.
 
 Everything runs on your own computer. Your books, recordings and cloned voices never leave it.
 
@@ -24,6 +24,8 @@ Every page starts with a banner that says what the step is for and which step sh
 ## 2. Making a book, step by step
 
 ### ① Book
+
+![Book tab](images/guide/book.png)
 Upload your book. Supported: `.epub`, `.txt`, `.md`, `.html`, `.docx`, `.pdf` (needs `pdftotext`), and with calibre installed also `.mobi`, `.azw3`, `.fb2`, `.rtf`, `.odt`.
 
 * The app reads the book and **checks that it understood the layout** (a play, scripture with verses, a book with chapters, or plain text). If its first reading looks wrong it tries the others by itself. It only asks you when none of them looks right.
@@ -32,6 +34,8 @@ Upload your book. Supported: `.epub`, `.txt`, `.md`, `.html`, `.docx`, `.pdf` (n
 * If the same book is already in the queue or finished, you get a warning and a choice: **replace** the earlier one (and optionally delete its work folder) or keep both.
 
 ### ② Voices
+
+![Voices tab](images/guide/voices.png)
 * **Parse speakers** finds who speaks each line. Choose *Different voice for each character* or *One narrator reads everything*.
 * Each character gets an engine and voice, a pace slider and a **▶ Hear** button. Changes save as you make them.
 * **Find genders** asks the small language model; correct any row by hand. Genders pick sensible default voices.
@@ -39,6 +43,8 @@ Upload your book. Supported: `.epub`, `.txt`, `.md`, `.html`, `.docx`, `.pdf` (n
 * Voices: **Kokoro** presets (fast), or your own **cloned** voices from the Voice lab (Chatterbox is the most expressive, F5 and Qwen3 also work).
 
 ### ③ Names
+
+![Names tab](images/guide/names.png)
 The pronunciation list. Every name or hard word has a spelling hint for the voice.
 
 * **Where the model placed each name.** A small language model reads each name in its sentences and decides whether it belongs to US English, UK English or another language (Spanish, French, German…). A US town with a Spanish name keeps its Spanish sound; an English surname in an American book stays American. Use the **setting filter** to see names by where they were placed, and **re-check** a group if you disagree.
@@ -47,19 +53,27 @@ The pronunciation list. Every name or hard word has a spelling hint for the voic
 * Roman numerals in chapter headings are handled as headings and kept out of this list.
 
 ### ④ Extras
+
+![Extras tab](images/guide/extras.png)
 * **Cover**: search free pictures on Wikimedia Commons or upload your own, pick a layout and colour, press *Use this cover*.
 * **Music**: opening song, music between sections ("bridges"), ending. Details in section 4.
 * **Spoken titles**: each section's title is read aloud by default; untick to turn it off.
 
 ### ⑤ Make
+
+![Make tab](images/guide/make.png)
 Pacing sliders, the engines panel, how names are spoken (real IPA, respelling, plain). Then choose **start now** or a start time, optionally **only overnight**, optionally **send to my phone** when finished, and press the button. The book goes onto the queue. Before the first run you see the measured speed of your own machine and an estimate of how long it will take.
 
 ### ⑥ Fix
+
+![Fix tab](images/guide/fix.png)
 Find any clip by the words in it, hear it, change the words or settings, and remake just that clip. After editing the pronunciation list, search the name to see which clips change, then **Rebuild**. Only clips whose words changed are made again. Your fixes survive later re-runs.
 
 ## 3. Queue and Done
 
 ### Queue
+
+![Queue tab](images/guide/queue.png)
 Every book waits here. The runner makes them one at a time and watches each:
 
 1. **Speech**: the clips are made. A progress count and a time estimate are shown.
@@ -70,6 +84,8 @@ Every book waits here. The runner makes them one at a time and watches each:
 A stalled job is restarted by itself and finished clips are kept. Tick the checkbox beside books to **hold, resume, remove, move** or **start now** for several at once. Set an [ntfy](https://ntfy.sh) topic to get a message when a book finishes or fails; replying `current`, `queue`, `done`, `now <number>`, `stop` or `send <number>` to the topic controls the queue from your phone.
 
 ### Done
+
+![Done tab](images/guide/done.png)
 Finished books. Here you can:
 
 * **Rate** a book out of five stars, for your own record.
@@ -94,6 +110,8 @@ Music files stay on your machine and are not part of the project's Git repositor
 
 ## 5. Voice lab (cloning a voice)
 
+![Voice lab](images/guide/voice-lab.png)
+
 * Upload or record 5–12 seconds of clean speech. **Any audio file works** (wav, mp3, flac, ogg, opus, m4a, aac, even a video's soundtrack).
 * Type what is said exactly, or let the app transcribe it.
 * **Generate takes** makes several versions with different seeds side by side. **Save voice** keeps the clip, the words, the settings and the seed of the one you pick.
@@ -104,6 +122,8 @@ Music files stay on your machine and are not part of the project's Git repositor
 Cloning quality depends on the clip's cleanliness and the engine, not on a higher bitrate.
 
 ## 6. Ask Claude
+
+![Ask Claude tab](images/guide/ask-claude.png)
 
 The **✨ Ask Claude** tab is a helper you talk to in plain language ("give the narrator a calmer voice", "put a march between the second and third parts", "make a cover"). It uses your own Claude Code login. It works on a **copy**; you review the changes as a difference and nothing happens until you press **Apply**.
 

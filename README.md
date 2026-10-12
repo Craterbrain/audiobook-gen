@@ -1,30 +1,30 @@
 # audiobook-gen
 
-**New here? Read the [user guide](docs/USER_GUIDE.md).**
-
 Local pipeline: `.epub`/`.txt`/`.md`/`.html`/`.docx`/`.pdf` (and, with calibre, `.mobi` and others) -> speaker-parsed segments -> pronunciation lexicon -> Kokoro-82M / F5-TTS on an Intel Arc GPU (PyTorch XPU) -> name check -> optional music and spoken titles -> chapterized, tagged `.m4b` (Opus 64 kb/s at −16 LUFS by default; `audio_codec: aac` for Apple Books).
 
 ## A quick look
 
-The app (`python -m audiobook_gen.gui`) walks a book through six steps (Book, Voices, Names, Extras, Make, Fix), then keeps watching the queue for you. The screenshots below are from earlier versions of the tabs; the [user guide](docs/USER_GUIDE.md) describes the current layout.
+> **📖 [Read the user guide](docs/USER_GUIDE.md)** for a step-by-step walk through the app, with a screenshot of every tab.
 
-**Cast** — each character gets a voice (here, Frankenstein: a male voice for Clerval, your own cloned voice for the narrator), with a pace control and a Hear button. The banner at the top of each GPU tab shows whether a book is being made and lets you borrow the GPU.
+The app (`python -m audiobook_gen.gui`) walks a book through six steps (Book, Voices, Names, Extras, Make, Fix), then keeps watching the queue for you.
 
-![Cast tab](docs/images/cast.png)
+**① Book** — load a book in almost any format, pick chapters, and prepare the text. The app checks that it read the layout correctly.
 
-**Generate** — start now or at a set time, optionally only overnight, optionally send the finished book to your phone (KDE Connect). The speed shown is the measured average of your own machine.
+[![Book tab](docs/images/guide/book.png)](docs/USER_GUIDE.md#-book)
 
-![Generate tab](docs/images/generate.png)
+**③ Names** — every name and hard word with its pronunciation, and where the model placed it (US English, UK English, Spanish, French…).
 
-**Queue** — every book waits here, is watched by the queue runner, and restarts itself if the GPU stalls. It shows progress and when everything should be finished.
+[![Names tab](docs/images/guide/names.png)](docs/USER_GUIDE.md#-names)
 
-![Queue tab](docs/images/queue.png)
+**Queue** — every book waits here, is watched by the queue runner, and restarts itself if the GPU stalls. Tick books to hold, move, remove or send them.
 
-**Corrections** — find any clip by the words in it, hear it, and remake just that clip with other words or settings.
+[![Queue tab](docs/images/guide/queue.png)](docs/USER_GUIDE.md#queue)
 
-![Corrections tab](docs/images/corrections.png)
+**Done** — rate finished books, see unused clips, delete them, or zip a book without its clips.
 
-**Cover** — search free (public-domain or CC0) pictures on Wikimedia Commons, pick a layout and a book-cloth colour, and preview the cover. People go in a picture window on cloth; scenery fills the whole cover. The Assistant tab can do the same from a sentence ("make a cover for this book").
+[![Done tab](docs/images/guide/done.png)](docs/USER_GUIDE.md#done)
+
+**Cover** (inside Extras) — search free pictures on Wikimedia Commons, pick a layout and a book-cloth colour, and preview the cover.
 
 ![Cover tab](docs/images/cover.jpg)
 
