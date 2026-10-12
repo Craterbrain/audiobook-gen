@@ -787,6 +787,29 @@ class Runner:
             pass
         return ""
 
+    def _names_detail(self, job: dict) -> str:
+        """What the name check is doing, read from its own log lines, for when it has not said so through the activity file: judging the clips
+        ("judging clips 301/4004") or making the clips again with new spellings ("making clips again with 10 new spellings, 6663/7658")."""
+        try:
+            tail = (QUEUE / f"{job['id']}.log").read_bytes()[-12000:].decode("utf-8", "ignore")
+        except OSError:
+            return ""
+        lines = [l.strip() for l in tail.replace("\r", "\n").splitlines() if l.strip()]
+        count, phase = "", ""
+        for line in reversed(lines):
+            if line.startswith("[progress]") and not count:
+                count = line.split("]", 1)[1].strip()
+            elif line.startswith("[names]"):
+                phase = line.split("]", 1)[1].strip()
+                break
+            elif line.startswith("[synth]") and "emotion" in line and not phase:
+                phase = "making the clips again"
+        if phase.startswith("making the clips again"):
+            return f"{phase}" + (f" ({count})" if count else "")
+        if "clips say a name" in phase or (phase and count):
+            return f"judging clips" + (f" {count}" if count else "")
+        return phase[:90]
+
     def _clip_count(self, job: dict) -> str:
         """" (996 clips)" for the quality check's note, "" if the count is not known."""
         try:
@@ -900,7 +923,7 @@ class Runner:
                 _kill_group(proc)
                 return "lease"
             if stage == "names":                                                       # "judging clips 301/793" from the pass itself
-                detail = (activity_get() or {}).get("detail", "")
+                detail = (activity_get() or {}).get("detail", "") or self._names_detail(job)
                 text = "checking how names are pronounced" + (f" — {detail}" if detail else "")
                 if detail and text != cur.get("note"):
                     update(job["id"], note=text)

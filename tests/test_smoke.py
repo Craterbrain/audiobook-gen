@@ -3019,3 +3019,17 @@ def test_done_tab_lists_and_deletes_unused_clips(tmp_path, monkeypatch):
     assert "deleted 2 unused clips" in msg and sorted(f.name for f in (book / "clips").glob("*.wav")) == ["keep.wav"]
     with pytest.raises(gr.Error, match="no unused clips"):
         gui.done_ask(gui.done_table().assign(**{"✔": [True]}), "unused")
+
+
+def test_the_name_check_note_follows_its_log_when_it_has_no_activity_to_report(tmp_path, monkeypatch):
+    jq, work = _queue_env(tmp_path, monkeypatch)
+    j = jq.add(str(work), "Book")
+    jq.QUEUE.mkdir(parents=True, exist_ok=True)
+    log = jq.QUEUE / f"{j['id']}.log"
+    r = jq.Runner.__new__(jq.Runner)
+    log.write_text("[names] 4004 clips say a name that has an IPA (824 such names in the lexicon)\n[progress] 1000/4004\n[progress] 1025/4004\n")
+    assert r._names_detail(j) == "judging clips 1025/4004"
+    log.write_text(log.read_text() + "[progress] 4001/4004\n[names] making the clips again with 10 new spelling(s)\n[synth] Reading the emotion of each sentence\n[progress] 6663/7658\n")
+    assert r._names_detail(j) == "making the clips again with 10 new spelling(s) (6663/7658)"
+    log.write_text("[names] 4004 clips say a name that has an IPA\n")
+    assert r._names_detail(j).startswith("4004 clips say a name")                                  # nothing counted yet: what the pass said
