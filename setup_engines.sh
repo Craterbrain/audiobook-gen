@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Optional engines, each in its own virtualenv because their libraries pin different transformers versions.
 # They reuse the main .venv's PyTorch XPU build (via a .pth file), so it is not downloaded twice.
-#   ./setup_engines.sh chatterbox | qwen3 | higgs | all
+#   ./setup_engines.sh chatterbox | higgs | all
 # (Higgs runs in the main environment, so it needs no virtualenv of its own: this only checks transformers and fetches its 9.3 GB of weights.)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -11,11 +11,6 @@ MAIN_SITE=$(.venv/bin/python -c "import site;print(site.getsitepackages()[0])")
 make_env() {   # $1 = directory name
     [ -d "$1" ] || .venv/bin/python -m venv "$1"
     echo "$MAIN_SITE" > "$("$1/bin/python" -c "import site;print(site.getsitepackages()[0])")/zz_main_venv.pth"
-}
-
-qwen3() {
-    make_env .venv-tts2
-    .venv-tts2/bin/pip install -q qwen-tts
 }
 
 chatterbox() {
@@ -41,10 +36,9 @@ PY
 }
 
 case "${1:-all}" in
-    qwen3) qwen3 ;;
     chatterbox) chatterbox ;;
     higgs) PYTHONPATH=. higgs ;;
-    all) chatterbox; qwen3; PYTHONPATH=. higgs ;;
-    *) echo "usage: $0 chatterbox|qwen3|higgs|all"; exit 1 ;;
+    all) chatterbox; PYTHONPATH=. higgs ;;
+    *) echo "usage: $0 chatterbox|higgs|all"; exit 1 ;;
 esac
 echo "Engines installed. Models download on first use."

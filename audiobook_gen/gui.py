@@ -36,7 +36,7 @@ KOKORO_VOICES = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_
 MAX_ROLES = 30
 MODE_MULTI = "Different voice for each character"
 MODE_SINGLE = "One narrator reads everything"
-ENGINE_LABELS = {"F5-TTS": "f5", "Chatterbox": "chatterbox", "Qwen3-TTS": "qwen3", "Higgs": "higgs"}
+ENGINE_LABELS = {"F5-TTS": "f5", "Chatterbox": "chatterbox", "Higgs": "higgs"}
 HIGGS_STYLES = {"Lively (expressive_high)": "<|prosody:expressive_high|>", "Calm (expressive_low)": "<|prosody:expressive_low|>", "Plain (no style tag)": ""}
 LEX_MODES = {"Phonetic respelling — made from the IPA where blank": "respell",
              "Plain spelling — no substitutions": "plain"}
@@ -266,7 +266,7 @@ def set_mode(project, mode):
 
 def _pace_update(engine):
     """The Pace slider means different things per engine: Kokoro and F5 use it as is, Higgs scales its own saved pace, the others choose their own."""
-    if engine in ("chatterbox", "qwen3"):
+    if engine == "chatterbox":
         return gr.update(interactive=False, label="Pace (set by the engine)")
     return gr.update(interactive=True, label="Pace ×saved" if engine == "higgs" else "Pace")
 
@@ -756,7 +756,7 @@ def save_lexicon(project, lex_df, snap=None):
             e.update(new, source="user")
     fill_respell(old.values(), refresh=True)   # IPA you typed -> an auto-made respelling for F5
     (work / "lexicon.json").write_text(json.dumps(list(old.values()), ensure_ascii=False, indent=2))
-    return ("Lexicon saved. Kokoro uses your IPA; Chatterbox and Qwen3 use only respellings you typed; "
+    return ("Lexicon saved. Kokoro uses your IPA; Chatterbox uses only respellings you typed; "
             "F5 also gets a respelling made from the IPA where you left it blank.")
 
 
@@ -777,7 +777,7 @@ def lex_autospell(project, lex_df):
 
 
 def fw_hear(project, word, ipa, respell, voice_key, template):
-    """Speak `word` in a sentence with the chosen voice: Kokoro gets IPA markup, Chatterbox/Qwen3 the bare IPA, F5 the respelling."""
+    """Speak `word` in a sentence with the chosen voice: Kokoro gets IPA markup, Chatterbox the bare IPA, F5 the respelling."""
     from .lexicon import auto_respell, f5_text
     word = (word or "").strip()
     if not word or not voice_key:
@@ -787,7 +787,7 @@ def fw_hear(project, word, ipa, respell, voice_key, template):
     v = resolve(v)
     if v["engine"] == "kokoro":
         spoken = f"[{word}](/{ipa.strip().strip('/')}/)" if (ipa or "").strip() else word
-    elif v["engine"] in ("chatterbox", "qwen3"):     # these read the IPA itself
+    elif v["engine"] == "chatterbox":     # it reads the IPA itself
         spoken = ipa.strip().strip("/") if (ipa or "").strip() else word
     elif v["engine"] == "higgs":                     # plain text: the name, or the respelling you typed
         spoken = (respell or "").strip() or word
@@ -913,7 +913,7 @@ def _need_engine(key: str):
             raise gr.Error("Higgs needs transformers 5.5 or newer in the main environment.")
         return
     from .tts import remote_engine as re_
-    cls = {"chatterbox": re_.ChatterboxEngine, "qwen3": re_.Qwen3Engine}.get(key)
+    cls = {"chatterbox": re_.ChatterboxEngine}.get(key)
     if cls and not cls.available():
         raise gr.Error(f"{key} is not installed on this machine (its environment `{cls.venv}` is missing).")
 
@@ -929,7 +929,7 @@ def clone_generate(audio, ref_text, text, speed, steps, cfg, sway, xfade, rms, s
     except ValueError as e:
         raise gr.Error(str(e))
     if key not in ("chatterbox", "higgs") and not (ref_text or "").strip():
-        raise gr.Error("Type exactly what is said in the clip (F5-TTS and Qwen3 need it; Chatterbox and Higgs do not).")
+        raise gr.Error("Type exactly what is said in the clip (F5-TTS needs it; Chatterbox and Higgs do not).")
     _need_engine(key)
     import random
     import time
@@ -974,7 +974,7 @@ def clone_compare(name, text):
         need_gpu()
         eng = _engine(key, "auto")
         outs.append(_wav(eng.synth(text or TEST_TEXT, v), eng.sample_rate, f"compare_{key}.wav"))
-    return (*outs, f"**{name}** in F5-TTS, Chatterbox, Qwen3-TTS and Higgs (an engine that isn't installed is left blank).")
+    return (*outs, f"**{name}** in F5-TTS, Chatterbox and Higgs (an engine that isn't installed is left blank).")
 
 
 GENDER_PICK = ["Detect from the clip", "male", "female", "unknown"]
@@ -1344,11 +1344,11 @@ def engine_status() -> str:
     from .tts.higgs_engine import HiggsEngine
     higgs = "needs transformers 5.5+" if not HiggsEngine.available() else "ready" if HiggsEngine.cached() else "ready (9.3 GB downloads the first time)"
     return (f"**Engines on this machine** — Kokoro: ready · F5-TTS: ready · "
-            f"Chatterbox: {ok(re_.ChatterboxEngine.available())} · Qwen3-TTS: {ok(re_.Qwen3Engine.available())} · Higgs: {higgs}"
+            f"Chatterbox: {ok(re_.ChatterboxEngine.available())} · Higgs: {higgs}"
             + (f" · GPU memory: {v:.0f} GB" if v else " · no Intel GPU found (CPU only)"))
 
 
-ENGINE_NAMES = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "qwen3": "Qwen3-TTS", "higgs": "Higgs"}
+ENGINE_NAMES = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "higgs": "Higgs"}
 
 
 def speed_text(project=None) -> str:
@@ -2395,8 +2395,8 @@ def corr_pick(project, files, evt: gr.SelectData):
 def _changes(c, exag, cfg_w, seed):
     """Only the settings that differ from what the clip has now."""
     v, out = c["voice"], {}
-    if c["engine"] in ("chatterbox", "qwen3", "higgs"):
-        for k, val in (("exaggeration", exag), ("cfg_weight", cfg_w)) if c["engine"] != "higgs" else ():
+    if c["engine"] in ("chatterbox", "higgs"):
+        for k, val in (("exaggeration", exag), ("cfg_weight", cfg_w)) if c["engine"] == "chatterbox" else ():
             if val is not None and abs(float(val) - float(v.get(k, 0.5))) > 1e-6:
                 out[k] = round(float(val), 3)
         if seed is not None and int(seed) >= 0 and int(seed) != v.get("seed"):
@@ -2560,9 +2560,9 @@ def build_ui() -> gr.Blocks:
                             "to other lines, so they are ignored where the line no longer matches.")
                 with gr.Accordion("Voice preview & menu help", open=False):
                     gr.Markdown("Pick an **Engine** for each character, then one of that engine's voices. Any character can use any engine: the voices "
-                                "of one book can come from Kokoro, Higgs, Chatterbox, F5 and Qwen3 together. A saved clone can be voiced by Higgs, Chatterbox, F5 or Qwen3, "
+                                "of one book can come from Kokoro, Higgs, Chatterbox and F5 together. A saved clone can be voiced by Higgs, Chatterbox, F5 or Qwen3, "
                                 "and changing the engine keeps the clone. The **Pace** slider applies to Kokoro and F5; for Higgs it scales the voice's own pace; "
-                                "Chatterbox and Qwen3 choose their own pace (Chatterbox gets emotion from the text — see the Make tab).")
+                                "Chatterbox chooses its own pace (it gets emotion from the text — see the Make tab).")
                     with gr.Row():
                         pv_text = gr.Textbox(label="Sample text for ▶ Hear", scale=3,
                                              value="In the beginning was the Word, and the Word was with God.")
@@ -2685,11 +2685,11 @@ def build_ui() -> gr.Blocks:
                 banner("names")
                 gpu_bar()
                 gr.Markdown("How names and hard words are pronounced. **Build lexicon**, fill in the IPA (try **Look up**), review, then **Save**.\n\n"
-                            "**Who uses what:** Kokoro voices use the **IPA** column. **Chatterbox and Qwen3 use only the respelling you type** in the "
+                            "**Who uses what:** Kokoro voices use the **IPA** column. **Chatterbox uses only the respelling you type** in the "
                             "*respell* column — IPA and auto-made spellings never reach them. F5-TTS uses the respelling, made from the IPA where blank.")
                 with gr.Accordion("F5-TTS only — how its names are spelled", open=False):
                     lex_rd = gr.Radio(list(LEX_MODES), value=list(LEX_MODES)[0], label="How names and hard words are spoken by F5-TTS",
-                                      info="Does not affect Chatterbox, Qwen3 or Kokoro. Saved when you generate.")
+                                      info="Does not affect Chatterbox, Higgs or Kokoro. Saved when you generate.")
                 with gr.Row():
                     lex_btn = gr.Button("Build lexicon", variant="primary", scale=1)
                     lookup_btn = gr.Button("Look up IPA online (Wiktionary / WikiPron / Bible dictionary)", scale=2)
@@ -2712,13 +2712,13 @@ def build_ui() -> gr.Blocks:
                         offline_cb = gr.Checkbox(label="Offline only (skip Wiktionary)")
                         wiki_tb = gr.Textbox(label="Fandom wikis to search too (optional: lotr, harrypotter…)", scale=3)
                 with gr.Accordion("Auto-fill tools", open=False):
-                    gr.Markdown("**guess** is what Kokoro says today; **ipa** is read by Kokoro, Chatterbox and Qwen3; **respell** is for F5.")
+                    gr.Markdown("**guess** is what Kokoro says today; **ipa** is read by Kokoro and Chatterbox; **respell** is for F5.")
                     with gr.Row():
                         known_cb = gr.Checkbox(label="Also apply to well-known names (Edmond, Napoleon…)")
                         fill_btn = gr.Button("Auto-fill IPA from language")
                         spell_btn = gr.Button("Auto-spell for F5 (from IPA, or from the guess if no IPA)")
                 with gr.Accordion("Fix or add a word (hear it in the real voice, then save)", open=False):
-                    gr.Markdown("Click a row above to load it here, or type any word. **IPA** is what Kokoro, Chatterbox and Qwen3 use; **Respelling** is "
+                    gr.Markdown("Click a row above to load it here, or type any word. **IPA** is what Kokoro and Chatterbox use; **Respelling** is "
                                 "what F5 uses — write it like a plain word with no hyphens or capitals (e.g. `Nuhthanyel`; hyphens "
                                 "split a name into separate words and capitals get spelled out). Leave one blank and it is made from the other.")
                     with gr.Row():
@@ -2909,7 +2909,7 @@ def build_ui() -> gr.Blocks:
                     m4b = gr.File(label="M4B"); ch1 = gr.Audio(label="First chapter (preview)")
                 with gr.Accordion("Advanced — pauses, emotion offset, speed", open=False):
                     gr.Markdown("### Every voice\nPauses and crossfade are applied when the chapters are put together, so they work the same for "
-                                "Kokoro, F5-TTS, Chatterbox and Qwen3-TTS.")
+                                "Kokoro, F5-TTS, Chatterbox and Higgs.")
                     with gr.Row():
                         xf = gr.Slider(0, 200, 60, step=10, label="Crossfade (ms) — all voices")
                         ps = gr.Slider(0, 1500, 350, step=50, label="Sentence pause (ms) — all voices")
@@ -2935,7 +2935,6 @@ def build_ui() -> gr.Blocks:
                         with gr.Column():
                             gr.Markdown("### F5-TTS only")
                             f5_half = gr.Checkbox(value=True, label="Half precision (about 4.8× faster on Arc, same sound) — F5-TTS only")
-                    gr.Markdown("*Qwen3-TTS has no settings of its own here.*")
 
             with gr.Tab("⑥ Fix", id="fix"):
                 banner("fix")
@@ -3055,7 +3054,7 @@ def build_ui() -> gr.Blocks:
             with gr.Tab("🎙 Voice lab", elem_id="clone-tab", id="lab"):
                 gpu_bar()
                 gr.Markdown("Clone a voice from a short clean clip (5–12 s, one speaker, no music), compare the takes, then save it. "
-                            "A saved voice can be spoken by F5-TTS, Chatterbox or Qwen3-TTS.")
+                            "A saved voice can be spoken by F5-TTS, Chatterbox or Higgs.")
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=1):
                         with gr.Group():
@@ -3150,7 +3149,7 @@ def build_ui() -> gr.Blocks:
                     with gr.Accordion("Hear this voice in every engine", open=False):
                         c_compare = gr.Button("Compare engines")
                         with gr.Row():
-                            cmp_f5 = gr.Audio(label="F5-TTS"); cmp_cb = gr.Audio(label="Chatterbox"); cmp_qw = gr.Audio(label="Qwen3-TTS"); cmp_hg = gr.Audio(label="Higgs")
+                            cmp_f5 = gr.Audio(label="F5-TTS"); cmp_cb = gr.Audio(label="Chatterbox"); cmp_hg = gr.Audio(label="Higgs")
                 with gr.Accordion("Pacing: measure this narrator's pauses from their audiobook", open=False):
                     gr.Markdown("Where a voice pauses (after sentences, commas, paragraphs, inside speech) is a large part of how it sounds. Give the "
                                 "recording the voice was made from and its ebook; the pauses are measured, matched to the text, and saved with the "
@@ -3407,7 +3406,7 @@ def build_ui() -> gr.Blocks:
         pc_timer.tick(pacing_status, pc_voice, [pc_status, pc_tbl])
         c_assign.click(clone_assign, [project, lib_dd, lib_role, lib_engine], c_status).then(
             load_parsed, project, cast_outs).then(voice_settings, project, VS_OUTS)
-        c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_qw, cmp_hg, c_status])
+        c_compare.click(clone_compare, [lib_dd, c_test], [cmp_f5, cmp_cb, cmp_hg, c_status])
     return ui
 
 

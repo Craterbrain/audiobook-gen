@@ -27,11 +27,11 @@ emotion_base: 0.0             # -0.3 calmer ... +0.3 more dramatic
 text_lexicon: respell         # respell | plain  (F5 voices only; see below)
 pacing_ms: {sentence: 350, paragraph: 700, speaker_change: 250, chapter_start: 1200, continuation: 140, tag: 120}
 crossfade_ms: 60
-workers: {kokoro: 4, f5: 1, qwen3: 1, chatterbox: 1}   # chatterbox 2 needs 16 GB of GPU memory
+workers: {kokoro: 4, f5: 1, chatterbox: 1, higgs: 1}   # chatterbox 2 needs 16 GB of GPU memory
 ```
 - Engines: `higgs` (clone voices, reads plain text and gets names right, about 20 characters a second, 9.4 GB of GPU; settings `temperature`, `pace`, `tag`; the book can set `higgs_emotion: true` and `higgs_emotion_share`), `kokoro` (fast, preset voices), `chatterbox` (clone voices, expressive, slow, about 22 characters a second),
-  `f5` and `qwen3` (clone voices). A clone voice is `{engine: <engine>, library: <name from voices.md>}`.
-- Names and hard words: Kokoro voices use the lexicon's `ipa`. Chatterbox and Qwen3 voices use ONLY respellings typed in the
+  `f5` (clone voices). A clone voice is `{engine: <engine>, library: <name from voices.md>}`.
+- Names and hard words: Kokoro voices use the lexicon's `ipa`. Chatterbox voices use ONLY respellings typed in the
   lexicon (`respell` with `respell_src: user`), and Chatterbox also the project's tested Bible respellings; IPA never reaches them.
   `text_lexicon` (`respell` or `plain`) only affects F5 voices.
 - Give each character a voice of their gender and keep voices distinct. Do not change the narrator unless asked.

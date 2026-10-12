@@ -64,9 +64,5 @@ class RemoteEngine(TTSEngine):
             pass
 
 
-class Qwen3Engine(RemoteEngine):
-    name, venv, worker = "qwen3", ".venv-tts2", "worker_qwen3.py"
-
-
 class ChatterboxEngine(RemoteEngine):
     name, venv, worker = "chatterbox", ".venv-chatterbox", "worker_chatterbox.py"

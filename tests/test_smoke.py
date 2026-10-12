@@ -338,10 +338,11 @@ def test_the_voice_picker_goes_engine_first_and_keeps_every_stored_shape(tmp_pat
     from audiobook_gen import casting
     voices = _higgs_library(tmp_path, monkeypatch)
     monkeypatch.setattr(casting, "vlib", voices); casting.forget_ready()
-    monkeypatch.setattr(casting, "_engine_ready", lambda suffix: suffix != "@qwen3")
-    assert [e for _, e in casting.engine_choices()] == ["kokoro", "higgs", "chatterbox", "f5"]            # Qwen3 is not installed: hidden
-    assert ("Qwen3 ⚠ not installed", "qwen3") in casting.engine_choices("qwen3")                          # unless a role is already set to it
-    for eng in ("kokoro", "higgs", "chatterbox", "f5"):                                                    # every menu key round-trips through the stored shape
+    monkeypatch.setattr(casting, "_engine_ready", lambda suffix: suffix != "@chatterbox")
+    assert [e for _, e in casting.engine_choices()] == ["kokoro", "higgs", "f5"]            # Chatterbox is not installed: hidden
+    assert ("Chatterbox ⚠ not installed", "chatterbox") in casting.engine_choices("chatterbox")              # unless a role is already set to it
+    assert ("qwen3 ⚠ no longer available", "qwen3") in casting.engine_choices("qwen3")                  # an engine that was removed
+    for eng in ("kokoro", "higgs", "f5"):                                                                  # every menu key round-trips through the stored shape
         for _, key in casting.voices_for(eng):
             assert casting.engine_of_key(key) == eng and casting.key_of(casting.voice_of(key)) == key
     assert casting.voices_for("higgs") == [("♀ Walt", "clone:Walt@higgs")]
@@ -350,7 +351,8 @@ def test_the_voice_picker_goes_engine_first_and_keeps_every_stored_shape(tmp_pat
     assert casting.switch_engine("kokoro:af_heart", "f5", last_clone="Walt") == "clone:Walt"
     assert casting.switch_engine("clone:Walt", "kokoro", "male", {"kokoro:am_adam"}) == "kokoro:am_echo"  # a preset of the gender nobody has yet
     assert casting.voice_problem({"engine": "higgs", "library": "Gone"}) == "Gone is no longer in the voice library"
-    assert casting.voice_problem({"engine": "qwen3", "library": "Walt"}) == "Qwen3 is not installed"
+    assert casting.voice_problem({"engine": "chatterbox", "library": "Walt"}) == "Chatterbox is not installed"
+    assert casting.voice_problem({"engine": "qwen3", "library": "Walt"}) == "the qwen3 engine is no longer available"
     cfg = {"default_voice": {"engine": "chatterbox", "library": "Walt"}, "voices": {"Bob": {"engine": "kokoro", "voice": "bm_george"}}}
     assert casting.configured_voice("Servants", cfg) == {"engine": "chatterbox", "library": "Walt"}       # a role on the default voice (was a blank menu)
     assert "one GPU pass" in casting.mix_note([{"engine": "higgs"}, {"engine": "kokoro", "voice": "x"}])
@@ -543,7 +545,7 @@ def test_library_voice_keeps_chatterbox_settings(tmp_path, monkeypatch):
 def test_interface_builds_with_every_engine_option():
     from audiobook_gen import gui
     assert gui.build_ui() is not None
-    assert set(gui.ENGINE_LABELS.values()) == {"f5", "chatterbox", "qwen3", "higgs"}
+    assert set(gui.ENGINE_LABELS.values()) == {"f5", "chatterbox", "higgs"}
     assert set(gui.LEX_MODES.values()) == {"respell", "plain"}
 
 
@@ -560,7 +562,7 @@ def test_placeholder_cover_has_large_readable_title(tmp_path):
 
 def test_voice_menu_keys_round_trip_through_the_config():
     from audiobook_gen import casting
-    for key in ("kokoro:am_onyx", "kokoro:pack:wakers_ch16", "clone:Walter", "clone:Walter@chatterbox", "clone:Walter@qwen3"):
+    for key in ("kokoro:am_onyx", "kokoro:pack:wakers_ch16", "clone:Walter", "clone:Walter@chatterbox"):
         assert casting.key_of(casting.voice_of(key, 1.0)) == key
 
 
@@ -834,12 +836,19 @@ def test_chatterbox_lexicon_uses_only_respellings_you_typed():
     assert "Weenuh" in out and "Filby" in out and "filbee" not in out and "Eloi" in out
 
 
-def test_chatterbox_and_qwen3_get_only_typed_respellings():
+def test_a_removed_engine_gives_a_clear_error_not_a_silent_fallback():
+    import pytest
+    from audiobook_gen import synth
+    with pytest.raises(ValueError, match="not available any more"):
+        synth.get_engine("qwen3")
+
+
+def test_chatterbox_gets_only_typed_respellings():
     from audiobook_gen.lexicon import Preprocessor
     from audiobook_gen.synth import lexicon_mode
     cfg = {"text_lexicon": "rawipa"}                                   # even a project set to raw IPA
     assert lexicon_mode("kokoro", cfg) == "ipa"
-    assert lexicon_mode("chatterbox", cfg) == "verified" and lexicon_mode("qwen3", cfg) == "typed"
+    assert lexicon_mode("chatterbox", cfg) == "verified" and lexicon_mode("higgs", cfg) == "checked"
     assert lexicon_mode("f5", cfg) == "rawipa" and lexicon_mode("f5", {}) == "respell"
     lex = [{"term": "Weena", "ipa": "ˈwiːnə", "respell": "Weenuh", "respell_src": "user", "source": "user"},
            {"term": "Eloi", "ipa": "ˈiːlɔɪ", "respell": "eeloy", "respell_src": "auto", "source": "auto"},

@@ -40,7 +40,7 @@ Upload your book. Supported: `.epub`, `.txt`, `.md`, `.html`, `.docx`, `.pdf` (n
 * Each character gets an engine and voice, a pace slider and a **▶ Hear** button. Changes save as you make them.
 * **Find genders** asks the small language model; correct any row by hand. Genders pick sensible default voices.
 * You can move lines between characters, or merge two characters.
-* Voices: **Kokoro** presets (fast), or your own **cloned** voices from the Voice lab. **Higgs** is the newest clone engine: it reads names correctly from plain text, so it needs little pronunciation work. Chatterbox is expressive, F5 and Qwen3 also work.
+* Voices: **Kokoro** presets (fast), or your own **cloned** voices from the Voice lab. **Higgs** is the newest clone engine: it reads names correctly from plain text, so it needs little pronunciation work. Chatterbox is expressive, and F5 also works.
 
 ### ③ Names
 

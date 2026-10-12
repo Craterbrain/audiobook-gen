@@ -31,7 +31,7 @@ def voice_choices() -> list[tuple[str, str]]:
     return clones + packs + kokoro
 
 
-CLONE_ENGINES = [("", "F5"), ("@qwen3", "Qwen3"), ("@chatterbox", "Chatterbox"), ("@higgs", "Higgs")]   # every clone can be voiced by each
+CLONE_ENGINES = [("", "F5"), ("@chatterbox", "Chatterbox"), ("@higgs", "Higgs")]   # every clone can be voiced by each
 
 
 def _engine_ready(suffix: str) -> bool:
@@ -39,7 +39,7 @@ def _engine_ready(suffix: str) -> bool:
         return True
     from .tts import remote_engine
     from .tts.higgs_engine import HiggsEngine
-    return {"@qwen3": remote_engine.Qwen3Engine, "@chatterbox": remote_engine.ChatterboxEngine, "@higgs": HiggsEngine}[suffix].available()
+    return {"@chatterbox": remote_engine.ChatterboxEngine, "@higgs": HiggsEngine}[suffix].available()
 
 
 def key_of(voice: dict) -> str | None:
@@ -97,7 +97,6 @@ ENGINES = {   # id: (label, key suffix, what it is like, GPU group: engines of d
     "higgs": ("Higgs", "@higgs", "clone; plain text, names right, slow, 9.4 GB of GPU", "higgs"),
     "chatterbox": ("Chatterbox", "@chatterbox", "clone; expressive, slower, names need respelling", "heavy"),
     "f5": ("F5", "", "clone; light", "light"),
-    "qwen3": ("Qwen3", "@qwen3", "clone", "heavy"),
 }
 _READY: dict[str, bool] = {}
 
@@ -132,6 +131,8 @@ def engine_choices(current: str | None = None) -> list[tuple[str, str]]:
             out.append((label, e))
         elif e == current:
             out.append((f"{label} ⚠ not installed", e))
+    if current and current not in ENGINES:                       # a book set up with an engine that has been removed (Qwen3-TTS)
+        out.append((f"{current} ⚠ no longer available", current))
     return out
 
 
@@ -212,7 +213,7 @@ def switch_engine(key: str | None, engine: str, gender: str | None = None, taken
         suits = lambda n: not want or vlib.voice_gender(n) in (want, "unknown")
         name = last_clone if last_clone in saved and suits(last_clone) else next((n for n in saved if suits(n)), (saved or [None])[0])
     if not name:
-        raise ValueError("Save a clone voice first (Voice lab): Higgs, Chatterbox, F5 and Qwen3 speak with a clone.")
+        raise ValueError("Save a clone voice first (Voice lab): Higgs, Chatterbox and F5 speak with a clone.")
     return f"clone:{name}{ENGINES[engine][1]}"
 
 
@@ -241,13 +242,15 @@ def voice_problem(voice: dict) -> str | None:
     if voice.get("library") and voice["library"] not in vlib.list_voices():
         return f"{voice['library']} is no longer in the voice library"
     e = voice.get("engine", "f5" if voice.get("library") else "kokoro")
-    if e in ENGINES and not engine_ready(e):
+    if e not in ENGINES:
+        return f"the {e} engine is no longer available"
+    if not engine_ready(e):
         return f"{ENGINES[e][0]} is not installed"
     return None
 
 
 def mix_note(voices) -> str:
-    """One line on what a cast's engines cost: nothing for light mixes, a model swap when Higgs shares a book with Chatterbox or Qwen3."""
+    """One line on what a cast's engines cost: nothing for light mixes, a model swap when Higgs shares a book with Chatterbox."""
     engines = []
     for v in voices:
         e = v.get("engine", "f5" if v.get("library") else "kokoro")
@@ -256,6 +259,6 @@ def mix_note(voices) -> str:
     if not engines:
         return ""
     names = " + ".join(ENGINES[e][0] for e in engines)
-    if "higgs" in engines and any(e in ("chatterbox", "qwen3") for e in engines):
-        return f"ⓘ This cast uses {names}. Higgs and {'Chatterbox' if 'chatterbox' in engines else 'Qwen3'} cannot share the GPU, so the book is made in separate passes (one model swap, about a minute or two)."
+    if "higgs" in engines and "chatterbox" in engines:
+        return f"ⓘ This cast uses {names}. Higgs and Chatterbox cannot share the GPU, so the book is made in separate passes (one model swap, about a minute or two)."
     return f"ⓘ This cast uses {names}: one GPU pass."

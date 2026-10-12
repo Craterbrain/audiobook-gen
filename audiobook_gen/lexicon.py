@@ -845,9 +845,9 @@ class Preprocessor:
 
     mode="respell": replace with phonetic respelling (F5-TTS reads plain text).
     mode="ipa":     replace with Kokoro/misaki markup  [term](/IPA/).
-    mode="rawipa":  replace the word with its bare IPA, for text models that may read it (Qwen3, Chatterbox).
+    mode="rawipa":  replace the word with its bare IPA, for text models that may read it (Chatterbox).
     mode="plain":   no substitutions at all.
-    mode="typed":   plain spelling, except respellings you typed in the lexicon (Qwen3-TTS).
+    mode="typed":   plain spelling, except respellings you typed in the lexicon.
     mode="checked": as "typed", plus respellings the name check found and scored (Higgs; not the Bible respellings tuned for Chatterbox).
     mode="verified": plain spelling, except names whose respelling in data/bible_respell.json was tested to sound
                     better (Chatterbox) and respellings the name check (namecheck.py) scored better than the plain spelling;

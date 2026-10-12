@@ -69,18 +69,16 @@ def resolve_voice(role: str, cfg: dict) -> dict:
 
 
 _ENGINES: dict = {}  # shared across calls so the GUI doesn't reload models every run
-DEFAULT_WORKERS = {"kokoro": 4, "f5": 1, "qwen3": 1, "chatterbox": 1, "higgs": 1}  # Kokoro: 1 worker 59 s, 3 -> 23 s, 4 -> 17 s on John 1; F5 saturates the GPU (no gain)
+DEFAULT_WORKERS = {"kokoro": 4, "f5": 1, "chatterbox": 1, "higgs": 1}  # Kokoro: 1 worker 59 s, 3 -> 23 s, 4 -> 17 s on John 1; F5 saturates the GPU (no gain)
 
 
 def lexicon_mode(ename: str, cfg: dict) -> str:
-    """How an engine receives the lexicon. Kokoro takes IPA. Chatterbox and Qwen3 take ONLY respellings you typed (Chatterbox
+    """How an engine receives the lexicon. Kokoro takes IPA. Chatterbox takes ONLY respellings you typed (Chatterbox
     also the tested Bible respellings); F5 follows the project's text_lexicon setting."""
     if ename == "kokoro":
         return "ipa"
     if ename == "chatterbox":
         return "verified"
-    if ename == "qwen3":
-        return "typed"
     if ename == "higgs":                    # plain text: only respellings you typed, or the name check found and scored, reach it
         return "checked"
     return cfg.get("text_lexicon", "respell")
@@ -128,15 +126,17 @@ def get_engine(name: str, device_pref: str = "auto", slot: int = 0, precision: s
         if name == "kokoro":
             from .tts.kokoro_engine import KokoroEngine
             _ENGINES[key] = KokoroEngine(device_pref)
-        elif name in ("qwen3", "chatterbox"):   # run in their own virtualenvs
+        elif name == "chatterbox":              # runs in its own virtualenv
             from .tts import remote_engine
-            _ENGINES[key] = {"qwen3": remote_engine.Qwen3Engine, "chatterbox": remote_engine.ChatterboxEngine}[name](device_pref)
+            _ENGINES[key] = remote_engine.ChatterboxEngine(device_pref)
         elif name == "higgs":
             from .tts.higgs_engine import HiggsEngine
             _ENGINES[key] = HiggsEngine(device_pref)
-        else:
+        elif name == "f5":
             from .tts.f5_engine import F5Engine
             _ENGINES[key] = F5Engine(device_pref, precision=precision)
+        else:                                   # e.g. a book set up long ago with the Qwen3-TTS engine, which has been removed
+            raise ValueError(f"The “{name}” voice engine is not available any more. Choose another engine for those voices on the Voices tab.")
     return _ENGINES[key]
 
 

@@ -1462,7 +1462,7 @@ def now_running() -> dict | None:
     return None
 
 
-ENGINE_LABELS = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "qwen3": "Qwen3-TTS", "higgs": "Higgs"}
+ENGINE_LABELS = {"kokoro": "Kokoro", "f5": "F5-TTS", "chatterbox": "Chatterbox", "higgs": "Higgs"}
 
 
 def voices_text(job: dict) -> str:

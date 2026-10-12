@@ -20,7 +20,7 @@ This project ships code and a few small data files. Everything else is downloade
 - Bible texts under copyright (most modern translations). `python -m audiobook_gen bible-dict <verse-per-line text>` builds the
   dictionary from any text you own; no Bible text is distributed here.
 - Your audiobooks, ebooks, recordings and cloned voices (`voices/`, `work/`, `out/`).
-- Model weights: Kokoro-82M, F5-TTS, Chatterbox, Qwen3-TTS, Whisper, WavLM and others are downloaded from Hugging Face
+- Model weights: Kokoro-82M, F5-TTS, Chatterbox, Higgs TTS 3, Whisper, WavLM and others are downloaded from Hugging Face
   and keep their own licenses. Check each before commercial use (for example, F5-TTS weights are released for
   non-commercial use).
 - Downloaded reference data: WikiPron tables, ipa-dict word lists, S. V. R. Ford's *Pronouncing Vocabulary of Scripture
