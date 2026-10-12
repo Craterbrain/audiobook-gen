@@ -2679,3 +2679,24 @@ def test_a_scripture_text_is_titled_by_its_file_name_not_its_first_verse(tmp_pat
     f = tmp_path / "john_study_text.txt"
     f.write_text("\n".join(f"{c}:{v} In the beginning was the word and the word was with God." for c in (1, 2) for v in range(1, 14)))
     assert extract.extract(str(f), str(tmp_path / "w"))["title"] == "John Study Text"
+
+
+def test_a_few_foreign_looking_names_do_not_make_a_book_foreign(monkeypatch):
+    from audiobook_gen import lexicon
+    monkeypatch.setattr(lexicon, "detect_wordfreq", lambda term, is_name: ("fr", 5) if term.startswith("Fr") else ("", 0.0))
+    def book(n_french, n_plain):
+        ents = {f"Fr{i}": {"term": f"Fr{i}", "kind": "name", "known": False, "lang": "", "count": 3} for i in range(n_french)}
+        ents |= {f"Plain{i}": {"term": f"Plain{i}", "kind": "name", "known": False, "lang": "", "count": 3} for i in range(n_plain)}
+        ents["Clock Tower"] = {"term": "Clock Tower", "kind": "phrase", "known": False, "lang": "", "count": 2}
+        return lexicon.detect_languages(ents, [], ""), ents
+    out, ents = book(5, 95)                      # 5 of 100: an English book with a few odd names
+    assert out["__stats__"]["book_language"] == "en" and not any(e.get("lang_src") == "book" for e in ents.values() if isinstance(e, dict) and "term" in e)
+    out, ents = book(40, 60)                     # 40 of 100: a French book
+    assert out["__stats__"]["book_language"] == "fr" and ents["Plain3"]["lang"] == "fr"
+    assert ents["Clock Tower"]["lang"] == "" and lexicon._english_phrase("Hyde Park") and not lexicon._english_phrase("Pont Neuf")   # English phrases stay English
+    assert lexicon.ESPEAK_LANG["en"] == "en-us"
+    rows = [{"term": "Hyde Park", "lang": "fr", "lang_src": "book", "lang_conf": 0.5, "ipa": "ˈid pˈɑːk", "respell": "eed pahk", "respell_src": "auto", "source": "auto"},
+            {"term": "Dantès", "lang": "fr", "lang_src": "book", "lang_conf": 1.0, "ipa": "dɑ̃tˈɛs", "respell": "", "source": "auto"},
+            {"term": "Mine", "lang": "fr", "lang_src": "book", "lang_conf": 0.5, "ipa": "mˈin", "respell": "meen", "source": "user"}]
+    assert lexicon.drop_guessed_language(rows) == 1 and rows[0]["lang"] == "" and rows[0]["ipa"] == "" and rows[0]["respell"] == ""
+    assert rows[1]["lang"] == "fr" and rows[2]["ipa"] == "mˈin"                   # a confident language and your own entries are kept

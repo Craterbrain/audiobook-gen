@@ -18,7 +18,7 @@ POSS_RE = re.compile(r"[’']s$", re.I)
 LABEL_KIND = {"PERSON": "name", "GPE": "place", "LOC": "place", "FAC": "place", "ORG": "name",
               "NORP": "demonym"}
 ESPEAK_LANG = {"el": "el", "ar": "ar", "fr": "fr-fr", "it": "it", "de": "de", "es": "es", "la": "la", "pt": "pt-br",
-               "ru": "ru", "he": "he", "nl": "nl", "pl": "pl", "gb": "en-gb"}
+               "ru": "ru", "he": "he", "nl": "nl", "pl": "pl", "gb": "en-gb", "en": "en-us"}      # plain "en" would be espeak's British default
 
 _G2P = None
 _ESPEAK: dict = {}
@@ -116,7 +116,31 @@ def _sentence_with(texts: list[str], word: str, width: int = 160) -> str:
     return word
 
 
+VOTE_SHARE = 0.15                  # the top language must have this share of the not-well-known names (Monte Cristo: 0.23; English books: <= 0.11)
+ENGLISH_PHRASE_ZIPF = 3.2          # a phrase made only of words this common in English is English ("Clock Tower", "Hyde Park")
 BOOK_LANGS = {"fr", "it", "es", "de", "pt", "nl"}  # Latin-script languages whose names espeak can voice
+
+
+def _english_phrase(term: str) -> bool:
+    """Every word is an everyday English word (not a name in disguise): leave the phrase to the English reader."""
+    from wordfreq import zipf_frequency
+    words = [w.lower() for w in WORD_RE.findall(term.replace("’s", "").replace("'s", "")) if w.lower() not in CONNECTORS]
+    return bool(words) and all(zipf_frequency(w, "en") >= ENGLISH_PHRASE_ZIPF for w in words)
+
+
+def drop_guessed_language(entries: list[dict]) -> int:
+    """Undo a book language that was only a weak guess (lang_conf 0.5): clear the language and any IPA/respelling espeak made from it.
+    Things you typed (source: user) and IPA that came from a dictionary are kept. Returns how many entries were reset."""
+    n = 0
+    for e in entries:
+        if e.get("lang_src") == "book" and e.get("lang_conf") == 0.5 and e.get("source") != "user":
+            e.update(lang="", lang_src="", lang_conf=0.0)
+            if not e.get("ipa_src") and e.get("source") != "user":
+                e["ipa"] = ""
+                if e.get("respell_src") in (None, "", "auto"):
+                    e["respell"], e["respell_src"] = "", ""
+            n += 1
+    return n
 
 
 def detect_languages(entries: dict, texts: list[str], hint: str = "", judge=None,
@@ -160,7 +184,10 @@ def detect_languages(entries: dict, texts: list[str], hint: str = "", judge=None
         how = "votes"
     if not book and how == "votes" and votes:
         top, n = votes.most_common(1)[0]
-        if n >= 2 and n / sum(votes.values()) >= 0.5:
+        unknown = sum(1 for e in entries.values() if not e.get("known"))
+        # A few foreign-looking names do not make a book foreign (War of the Worlds got French from 5 of 232 names, and its London
+        # parks were then read by espeak's French voice, which says English words in British phonemes). A foreign book has many.
+        if n >= 5 and n / sum(votes.values()) >= 0.5 and n >= VOTE_SHARE * max(1, unknown):
             book = top
     for e in entries.values():  # a lone hit in some other language is more likely coincidence
         if e.get("lang_src") == "wordfreq" and e["lang"] != book and votes[e["lang"]] < 2 \
@@ -173,6 +200,9 @@ def detect_languages(entries: dict, texts: list[str], hint: str = "", judge=None
         if not book:
             continue
         diacritic = bool(re.search(r"[^\x00-\x7f]", e["term"]))
+        if e["kind"] == "phrase" and not diacritic and _english_phrase(e["term"]):
+            stats["english"] += 1
+            continue
         if e["kind"] in ("name", "place", "demonym", "foreign", "phrase") or diacritic:
             e.update(lang=book, lang_src="book", lang_conf=1.0 if how != "votes" else 0.5)
             stats["book"] += 1
