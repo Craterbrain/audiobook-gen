@@ -227,6 +227,7 @@ def assign_origins(entries: list[dict], texts: list[str], judge, title: str = ""
     appears in and the book it is from. Replaces the guessed book-wide language. Entries you edited (source: user) and the very well known
     names are left alone. Entries that end up non-English get espeak IPA in their language; the rest lose any IPA/respelling made from a
     wrong language. Anything but American English must be convincing (see NONUS_MIN...). Returns {"asked", "changed", "by_setting"}."""
+    drop_numerals(entries)                                      # chapter numbers (XVII) are not names, whatever tradition they look like
     todo = [e for e in entries if e.get("kind") in ORIGIN_KINDS and e.get("source") != "user" and not e.get("known")]
     by: Counter = Counter()
     changed = 0
@@ -350,6 +351,30 @@ def detect_languages(entries: dict, texts: list[str], hint: str = "", judge=None
     return entries
 
 
+_HEADING_START = re.compile(r"^\s*(?:(?:chapter|book|part|section|letter|canto|act|scene)\b|[IVXLC]+\s*[.:]|\d{1,3}\s*[.:]\s*[A-Z])", re.I)
+
+
+def is_heading_line(par: str, title: str = "") -> bool:
+    """A short line that is the chapter's own heading: its title again, or "XVII. THE THUNDER CHILD.", "Chapter 4", "BOOK ONE ..."."""
+    line = " ".join(par.split())
+    if not line or len(line) > 100:
+        return False
+    norm = lambda x: re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
+    if title and norm(title) and (norm(line) == norm(title) or norm(line) in norm(title) or norm(title) in norm(line)):
+        return True
+    return bool(_HEADING_START.match(line)) and not re.search(r"[a-z]{3,}[,;]", line) and line.count(".") <= 2
+
+
+def chapter_body(ch: dict) -> str:
+    """The chapter's text without its heading lines at the start. The headings are read by the titles step (numbers spelled out), so
+    "XVII" and the like are never lexicon material: the headings are taken out first and the word scan runs on what is left."""
+    pars = re.split(r"\n\s*\n", ch["text"])
+    k = 0
+    while k < min(3, len(pars)) and is_heading_line(pars[k], ch.get("title", "")):
+        k += 1
+    return "\n\n".join(pars[k:])
+
+
 def build_lexicon(work: Path, lang: str = "", judge=None, title: str = "", author: str = "", progress=None) -> list[dict]:
     """Scan chapters.json -> lexicon.json (sorted by count). User-edited entries are preserved.
     progress(fraction 0..1, description) reports each stage."""
@@ -367,12 +392,12 @@ def build_lexicon(work: Path, lang: str = "", judge=None, title: str = "", autho
     n_ch = len(data["chapters"])
     for ci, ch in enumerate(data["chapters"]):
         P(0.02 + 0.30 * ci / n_ch, f"Reading chapter {ci + 1} of {n_ch} (finding names)")
-        text = ch["text"]
+        text = chapter_body(ch)                                  # headings first: they are not scanned for names
         if ch.get("format") == "play":  # speaker labels aren't spoken
             text = re.sub(r"^[A-Z][A-Z .’'-]+\.$", "", text, flags=re.M)
         for m in WORD_RE.finditer(text):
             w = _base(m.group())
-            if len(w) < 3:
+            if len(w) < 3 or is_numeral(w):
                 continue
             st = stat.setdefault(w.lower(), {"surface": Counter(), "mid": 0, "init": 0, "lower": 0,
                                              "labels": Counter()})
@@ -425,7 +450,7 @@ def build_lexicon(work: Path, lang: str = "", judge=None, title: str = "", autho
                     entries[k].update({f: old[f] for f in ("ipa", "respell", "lang") if f in old}, source="user")
                 else:
                     entries[k] = old  # hand-added term
-    texts = [c["text"] for c in data["chapters"]]
+    texts = [chapter_body(c) for c in data["chapters"]]
     P(0.62, "Finding place-name phrases")
     add_phrases(entries, stat, texts, ents)
     P(0.66, "Working out the language of each word" + (" (asking the small model)" if judge else ""))
@@ -496,6 +521,68 @@ CONNECTORS = {"de", "du", "des", "la", "le", "les", "of", "von", "van", "der", "
 PLACE_LABELS = {"GPE", "LOC", "FAC"}
 
 
+LEADING_STOP = frozenset("""from the in on at to and but then when as by for with after before of if so or nor yet while until upon into over under
+through about near between among during against along across toward towards within without dear dearest my our your his her their this that these
+those there here now thus once all some""".split())      # a capital only because it starts a sentence ("From La Grange"), never part of a name
+
+
+def trim_phrase(term: str) -> str:
+    """The phrase without sentence-initial function words at its front ("From La Grange" -> "La Grange"); "" if nothing is left of it."""
+    words = term.split()
+    while words and words[0].lower().strip("’'") in LEADING_STOP:
+        words = words[1:]
+    return " ".join(words) if len(words) >= 2 else ""
+
+
+def repair_phrases(entries: list[dict]) -> int:
+    """Fix phrase entries made before the leading-word trim: rename them (merging with an entry of the new name), drop what is left of one word."""
+    by = {e["term"].lower(): e for e in entries}
+    gone, n = [], 0
+    for e in entries:
+        if e.get("kind") != "phrase" or e.get("source") == "user":
+            continue
+        new = trim_phrase(e["term"])
+        if new == e["term"]:
+            continue
+        n += 1
+        other = by.get(new.lower()) if new else None
+        if other is not None and other is not e:
+            other["count"] = other.get("count", 0) + e.get("count", 0)
+            gone.append(e)
+        elif new:
+            e["term"] = new
+        else:
+            gone.append(e)
+    for e in gone:
+        entries.remove(e)
+    return n
+
+
+ROMAN_NUMERAL = re.compile(r"M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})", re.I)
+
+
+def is_numeral(term: str) -> bool:
+    """A Roman numeral (XVII, Xii, IV): chapter and section numbers. The chapter titles are read as numbers by titles.spoken, so they are not
+    lexicon material. Two mixed-case letters ("Li", "Xi", "Mi") are left alone: they are surnames."""
+    if not term or not ROMAN_NUMERAL.fullmatch(term) or not term.isalpha():
+        return False
+    if not term.isupper():
+        if len(term) < 3:
+            return False
+        from .pronounce import _ipadict_table
+        if term.lower() in _ipadict_table("en"):                       # Dix, Mix, Mil: a surname or an English word that happens to be valid
+            return False
+    return True
+
+
+def drop_numerals(entries: list[dict]) -> int:
+    """Remove Roman-numeral entries (not ones you wrote yourself) from a lexicon made before they were skipped. Returns how many."""
+    gone = [e for e in entries if is_numeral(e.get("term", "")) and e.get("source") != "user"]
+    for e in gone:
+        entries.remove(e)
+    return len(gone)
+
+
 def _phrases(text: str):
     """Capitalised word runs, allowing lowercase connectors inside (Allées de Meilhan, Château d'If)."""
     toks = list(WORD_RE.finditer(text))
@@ -518,7 +605,11 @@ def _phrases(text: str):
             else:
                 break
         if end > i:
-            yield text[toks[i].start():toks[end].end()]
+            first = i
+            while first < end and toks[first].group().lower().strip("’'") in LEADING_STOP:
+                first += 1
+            if end > first:
+                yield text[toks[first].start():toks[end].end()]
         i = end + 1
 
 

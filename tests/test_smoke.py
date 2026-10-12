@@ -2731,3 +2731,38 @@ def test_names_are_placed_by_the_model_with_three_sentence_context_and_strict_th
     assert by["Matamoras"]["lang"] == "es" and by["Ogilvy"]["lang"] == "gb"            # convincing: kept in their own tradition
     assert by["Halleck"]["lang"] == "" and by["Halleck"]["ipa"] == "" and by["Halleck"]["respell"] == ""   # 0.7 for British is not enough, and the Spanish guess is undone
     assert by["Hancock"]["lang"] == "" and rep["by_setting"] == {"es": 1, "gb": 1, "us": 2}
+
+
+def test_roman_numerals_are_not_lexicon_entries(monkeypatch):
+    from audiobook_gen import lexicon
+    assert all(lexicon.is_numeral(t) for t in ("Xvii", "XIV", "Lxii", "IV", "Xii")) and not any(lexicon.is_numeral(t) for t in ("Li", "Xi", "Mill", "Civil", "Mix", "Victor", "Dim", "Dix"))
+    rows = [{"term": "Xvii", "kind": "name", "source": "auto"}, {"term": "Cicero", "kind": "name", "source": "auto"}, {"term": "Xii", "kind": "name", "source": "user"}]
+    assert lexicon.drop_numerals(rows) == 1 and [r["term"] for r in rows] == ["Cicero", "Xii"]            # yours are kept
+    class Fake:
+        def settings(self, requests, title="", author="", progress=None):
+            return [{"us": 0.0, "la": 1.0} for _ in requests]
+    ents = [{"term": "Xlii", "kind": "name", "known": False, "source": "auto", "lang": "la", "ipa": "ks", "respell": "", "count": 1},
+            {"term": "Cicero", "kind": "name", "known": False, "source": "auto", "lang": "", "ipa": "", "respell": "", "count": 1}]
+    monkeypatch.setattr(lexicon, "autofill", lambda es, include_known=False: None)
+    lexicon.assign_origins(ents, ["Xlii. Cicero."], Fake())
+    assert [e["term"] for e in ents] == ["Cicero"] and ents[0]["lang"] == "la"
+
+
+
+def test_a_capital_only_because_it_starts_a_sentence_is_not_part_of_a_phrase():
+    from audiobook_gen import lexicon
+    assert list(lexicon._phrases("From La Grange we went. Then New York and Fort Donelson fell.")) == ["La Grange", "New York", "Fort Donelson"]
+    assert lexicon.trim_phrase("From La Grange") == "La Grange" and lexicon.trim_phrase("Dearest Clerval") == "" and lexicon.trim_phrase("New York") == "New York"
+    rows = [{"term": "From La Grange", "kind": "phrase", "count": 2, "source": "auto"}, {"term": "La Grange", "kind": "phrase", "count": 3, "source": "auto"},
+            {"term": "Dearest Clerval", "kind": "phrase", "count": 1, "source": "auto"}, {"term": "From Mine", "kind": "phrase", "count": 1, "source": "user"}]
+    assert lexicon.repair_phrases(rows) == 2 and [(r["term"], r["count"]) for r in rows] == [("La Grange", 5), ("From Mine", 1)]
+
+
+def test_chapter_headings_are_taken_out_before_the_lexicon_scan():
+    from audiobook_gen import lexicon
+    ch = {"title": "Seventeen. The “Thunder Child”.", "text": "XVII. THE “THUNDER CHILD”.\n\nAt Weybridge the Thunder Child steamed in. Said Ogilvy, quietly, to the crew."}
+    assert lexicon.chapter_body(ch).startswith("At Weybridge")
+    ch2 = {"title": "Book One the Coming of the Martians", "text": "BOOK ONE\n\nTHE COMING OF THE MARTIANS\n\nI. THE EVE OF THE WAR.\n\nNo one would have believed it."}
+    assert lexicon.chapter_body(ch2) == "No one would have believed it."                              # up to three heading lines go
+    assert lexicon.chapter_body({"title": "One", "text": "Chapter, he said, was long and the rest followed after it, at last."}).startswith("Chapter, he said")
+    assert lexicon.is_heading_line("CHAPTER XV.") and lexicon.is_heading_line("XIV. IN LONDON.") and not lexicon.is_heading_line("I was at home at that hour.")
