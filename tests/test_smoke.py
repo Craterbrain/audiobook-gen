@@ -2766,3 +2766,26 @@ def test_chapter_headings_are_taken_out_before_the_lexicon_scan():
     assert lexicon.chapter_body(ch2) == "No one would have believed it."                              # up to three heading lines go
     assert lexicon.chapter_body({"title": "One", "text": "Chapter, he said, was long and the rest followed after it, at last."}).startswith("Chapter, he said")
     assert lexicon.is_heading_line("CHAPTER XV.") and lexicon.is_heading_line("XIV. IN LONDON.") and not lexicon.is_heading_line("I was at home at that hour.")
+
+
+def test_synth_progress_counts_existing_clips_from_the_start(tmp_path, monkeypatch, capsys):
+    import json
+    import numpy as np
+    from audiobook_gen import synth
+    class Eng:
+        sample_rate = 24000
+        def synth(self, text, voice): return np.zeros(2400, np.float32)
+    monkeypatch.setattr(synth, "get_engine", lambda *a, **k: Eng())
+    segs = [{"id": f"001-{i:05d}", "chapter": 1, "speaker": "Narrator", "kind": "narration", "text": f"Sentence number {i} is here.", "para_start": i == 0} for i in range(40)]
+    (tmp_path / "segments.json").write_text(json.dumps(segs))
+    (tmp_path / "chapters.json").write_text(json.dumps({"title": "T", "chapters": [{"index": 1, "title": "One", "text": ""}]}))
+    cfg = {"voices": {}, "default_voice": {"engine": "kokoro", "voice": "bm_george"}, "workers": {"kokoro": 1}, "emotion": False}
+    synth.synthesize(tmp_path, cfg)                                          # first make: nothing exists yet
+    capsys.readouterr()
+    for f in sorted((tmp_path / "clips").glob("*.wav"))[:7]:                  # seven clips are lost (a lexicon change, say)
+        f.unlink()
+    synth.synthesize(tmp_path, cfg)
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("[progress]")]
+    assert lines[0] == "[progress] 33/40"                                    # total minus the 7 being rebuilt, before the first one is made
+    nums = [int(l.split()[1].split("/")[0]) for l in lines]
+    assert nums == sorted(nums) and nums[-1] == 40 and min(nums) >= 33       # it only goes up, never back to zero

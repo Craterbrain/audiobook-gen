@@ -245,8 +245,14 @@ def synthesize_iter(work: Path, cfg: dict, only_chapters: set[int] | None = None
 
 
 def synthesize(work: Path, cfg: dict, only_chapters: set[int] | None = None) -> None:
-    msg = ""
+    """Make every clip the book needs. The count the job queue shows is total clips minus the clips still to be made: the clips that
+    already exist count from the start, so it never falls to 0 while the book is checked and then climbs back."""
+    msg, first = "", True
     for done, total, msg in synthesize_iter(work, cfg, only_chapters):
-        if done % 25 == 0:
+        if msg.startswith("Reading the emotion"):
+            print("[synth]", msg, flush=True)                      # a stage, not progress: "0 of N" would be wrong for a rebuild
+            continue
+        if first or done % 25 == 0 or done == total:
             print(f"[progress] {done}/{total}", flush=True)         # the job queue reads these
+            first = False
     print("[synth]", msg)
