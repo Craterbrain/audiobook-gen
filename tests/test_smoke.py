@@ -3032,4 +3032,4 @@ def test_the_name_check_note_follows_its_log_when_it_has_no_activity_to_report(t
     log.write_text(log.read_text() + "[progress] 4001/4004\n[names] making the clips again with 10 new spelling(s)\n[synth] Reading the emotion of each sentence\n[progress] 6663/7658\n")
     assert r._names_detail(j) == "making the clips again with 10 new spelling(s) (6663/7658)"
     log.write_text("[names] 4004 clips say a name that has an IPA\n")
-    assert r._names_detail(j).startswith("4004 clips say a name")                                  # nothing counted yet: what the pass said
+    assert r._names_detail(j) == "judging clips"                                                    # nothing counted yet
