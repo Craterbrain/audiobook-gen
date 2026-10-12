@@ -91,6 +91,36 @@ def check_cleanable(work: Path) -> None:
         raise ValueError(f"“{busy[0]}” still has a job waiting or running that uses this folder.")
 
 
+def unused_clips(work: Path) -> list[Path]:
+    """Clip files in clips/ that the book no longer uses: not in the current plan (clips_meta.json / clips.json) and not an original that a
+    correction can still go back to (clip_overrides.json 'was'). What is left after lexicon, voice or text changes made new versions."""
+    work = Path(work)
+    used: set[str] = set()
+    for name in ("clips_meta.json", "clips.json"):
+        try:
+            data = json.loads((work / name).read_text())
+        except (OSError, ValueError):
+            return []                                      # no plan to compare against: never guess
+        used |= set(data) if name == "clips_meta.json" else {f for v in data.values() for f in v}
+    try:
+        used |= {o.get("was") for o in json.loads((work / "clip_overrides.json").read_text()).values() if o.get("was")}
+    except (OSError, ValueError):
+        pass
+    d = work / "clips"
+    return sorted(f for f in d.glob("*.wav") if f.name not in used) if d.is_dir() and used else []
+
+
+def remove_unused_clips(work: Path) -> tuple[int, int]:
+    """Delete the unused clips of a book that is not being made. Returns (files, bytes freed)."""
+    check_cleanable(work)
+    gone = unused_clips(work)
+    freed = 0
+    for f in gone:
+        freed += f.stat().st_size
+        f.unlink()
+    return len(gone), freed
+
+
 def delete_folder(work: Path) -> int:
     """Delete the whole work folder. Returns the bytes freed."""
     check_cleanable(work)

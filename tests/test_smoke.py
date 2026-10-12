@@ -2789,3 +2789,21 @@ def test_synth_progress_counts_existing_clips_from_the_start(tmp_path, monkeypat
     assert lines[0] == "[progress] 33/40"                                    # total minus the 7 being rebuilt, before the first one is made
     nums = [int(l.split()[1].split("/")[0]) for l in lines]
     assert nums == sorted(nums) and nums[-1] == 40 and min(nums) >= 33       # it only goes up, never back to zero
+
+
+def test_unused_clips_are_the_ones_outside_the_plan_and_corrections_keep_their_originals(tmp_path, monkeypatch):
+    import json
+    from audiobook_gen import jobqueue as jq, library
+    jq_, work = _queue_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(jq, "ROOT", tmp_path); monkeypatch.setattr(library, "ROOT", tmp_path)
+    book = tmp_path / "work" / "b"; (book / "clips").mkdir(parents=True)
+    for n in ("keep.wav", "also.wav", "old_version.wav", "was_before_fix.wav", "stray.wav"):
+        (book / "clips" / n).write_bytes(b"x" * 100)
+    (book / "clips_meta.json").write_text(json.dumps({"keep.wav": {}}))
+    (book / "clips.json").write_text(json.dumps({"s1": ["keep.wav", "also.wav"]}))
+    (book / "clip_overrides.json").write_text(json.dumps({"1:0": {"text": "t", "was": "was_before_fix.wav"}}))
+    assert [f.name for f in library.unused_clips(book)] == ["old_version.wav", "stray.wav"]
+    n, freed = library.remove_unused_clips(book)
+    assert (n, freed) == (2, 200) and sorted(f.name for f in (book / "clips").glob("*.wav")) == ["also.wav", "keep.wav", "was_before_fix.wav"]
+    (book / "clips_meta.json").unlink()                                          # no plan to go by: nothing is guessed
+    assert library.unused_clips(book) == []
