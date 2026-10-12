@@ -19,7 +19,7 @@ from .extract import TEXT_EXTS, extract
 from .lexicon import MACBETH_SEED, MONTE_CRISTO_SEED, autofill, build_lexicon, fill_respell, seed
 from .speakers import NARRATOR, backup_segments, parse_book
 from . import casting
-from . import library, presets, prep, workflow
+from . import library, operations, presets, prep, workflow
 from . import m4b as m4blib
 from . import sync as synclib
 from . import voicepack as vpk
@@ -138,22 +138,7 @@ def run_prepare(project, chap_df, selected, progress=gr.Progress()):
 
 
 def _reapply_extras(work):
-    """Preparing again rebuilds the lines from the plain chapters, which drops the spoken opening and section titles the Extras tab put in.
-    Put back whatever the music plan says is on, and keep the book 'prepared'."""
-    from . import music, titles
-    work = Path(work)
-    if not (work / "segments.json").exists():
-        return
-    was_ready = prep.status(work)["ready"]
-    plan = music.load_plan(work)
-    intro = plan["intro"]
-    layered = bool(plan["enabled"] and intro.get("track") and intro.get("title"))
-    music.add_opening(work, intro["title"] if layered else "", intro.get("title_pause", 0.0))
-    t = plan.get("titles") or {}
-    if t.get("speak"):
-        titles.apply(work, True, float(t.get("pause", 2.8)))
-    if was_ready:
-        prep.restamp(work)
+    operations.reapply_extras(work)
 
 
 def refresh_flow(project, chap_df=None):
@@ -1670,25 +1655,11 @@ def _parse_schedule(when, window_on, w_start, w_stop) -> tuple[str, str]:
 
 
 def _enqueue(work, title, author, cover, chapters, not_before, window, send_to, supersede=None):
-    """Queue a book once. If it already has a waiting job, that job is updated instead of adding a second one.
-    Returns (job, updated). Refuses a book whose text has not been prepared."""
-    from . import jobqueue
-    work = Path(work)
-    st = prep.status(work)
-    if not (work / "segments.json").exists() or not st["ready"]:
-        raise gr.Error(f"The text has not been prepared ({st['why']}). Open the Book tab, tick the preparation steps and press Prepare.")
-    waiting = jobqueue.pending_for(str(work))
-    if waiting:
-        jobqueue.update(waiting["id"], title=title, author=author, cover=cover, chapters=chapters or None, not_before=not_before,
-                        window=window, send_to=send_to, status="queued", note="")
-        job, updated = {**waiting, "title": title}, True
-    else:
-        job, updated = jobqueue.add(str(work), title, author, cover, "", "", chapters, not_before, window, send_to), False
-        jobqueue.ensure_supervisor()
-    if supersede:
-        jobqueue.supersede(supersede, job["id"])
-    workflow.stamp_queued(work, job["id"], title, author)          # what this build is made from, so a later change can say what it costs
-    return job, updated
+    """Queue a book once (see operations.enqueue); a book that is not prepared is refused with a message."""
+    try:
+        return operations.enqueue(work, title, author, cover, chapters, not_before, window, send_to, supersede)
+    except ValueError as e:
+        raise gr.Error(str(e))
 
 
 def queue_add(project, chap_df, title, author, cover, crossfade, p_sent, p_para, p_speaker, kokoro_workers, f5_half,
@@ -1965,6 +1936,25 @@ def music_hear(role, track_id, seconds, start, level):
 
 
 # ---------- Assistant ----------
+def _assistant_view(work):
+    """(note, shown text, apply enabled, discard enabled, cover update, preview files) for what the helper has proposed so far."""
+    from . import assistant
+    diffs, prop, acts, files = assistant.diff(work), assistant.cover_proposal(work), assistant.actions(work), assistant.previews(work)
+    shown = "\n\n".join(f"**{n}**\n```diff\n{d[:6000]}{'…' if len(d) > 6000 else ''}\n```" for n, d in diffs.items())
+    if acts:
+        from .assistant_tools import REQUESTABLE
+        shown = (shown + "\n\n" if shown else "") + "**Asked to do when you press Apply:**\n" + "\n".join(f"- {REQUESTABLE[a['action']]}" + (f" — {a['why']}" if a.get("why") else "") for a in acts)
+    pending = bool(diffs) or bool(prop) or bool(acts)
+    problems = assistant.validate(work) if pending else []
+    note = (f"⚠️ These changes can’t be applied yet: {'; '.join(problems)}" if problems else
+            "Review the changes below, then **Apply** them or **Discard** them." if pending else
+            "Previews are ready to listen to below." if files else "No changes proposed.")
+    if prop and prop[1]:
+        shown = (shown + "\n\n" if shown else "") + f"**Cover picture credit:** {prop[1]}"
+    return (note, shown or "_Nothing to show._", gr.update(interactive=pending and not problems), gr.update(interactive=pending),
+            gr.update(value=str(prop[0]) if prop else None, visible=bool(prop)), gr.update(value=[str(f) for f in files] or None, visible=bool(files)))
+
+
 def assistant_ask(project, message, history, session, spent):
     from . import assistant
     if not (message or "").strip():
@@ -1977,18 +1967,8 @@ def assistant_ask(project, message, history, session, spent):
     else:
         history.append({"role": "assistant", "content": r["reply"] or "(no reply)"})
     spent = float(spent or 0) + r["cost"]
-    diffs = assistant.diff(work)
-    prop = assistant.cover_proposal(work)
-    shown = "\n\n".join(f"**{n}**\n```diff\n{d[:6000]}{'…' if len(d) > 6000 else ''}\n```" for n, d in diffs.items())
-    problems = assistant.validate(work) if (diffs or prop) else []
-    pending = bool(diffs) or bool(prop)
-    note = (f"⚠️ These changes can’t be applied yet: {'; '.join(problems)}" if problems else
-            "Review the changes below, then **Apply** them or **Discard** them." if pending else "No changes proposed.")
-    if prop and prop[1]:
-        shown = (shown + "\n\n" if shown else "") + f"**Cover picture credit:** {prop[1]}"
-    return (history, r["session"] or "", spent, f"Claude usage this session: about ${spent:.2f}", note, shown or "_Nothing to show._",
-            gr.update(interactive=pending and not problems), gr.update(interactive=pending), "",
-            gr.update(value=str(prop[0]) if prop else None, visible=bool(prop)))
+    note, shown, ap, di, cov, files = _assistant_view(work)
+    return (history, r["session"] or "", spent, f"Claude usage this session: about ${spent:.2f}", note, shown, ap, di, "", cov, files)
 
 
 def assistant_apply(project):
@@ -2001,13 +1981,14 @@ def assistant_apply(project):
         new_cover = str(work / "cover_custom.jpg")
         n = jobqueue.set_cover(str(work), new_cover)
         msg += f" The new cover is used for {n} queued job(s) and when you generate." if n else " The new cover is used when you generate."
-    return msg, "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False), gr.update(value=None, visible=False), new_cover
+    return (msg, "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False), gr.update(value=None, visible=False), new_cover,
+            gr.update(value=None, visible=False))
 
 
 def assistant_discard(project):
     from . import assistant
     return (assistant.discard(_wd(project)), "_Nothing to show._", gr.update(interactive=False), gr.update(interactive=False),
-            gr.update(value=None, visible=False))
+            gr.update(value=None, visible=False), gr.update(value=None, visible=False))
 
 
 # The three tabs after the numbered steps (Queue, Voice lab, Ask Claude) are not steps in the book flow: set them apart on the right.
@@ -2207,15 +2188,10 @@ def export_epub(project):
 
 
 def corr_rebuild(project, send=False, device=""):
-    from . import jobqueue
-    if send and not device:
-        raise gr.Error("Choose which phone to send it to on the Make tab (or untick the box).")
-    work = _wd(project)
-    book = json.loads((work / "chapters.json").read_text())
-    last = next(iter(jobqueue.jobs_for(str(work))), None) or {}    # keep what the last run of this book used
-    cover = last.get("cover") or next((str(work / n) for n in ("cover_custom.jpg", "cover.jpg") if (work / n).exists()), "")
-    job, updated = _enqueue(work, last.get("title") or book.get("title", work.name), last.get("author") or book.get("author", ""), cover,
-                            last.get("chapters"), "", last.get("window", ""), device if send else "")   # only when you tick it
+    try:
+        job, updated = operations.rebuild(_wd(project), send, device)
+    except ValueError as e:
+        raise gr.Error(str(e))
     return (f"{'Updated the waiting job for' if updated else 'Queued'} “{job['title']}” to be rebuilt. Clips that exist are reused, so only the missing ones are made (for example after a "
             "lexicon change), then the audiobook is built again.")
 
@@ -2864,6 +2840,7 @@ def build_ui() -> gr.Blocks:
                 a_note = gr.Markdown()
                 a_diff = gr.Markdown("_Nothing to show._")
                 a_cover = gr.Image(label="Proposed cover", type="filepath", height=300, interactive=False, visible=False)
+                a_files = gr.File(label="Previews to listen to (opening, bridges, ending)", file_count="multiple", interactive=False, visible=False)
                 with gr.Row():
                     a_apply = gr.Button("Apply these changes", variant="primary", interactive=False)
                     a_discard = gr.Button("Discard", interactive=False)
@@ -3008,13 +2985,13 @@ def build_ui() -> gr.Blocks:
         cv_colour.change(cover_refresh, cv_look, cv_preview)
         cv_use.click(cover_use, [project, cv_preview, cv_credit, cv_upload], [cover, cv_msg])
         a_go.click(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
-                   [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
+                   [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover, a_files])
         a_in.submit(assistant_ask, [project, a_in, a_chat, a_session, a_spent],
-                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover])
-        a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover]).then(
+                    [a_chat, a_session, a_spent, a_cost, a_note, a_diff, a_apply, a_discard, a_in, a_cover, a_files])
+        a_apply.click(assistant_apply, project, [a_note, a_diff, a_apply, a_discard, a_cover, cover, a_files]).then(
             gen_settings, project, GEN_OUTS).then(
             voice_settings, project, [mode, single_dd, single_speed, single_group]).then(load_parsed, project, cast_outs).then(lex_load, project, LEX_OUTS).then(remake_note, REMAKE_IN, remake_md).then(refresh_flow, [project, chap_df], FLOW_OUTS)
-        a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover])
+        a_discard.click(assistant_discard, project, [a_note, a_diff, a_apply, a_discard, a_cover, a_files])
         ab_read_btn.click(ab_read, ab_file, [ab_chapter, ab_status])
         ab_find_btn.click(ab_find, [ab_file, ab_chapter, ab_ebook, ab_offset, ab_minutes, ab_target, ab_model, ab_count],
                           [ab_clips, ab_dd, ab_status])

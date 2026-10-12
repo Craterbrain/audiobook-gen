@@ -483,7 +483,7 @@ def test_assistant_runs_claude_in_the_scratch_folder_only(tmp_path, monkeypatch)
     args = (assistant.scratch_dir(p) / "args.txt").read_text()
     assert "make it spooky" in args
     allowed, _, blocked = args.partition("--disallowedTools")
-    assert "Bash(./cover:*)" in allowed and allowed.count("Bash") == 1         # the cover tool is the only command it may run
+    assert "Bash(./cover:*)" in allowed and "Bash(./tools:*)" in allowed and allowed.count("Bash") == 2      # the cover and book tools are the only commands it may run
     assert "WebFetch" in blocked and "WebSearch" in blocked and "Bash" not in blocked
     assert (assistant.scratch_dir(p) / "where.txt").read_text().strip().endswith("proj/assistant")
 
@@ -830,7 +830,7 @@ def test_assistant_ask_returns_a_proposed_cover(tmp_path, monkeypatch):
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("AUDIOBOOK_CLAUDE", str(fake))
     out = gui.assistant_ask(str(p), "make me a cover", [], "", 0.0)
-    assert out[-1]["visible"] is True and out[-1]["value"].endswith("assistant/cover.jpg")        # the preview is shown
+    assert out[-2]["visible"] is True and out[-2]["value"].endswith("assistant/cover.jpg")        # the preview is shown
     assert out[6]["interactive"] is True                                                           # and it can be applied
     res = gui.assistant_apply(str(p))
     assert res[0].startswith("Applied") and res[5].endswith("cover_custom.jpg")                    # the Book tab gets the new cover
@@ -2845,3 +2845,95 @@ def test_a_recording_from_outside_commons_can_be_added_with_its_source(tmp_path,
     e = music.add_url(src.as_uri(), "The Battle Cry of Freedom", "W. Van Brunt", "1916", "https://example.org/cylinder6576")
     assert e["id"] == "the-battle-cry-of-freedom" and e["seconds"] == 3 and "example.org/cylinder6576" in e["credit"] and (tmp_path / "lib" / e["file"]).exists()
     assert music.add_url(src.as_uri(), "The Battle Cry of Freedom")["id"] == e["id"] and len(music.library()) == 1       # once
+
+
+def _tools_project(tmp_path, monkeypatch):
+    import json
+    import numpy as np
+    import soundfile as sf
+    from audiobook_gen import assistant, music
+    p = tmp_path / "proj"; (p / "clips").mkdir(parents=True)
+    chapters = [{"index": i, "title": f"Chapter {i} title", "text": "word " * 400} for i in (1, 2, 3)]
+    (p / "chapters.json").write_text(json.dumps({"title": "The Test Book", "author": "A. Writer", "chapters": chapters,
+                                                 "parse_report": {"reader": "chapters", "level": "ok", "notes": []}}))
+    (p / "segments.json").write_text(json.dumps([{"id": f"{c}-0", "speaker": "Narrator", "kind": "narration", "text": "Hello.", "chapter": c} for c in (1, 2, 3)]))
+    (p / "config.yaml").write_text("voices: {Narrator: {engine: kokoro, voice: bm_george}}\n")
+    (p / "lexicon.json").write_text(json.dumps([{"term": "Xvii", "kind": "name", "count": 1, "source": "auto", "setting": "us"},
+                                                {"term": "Matamoras", "kind": "place", "count": 5, "source": "auto", "setting": "es", "lang": "es", "ipa": "x"}]))
+    meta = {}
+    for c in (1, 2, 3):
+        for k in range(30):
+            f = f"c{c}_{k}.wav"
+            sf.write(p / "clips" / f, (np.sin(np.arange(24000 * 2) * 0.05) * 0.3).astype(np.float32), 24000)
+            meta[f] = {"text": f"Sentence {k} of chapter {c}.", "chapter": c, "engine": "kokoro"}
+    meta["title2.wav"] = {"text": "Chapter 2 title.", "chapter": 2, "engine": "kokoro"}
+    sf.write(p / "clips" / "title2.wav", (np.sin(np.arange(24000 * 2) * 0.03) * 0.3).astype(np.float32), 24000)
+    (p / "clips_meta.json").write_text(json.dumps(meta))
+    (p / "clips.json").write_text(json.dumps({"seg": list(meta)}))
+    sf.write(p / "clips" / "stale.wav", np.zeros(2400, np.float32), 24000)
+    lib = tmp_path / "lib"; lib.mkdir()
+    sf.write(lib / "song.wav", (np.sin(np.arange(24000 * 60) * 0.02) * 0.3).astype(np.float32), 24000)
+    monkeypatch.setattr(music, "LIB", lib); monkeypatch.setattr(music, "INDEX", lib / "index.json")
+    music._save([{"id": "song", "file": "song.wav", "seconds": 60.0, "credit": "c", "title": "A Song", "licence": "Public domain"}])
+    scratch = assistant.prepare(p)
+    monkeypatch.chdir(scratch)
+    monkeypatch.setenv("AUDIOBOOK_PROJECT", str(p))
+    return p, scratch
+
+
+def test_the_assistant_gets_book_tools_that_prepare_changes_for_review(tmp_path, monkeypatch, capsys):
+    import json
+    from audiobook_gen import assistant, assistant_tools as T
+    p, scratch = _tools_project(tmp_path, monkeypatch)
+    assert (scratch / "tools").exists() and "tools" in (scratch / "CLAUDE.md").read_text()
+    T.main(["status"]); out = capsys.readouterr().out
+    assert "The Test Book" in out and "Clips: 91 in the plan" in out and "1 unused" in out
+    T.main(["chapters"]); assert "Chapter 2 title" in capsys.readouterr().out
+    T.main(["names", "--setting", "es"]); assert "Matamoras" in capsys.readouterr().out
+    T.main(["lexicon-fix", "numerals"]); capsys.readouterr()
+    assert [e["term"] for e in json.loads((scratch / "lexicon.json").read_text())] == ["Matamoras"]
+    assert "lexicon.json" in assistant.diff(p) and assistant.validate(p) == []
+    # music: plan a bridge, an opening and an ending, then review and accept
+    T.main(["music", "bridge", "2", "song", "--seconds", "20", "--start", "5"]); T.main(["music", "opening", "song", "--title", "The Test Book\\nby A. Writer"])
+    T.main(["music", "ending", "song"]); T.main(["music", "enable", "on"]); capsys.readouterr()
+    plan = json.loads((scratch / "music.json").read_text())
+    assert plan["bridges"]["2"] == {"track": "song", "seconds": 20.0, "start": 5.0} and plan["enabled"] is True and plan["intro"]["title"].count("\n") == 1
+    assert "music.json" in assistant.diff(p) and assistant.validate(p) == []
+    bad = dict(plan, bridges={"9": {"track": "nope", "seconds": 5}})
+    (scratch / "music.json").write_text(json.dumps(bad))
+    assert any("not one of the book's chapters" in x for x in assistant.validate(p)) and any("no track 'nope'" in x for x in assistant.validate(p))
+    (scratch / "music.json").write_text(json.dumps(plan))
+    from audiobook_gen import operations
+    seen = []
+    monkeypatch.setattr(operations, "reapply_extras", lambda w: seen.append(str(w)))
+    monkeypatch.setattr(operations, "making_now", lambda w: None)
+    assert assistant.apply(p).startswith("Applied changes to lexicon.json, music.json") and seen == [str(p)] and json.loads((p / "music.json").read_text())["bridges"]["2"]["track"] == "song"
+    monkeypatch.setattr(operations, "making_now", lambda w: {"title": "The Test Book", "work": str(p)})        # a book being made: music is refused
+    (scratch / "music.json").write_text(json.dumps(dict(plan, enabled=False)))
+    assert "being made right now" in assistant.apply(p)
+
+
+def test_assistant_requests_run_only_when_applied_and_previews_are_made_from_existing_clips(tmp_path, monkeypatch, capsys):
+    import json
+    from audiobook_gen import assistant, assistant_tools as T, library, operations
+    p, scratch = _tools_project(tmp_path, monkeypatch)
+    T.main(["music", "bridge", "2", "song", "--seconds", "20"]); T.main(["music", "enable", "on"]); capsys.readouterr()
+    T.main(["preview", "bridge", "2"]); out = capsys.readouterr().out
+    assert "Preview made: bridge_2.mp3" in out and (scratch / "previews" / "bridge_2.mp3").stat().st_size > 5000 and not (scratch / "previews" / "bridge_2.wav").exists()
+    assert [f.name for f in assistant.previews(p)] == ["bridge_2.mp3"]
+    T.main(["preview", "ending"]); capsys.readouterr()
+    T.main(["request", "rebuild", "--why", "the lexicon changed"]); T.main(["request", "delete-unused-clips"]); T.main(["request", "rebuild"]); capsys.readouterr()
+    assert [a["action"] for a in assistant.actions(p)] == ["rebuild", "delete-unused-clips"]          # asked twice, listed once
+    ran = []
+    monkeypatch.setattr(operations, "rebuild", lambda w, *a: ran.append("rebuild") or ({"title": "The Test Book"}, False))
+    monkeypatch.setattr(operations, "making_now", lambda w: None)
+    monkeypatch.setattr(library, "remove_unused_clips", lambda w: ran.append("delete") or (1, 100))
+    assert ran == []                                                                       # nothing happens before Apply
+    (scratch / "music.json").unlink()                                                        # only actions are pending
+    msg = assistant.apply(p)
+    assert ran == ["rebuild", "delete"] and "Queued a rebuild" in msg and "Deleted 1 unused clips" in msg and not (scratch / "actions.json").exists()
+    import subprocess
+    r = subprocess.run(["./tools", "status"], cwd=scratch, capture_output=True, text=True)       # the real wrapper script works too
+    assert r.returncode == 0 and "The Test Book" in r.stdout
+    T_bad = subprocess.run(["./tools", "request", "wipe-everything"], cwd=scratch, capture_output=True, text=True)
+    assert T_bad.returncode != 0 and "Unknown request" in T_bad.stderr + T_bad.stdout
