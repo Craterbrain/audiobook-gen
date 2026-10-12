@@ -8,6 +8,7 @@ from pathlib import Path
 
 VERSE_RE = re.compile(r"(?<!\d)(\d{1,3}):(\d{1,3})\s+")
 HEADING_RE = re.compile(r"^\s*((?:chapter|book|part)\s+[\w.]+.*)$", re.I | re.M)
+LOOSE_HEADING_RE = HEADING_RE
 
 
 def _clean(text: str) -> str:
@@ -56,38 +57,67 @@ def extract_txt(path: Path) -> dict:
     return extract_raw(path.read_text(encoding="utf-8", errors="replace"))
 
 
+def _read_play(raw: str, title: str) -> dict:
+    m = re.search(r"Title:\s*(.+)", raw)
+    author = re.search(r"Author:\s*(.+)", raw)
+    d = extract_play(raw, m.group(1).strip() if m else title)
+    d["author"] = author.group(1).strip() if author else ""
+    return d
+
+
+def _read_verse(raw: str, title: str) -> dict:
+    """Bible-style "chapter:verse" text: chapter = the number before the colon."""
+    chapters = {}
+    pieces = VERSE_RE.split(raw)  # [pre, ch, v, text, ch, v, text, ...]
+    for i in range(1, len(pieces) - 2, 3):
+        chapters.setdefault(int(pieces[i]), []).append(re.sub(r"\s+", " ", pieces[i + 2]).strip())
+    return {"title": title, "author": "", "cover": None,
+            "chapters": [{"index": n, "title": f"Chapter {n}", "text": "\n\n".join(v)} for n, v in sorted(chapters.items())]}
+
+
+def _read_chapters(raw: str, title: str, heads: list) -> dict:
+    chapters = []
+    for i, m in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(raw)
+        chapters.append({"index": len(chapters) + 1, "title": m.group(1).strip(), "text": _clean(raw[m.end():end])})
+    kept = [c for c in chapters if len(c["text"]) >= 40]             # a contents list is headings with nothing under them
+    return {"title": title, "author": "", "cover": None, "chapters": [{**c, "index": n} for n, c in enumerate(kept or chapters, 1)]}
+
+
+def _read_single(raw: str, title: str) -> dict:
+    return {"title": title, "author": "", "cover": None, "chapters": [{"index": 1, "title": title, "text": _clean(raw)}]}
+
+
 def extract_raw(raw: str, title: str = "") -> dict:
     """Chapters from plain text. parsecheck.kind() decides which reader fits (a play, chapter:verse scripture, standalone 'Chapter N'
-    headings, or one block); a given title overrides the first line. The decision and its reasons are kept in "parse_report"."""
+    headings, or one block); the result is checked, and if it looks wrong the other readers are tried and the best result wins. The
+    decision, the reasons and anything still wrong are kept in "parse_report" (the Book tab only speaks up when something is still wrong)."""
     from . import parsecheck
     title = title or raw.strip().splitlines()[0].strip()
     k = parsecheck.kind(raw)
-    if k["kind"] == "play":
-        m = re.search(r"Title:\s*(.+)", raw)
-        author = re.search(r"Author:\s*(.+)", raw)
-        d = extract_play(raw, m.group(1).strip() if m else title)
-        d["author"] = author.group(1).strip() if author else ""
-    elif k["kind"] == "verse":                       # Bible-style "chapter:verse" text: chapter = the number before the colon
-        chapters = {}
-        pieces = VERSE_RE.split(raw)  # [pre, ch, v, text, ch, v, text, ...]
-        for i in range(1, len(pieces) - 2, 3):
-            chapters.setdefault(int(pieces[i]), []).append(re.sub(r"\s+", " ", pieces[i + 2]).strip())
-        d = {"title": title, "author": "", "cover": None,
-             "chapters": [{"index": n, "title": f"Chapter {n}", "text": "\n\n".join(v)} for n, v in sorted(chapters.items())]}
-    elif k["kind"] == "chapters":
-        heads = parsecheck.headings(raw)
-        chapters = []
-        for i, m in enumerate(heads):
-            end = heads[i + 1].start() if i + 1 < len(heads) else len(raw)
-            chapters.append({"index": len(chapters) + 1, "title": m.group(1).strip(), "text": _clean(raw[m.end():end])})
-        pre = _clean(raw[:heads[0].start()])
-        kept = [c for c in chapters if len(c["text"]) >= 40]             # a contents list is headings with nothing under them
-        chapters = [{**c, "index": n} for n, c in enumerate(kept or chapters, 1)]
-        d = {"title": title, "author": "", "cover": None, "chapters": chapters}
-    else:                                            # "single" (and headings that were not on lines of their own)
-        d = {"title": title, "author": "", "cover": None, "chapters": [{"index": 1, "title": title, "text": _clean(raw)}]}
-    d["parse_report"] = {"reader": k["kind"], "confidence": round(k["confidence"], 2), "reasons": k["reasons"],
-                         **parsecheck.validate(d, len(raw), k["kind"])}
+    strict = parsecheck.headings(raw)
+    loose = list(LOOSE_HEADING_RE.finditer(raw))
+    readers = {"play": lambda: _read_play(raw, title), "verse": lambda: _read_verse(raw, title),
+               "chapters": lambda: _read_chapters(raw, title, strict), "chapters_loose": lambda: _read_chapters(raw, title, loose),
+               "single": lambda: _read_single(raw, title)}
+    first = "single" if k["kind"] == "chapters_loose" else k["kind"]
+    order = [first] + [r for r in ("chapters", "chapters_loose", "verse", "single") if r != first
+                       and (r != "chapters" or len(strict) >= 2) and (r != "chapters_loose" or len(loose) >= 2) and (r != "verse" or k["evidence"]["verse_marks"] > 20)]
+    rank = {"ok": 0, "check": 1, "bad": 2}
+    best = None
+    for name in order:
+        d = readers[name]()
+        rep = parsecheck.validate(d, len(raw), "chapters" if name == "chapters_loose" else name)
+        if best is None or rank[rep["level"]] < rank[best[2]["level"]]:
+            best = (name, d, rep)
+        if rep["level"] == "ok":
+            break
+    name, d, rep = best
+    reasons = list(k["reasons"])
+    if name != first:
+        reasons.append(f"The usual reading for this text ({first}) gave a poor result, so {name} was used instead")
+    d["parse_report"] = {"reader": "chapters" if name == "chapters_loose" else name, "confidence": round(k["confidence"], 2),
+                         "reasons": reasons, "tried": order[:order.index(name) + 1], **rep}
     return d
 
 

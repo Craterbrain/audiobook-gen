@@ -47,8 +47,19 @@ def choices() -> list[tuple[str, str]]:
     return [(label(s), s["id"]) for s in STEPS]
 
 
-def default_selected() -> list[str]:
-    return [s["id"] for s in STEPS if s["default"]]
+NO_DIALECT_READERS = ("play", "verse")        # a play in verse or scripture has no dialect spelling to look up
+
+
+def default_selected(reader: str = "") -> list[str]:
+    """The steps ticked by default. `reader` is how the text was read (chapters.json parse_report.reader): what the text is decides what it needs."""
+    return [s["id"] for s in STEPS if s["default"] and not (s["id"] == "dialect" and reader in NO_DIALECT_READERS)]
+
+
+def reader_of(work) -> str:
+    try:
+        return (json.loads((Path(work) / "chapters.json").read_text()).get("parse_report") or {}).get("reader", "")
+    except (OSError, ValueError):
+        return ""
 
 
 def _fingerprint(work: Path) -> str:
@@ -120,7 +131,7 @@ def run(work, selected: list[str] | None = None, progress=lambda f, d: None, lan
     """Prepare the book with the ticked steps (the required one always). Returns {"ran": [ids], "notes": {id: text}}."""
     from . import jobqueue
     work = Path(work)
-    sel = {*(selected if selected is not None else default_selected()), "segments"}
+    sel = {*(selected if selected is not None else default_selected(reader_of(work))), "segments"}
     steps = [s for s in RUN_ORDER if s in sel]
     cfg = _cfg(work)
     meta = json.loads((work / "chapters.json").read_text())

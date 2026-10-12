@@ -70,11 +70,11 @@ def parse_note(report) -> str:
     """One or two lines under the load message: which reader was used, and anything about the result that looks off."""
     if not report:
         return ""
-    how = {"play": "a play", "verse": "chapter:verse scripture", "chapters": "chapter headings", "single": "one block of text"}.get(report.get("reader", ""), report.get("reader", ""))
-    line = f"  \nRead as {how}." if how else ""
-    if report.get("notes"):
-        line += "  \n⚠️ " + "  \n⚠️ ".join(report["notes"]) + "  \nIf that is not right, tick the chapters you want or fix the headings in the file and load it again."
-    return line
+    how = {"play": "a play", "verse": "chapter:verse scripture", "chapters": "chapter headings", "single": "one block of text"}.get(report.get("reader", ""), "")
+    if not report.get("notes"):
+        return ""                                  # it read fine: no need to say anything
+    return (f"  \n⚠️ Read as {how}, and it does not look right:  \n" if how else "  \n⚠️ It does not look right:  \n") + "  \n".join(f"• {n}" for n in report["notes"]) + \
+        "  \nTick the chapters you want, or fix the headings in the file and load it again."
 
 
 def load_book(file, max_chapters):
@@ -186,8 +186,8 @@ def prep_state(project):
     try:
         ticked = json.loads((work / "prep.json").read_text()).get("steps") or prep.default_selected()
     except (OSError, ValueError):
-        ticked = prep.default_selected()
-    ticked = [t for t in ticked if t in prep.BY_ID] or prep.default_selected()
+        ticked = prep.default_selected(prep.reader_of(work))
+    ticked = [t for t in ticked if t in prep.BY_ID] or prep.default_selected(prep.reader_of(work))
     from . import jobqueue
     waiting = jobqueue.pending_for(str(work))
     label = "Prepare the book first (① Book)" if not st["ready"] else ("Update the queued job" if waiting else "Generate audiobook")

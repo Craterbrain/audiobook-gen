@@ -2635,3 +2635,16 @@ def test_parser_check_picks_the_reader_that_fits_and_says_when_a_result_looks_wr
     # other readers get a report too, saved in chapters.json
     md = tmp_path / "b.md"; md.write_text("## One\n\n" + body * 2 + "\n\n## Two\n\n" + body * 2)
     assert json.loads((tmp_path / "w" / "chapters.json").read_text() if extract.extract(str(md), str(tmp_path / "w")) else "")["parse_report"]["reader"] == "md"
+
+
+def test_a_poor_reading_falls_back_to_a_better_one_and_the_reader_sets_prep_defaults(tmp_path):
+    from audiobook_gen import extract, prep
+    # "Chapter 1" printed as a running page header: strict headings find lots of them, but they cut the text into scraps with one title
+    page = "Chapter 1\n\n" + "A short line of ordinary running text. " * 3 + "\n\n"
+    raw = "Title Line\n\n" + page * 14
+    d = extract.extract_raw(raw)
+    assert d["parse_report"]["reader"] == "single" and "poor result" in " ".join(d["parse_report"]["reasons"]) and len(d["chapters"]) == 1
+    play = "\n".join(f"HAMLET.\nTo be or not to be {i}.\n" for i in range(60)) + "\nSCENE I. A room.\n"
+    w = tmp_path / "w"; w.mkdir()
+    (w / "chapters.json").write_text(json.dumps({"parse_report": {"reader": "play"}, "chapters": []}))
+    assert "dialect" not in prep.default_selected(prep.reader_of(w)) and "dialect" in prep.default_selected("chapters")
