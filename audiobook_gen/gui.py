@@ -1927,24 +1927,34 @@ def music_preview(project, what, section):
                       "it uses what is saved for this book (press Save first after a change).")
 
 
-def music_add_link(url, title, artist, year, page, checked):
-    """Add a recording from a website other than Wikimedia Commons. Only after you say you checked that it is free to use."""
+def music_add_link(url, title, artist, year, page):
+    """Add a recording from a website other than Wikimedia Commons. A file over 120 MB is re-encoded to Opus in the background."""
     from . import music
-    if not checked:
-        raise gr.Error("Tick the box to say you checked that this recording is free to use (public domain, or yours).")
     if not (url or "").strip().startswith("https://"):
         raise gr.Error("The link must start with https:// and point straight at the audio file.")
-    try:
-        t = music.add_url((url or "").strip(), (title or "").strip(), (artist or "").strip(), (year or "").strip(), (page or "").strip(),
-                          "Public domain or free to use (confirmed by you)")
-    except ValueError as e:
-        raise gr.Error(str(e))
-    except Exception as e:
-        raise gr.Error(f"Could not fetch that link: {str(e)[:150]}")
+    if not (title or "").strip():
+        raise gr.Error("Give the recording a title.")
+    args = ((url or "").strip(), (title or "").strip(), (artist or "").strip(), (year or "").strip(), (page or "").strip(), "Added by you")
+    box: dict = {}
+
+    def work():
+        try:
+            box["track"] = music.add_url(*args)
+        except Exception as e:
+            box["error"] = str(e)[:200]
+    import threading
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(30)
+    if t.is_alive():
+        return (gr.update(),) * 4 + (None, f"Fetching “{args[1]}” in the background; a recording over 120 MB is re-encoded to Opus to fit. "
+                                           "It will be in the library list when you reload this page.")
+    if "error" in box:
+        raise gr.Error(f"Could not add that: {box['error']}")
+    tr = box["track"]
     ch = _track_choices()
-    return (gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), str(music.LIB / t["file"]),
-            f"Added “{t['title']}” ({t['seconds']} s) to your music library. Choose it above for the intro, bridges or ending. "
-            "The credit names the website you gave.")
+    return (gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), gr.update(choices=ch), str(music.LIB / tr["file"]),
+            f"Added “{tr['title']}” ({tr['seconds']} s) to your music library. Choose it above for the intro, bridges or ending.")
 
 
 def music_remove(track_id):
@@ -2574,7 +2584,7 @@ def build_ui() -> gr.Blocks:
                                 mu_remove = gr.Button("Remove from library", scale=1)
                             with gr.Accordion("Add a recording from another website (a link)", open=False):
                                 gr.Markdown("For an old recording that is not on Wikimedia Commons (an Edison cylinder, say). Paste the **direct https:// link to the "
-                                            "audio file**, name it, and say where it is from. **Only add recordings that are free to use.** The credit line "
+                                            "audio file**, name it, and say where it is from. A recording over 120 MB is re-encoded to Opus in the background to fit. The credit line "
                                             "names the page you give.")
                                 with gr.Row():
                                     mu_url = gr.Textbox(label="Link to the audio file (https://…)", scale=3)
@@ -2583,7 +2593,6 @@ def build_ui() -> gr.Blocks:
                                     mu_lartist = gr.Textbox(label="Artist", scale=2)
                                     mu_lyear = gr.Textbox(label="Year", scale=1)
                                     mu_lpage = gr.Textbox(label="Page it came from (for the credit)", scale=3)
-                                mu_lok = gr.Checkbox(label="I checked that this recording is free to use (public domain, or mine)")
                                 mu_ladd = gr.Button("Add to my music library")
                                 mu_lmsg = gr.Markdown()
                         with gr.Column(scale=3):
@@ -3100,7 +3109,7 @@ def build_ui() -> gr.Blocks:
         extras_tab.select(music_load, project, mu_outs)
         mu_pv_btn.click(music_preview, [project, mu_pv_what, mu_pv_section], [mu_pv_audio, mu_pv_msg])
         extras_tab.select(music_sections, project, mu_pv_section)
-        mu_ladd.click(music_add_link, [mu_url, mu_ltitle, mu_lartist, mu_lyear, mu_lpage, mu_lok], [mu_lib, mu_intro, mu_bridge, mu_outro, mu_hear, mu_lmsg])
+        mu_ladd.click(music_add_link, [mu_url, mu_ltitle, mu_lartist, mu_lyear, mu_lpage], [mu_lib, mu_intro, mu_bridge, mu_outro, mu_hear, mu_lmsg])
         mu_search.click(music_search, mu_query, [mu_hits, mu_table, mu_status])
         mu_suggest.click(music_suggest, mu_role, [mu_hits, mu_table, mu_status])
         mu_table.select(music_pick, mu_hits, [mu_lib, mu_intro, mu_bridge, mu_outro, mu_hear, mu_status])

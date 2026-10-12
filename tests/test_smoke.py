@@ -2956,16 +2956,23 @@ def test_extras_tab_previews_and_adds_a_recording_from_a_link(tmp_path, monkeypa
         gui.music_preview(str(p), "A bridge", None)
     import numpy as np, soundfile as sf
     src = tmp_path / "old.wav"; sf.write(src, (np.sin(np.arange(24000 * 8) * 0.05) * 0.3).astype(np.float32), 24000)
-    with pytest.raises(gr.Error, match="free to use"):
-        gui.music_add_link("https://example.org/a.mp3", "Battle Cry", "", "", "", False)            # the box must be ticked
     with pytest.raises(gr.Error, match="https://"):
-        gui.music_add_link(src.as_uri(), "Battle Cry", "", "", "", True)                           # no local files, no http
+        gui.music_add_link(src.as_uri(), "Battle Cry", "", "", "")                           # no local files, no http
     from audiobook_gen import music as m
     with pytest.raises(ValueError, match="network"):
         m.add_url("https://127.0.0.1/a.mp3", "Local", "")
     monkeypatch.setattr(m, "add_url", lambda url, title, artist, year, page, licence: {"id": "x", "title": title, "seconds": 8, "licence": licence, "file": "song.wav"})
-    out = gui.music_add_link("https://example.org/a.mp3", "Battle Cry", "W. Van Brunt", "1916", "https://example.org/page", True)
-    assert "Added “Battle Cry”" in out[-1] and "free to use" not in out[-1][:5]
+    out = gui.music_add_link("https://example.org/a.mp3", "Battle Cry", "W. Van Brunt", "1916", "https://example.org/page")
+    assert "Added “Battle Cry”" in out[-1]
+
+
+def test_a_recording_over_the_limit_is_re_encoded_to_opus_under_it(tmp_path, monkeypatch):
+    import numpy as np, soundfile as sf
+    from audiobook_gen import music
+    monkeypatch.setattr(music, "LIB", tmp_path / "lib"); monkeypatch.setattr(music, "INDEX", tmp_path / "lib" / "index.json", raising=False)
+    src = tmp_path / "big.wav"; sf.write(src, (np.random.default_rng(1).normal(0, .1, 44100 * 20)).astype(np.float32), 44100)
+    out = music.shrink_to_fit(src, tmp_path / "big.opus", limit=200_000)
+    assert out.stat().st_size <= 200_000 and out.stat().st_size > 100_000 and music._seconds(out) > 19
 
 
 def test_names_tab_shows_where_the_model_placed_each_name_and_rechecks_on_request(tmp_path, monkeypatch):

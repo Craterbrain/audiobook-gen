@@ -115,12 +115,38 @@ def add(file: str) -> dict:
     return entry
 
 
-MAX_ADD_BYTES = 120_000_000
+MAX_ADD_BYTES = 120_000_000           # a track kept in the library is at most this big; a bigger recording is re-encoded to fit
+MAX_DOWNLOAD_BYTES = 2_000_000_000    # what we will fetch at all
 
 
-def add_url(url: str, title: str, artist: str = "", year: str = "", page: str = "", licence: str = "Public domain (recorded before 1923)") -> dict:
-    """Add a recording from outside Wikimedia Commons whose licence you have checked yourself (an old cylinder or disc, say). The credit line
-    says where it came from. Returns the library entry."""
+def _seconds(path: Path) -> float:
+    return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                                capture_output=True, text=True).stdout.strip() or 0)
+
+
+def shrink_to_fit(src: Path, dest: Path, limit: int = MAX_ADD_BYTES) -> Path:
+    """Re-encode `src` as Opus (VBR, the slowest/best setting) at the highest bitrate that keeps the file just under `limit`
+    (never above 256 kb/s, where Opus is transparent). Writes `dest` (.opus) and returns it."""
+    secs = _seconds(src)
+    if secs < 1:
+        raise ValueError("That link did not give an audio recording.")
+    kbps = min(256, int(limit * 0.96 * 8 / secs / 1000))
+    if kbps < 24:
+        raise ValueError(f"That recording is {secs / 3600:.1f} hours long: even at a low quality it will not fit in {limit // 1_000_000} MB.")
+    while True:
+        r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-c:a", "libopus", "-b:a", f"{kbps}k", "-vbr", "on",
+                            "-compression_level", "10", "-application", "audio", str(dest)], capture_output=True, text=True)
+        if r.returncode != 0:
+            dest.unlink(missing_ok=True)
+            raise ValueError("The recording could not be re-encoded: " + r.stderr.strip()[-200:])
+        if dest.stat().st_size <= limit or kbps <= 24:
+            return dest
+        kbps = max(24, int(kbps * limit / dest.stat().st_size * 0.95))       # still over: aim lower and try once more
+
+
+def add_url(url: str, title: str, artist: str = "", year: str = "", page: str = "", licence: str = "Added by the person") -> dict:
+    """Add a recording from outside Wikimedia Commons (an old cylinder or disc, say). The credit line says where it came from. A file
+    over MAX_ADD_BYTES is re-encoded as Opus to just under it. Returns the library entry."""
     tid = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
     if not tid:
         raise ValueError("Give the recording a title.")
@@ -136,16 +162,27 @@ def add_url(url: str, title: str, artist: str = "", year: str = "", page: str = 
     ext = Path(parsed.path).suffix.lower()
     ext = ext if ext in (".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".m4a", ".aac") else ".mp3"
     dest = LIB / (tid + ext)
-    with urllib.request.urlopen(urllib.request.Request(url, headers=covers.UA), timeout=300) as r:
-        data = r.read(MAX_ADD_BYTES + 1)
-    if len(data) > MAX_ADD_BYTES:
-        raise ValueError(f"That file is larger than {MAX_ADD_BYTES // 1_000_000} MB: a music track is much smaller.")
-    dest.write_bytes(data)
-    secs = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(dest)],
-                                capture_output=True, text=True).stdout.strip() or 0)
-    if secs < 1:
+    part = LIB / (tid + ".part" + ext)
+    try:
+        got = 0
+        with urllib.request.urlopen(urllib.request.Request(url, headers=covers.UA), timeout=300) as r, open(part, "wb") as out:
+            while chunk := r.read(1 << 20):
+                got += len(chunk)
+                if got > MAX_DOWNLOAD_BYTES:
+                    raise ValueError(f"That file is larger than {MAX_DOWNLOAD_BYTES // 1_000_000_000} GB.")
+                out.write(chunk)
+        if _seconds(part) < 1:
+            raise ValueError("That link did not give an audio recording.")
+        if got > MAX_ADD_BYTES:
+            dest = shrink_to_fit(part, LIB / (tid + ".opus"))
+        else:
+            part.rename(dest)
+    except BaseException:
         dest.unlink(missing_ok=True)
-        raise ValueError("That link did not give an audio recording.")
+        raise
+    finally:
+        part.unlink(missing_ok=True)
+    secs = _seconds(dest)
     credit = f"{title}, {artist or 'unknown artist'}" + (f", {year}" if year else "") + (f". {page}" if page else "") + f" ({licence})"
     entry = {"id": tid, "title": title, "artist": artist, "licence": licence, "seconds": round(secs), "file": dest.name, "credit": credit}
     _save(entries + [entry])

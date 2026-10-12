@@ -149,8 +149,8 @@ def cmd_music(a):
         print(f"Added to the library as '{e['id']}' ({e['seconds']} s, {e['licence']}).")
     elif a.op == "add-url":
         if not a.url or not a.url.startswith("https://") or not a.title:
-            sys.exit("add-url needs an https:// link and --title. Only for a link the person gave you and said is public domain.")
-        e = music.add_url(a.url, a.title, a.artist or "", a.year or "", a.page or "", a.licence or "Public domain (the person confirmed)")
+            sys.exit("add-url needs an https:// link and --title.")
+        e = music.add_url(a.url, a.title, a.artist or "", a.year or "", a.page or "", a.licence or "Added by the person")
         print(f"Added to the library as '{e['id']}' ({e['seconds']} s).")
     elif a.op == "bridge":
         plan = _plan()
